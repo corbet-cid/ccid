@@ -1,0 +1,18 @@
+schema = 1
+project = "ccid"
+
+[checks.test]
+kind = "commands"
+commands = [["bash", ".ci/build.sh", "test"]]
+
+[checks.build]
+kind = "commands"
+commands = [["bash", ".ci/build.sh"]]
+
+[checks.registry-publisher]
+kind = "commands"
+commands = [["python3", ".ci/registry_publish_test.py"]]
+
+[checks.hosted-contract]
+kind = "commands"
+commands = [["python3", ".ci/test_hosted_budget.py", "--lint"]]

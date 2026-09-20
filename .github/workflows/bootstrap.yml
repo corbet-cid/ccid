@@ -1,0 +1,294 @@
+name: ccid portable Linux bootstrap
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full ccid commit to build and test
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ccid-bootstrap-${{ inputs.source_revision }}
+  cancel-in-progress: false
+
+jobs:
+  linux-tool:
+    name: Linux portable tool
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Fetch the exact requested source
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          git init --initial-branch=source source
+          git -C source remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -C source -c protocol.version=2 fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_REVISION"
+      - name: Build once with the stable toolchain and run the full checks on the bounded runner
+        shell: bash
+        working-directory: source
+        env:
+          CI_COMMIT_SHA: ${{ inputs.source_revision }}
+          CI_REPOSITORY_URL: https://github.com/${{ github.repository }}
+          CI_JOBS: "4"
+          CI_TEST_THREADS: "4"
+          CI_MEMORY_MB: ""
+          CI_MEMORY_PER_JOB_MB: ""
+          CI_MIN_AVAILABLE_MB: "4096"
+          CI_TIMEOUT: "1800"
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ccid-target
+          CCID_OUTPUT_ROOT: ${{ runner.temp }}/ccid-artifacts
+          CI_CACHE_ROOT: ${{ runner.temp }}/ccid-cache
+          RUSTUP_TOOLCHAIN: stable
+          MODE: build
+        run: |
+          set -euo pipefail
+          rustup update stable --no-self-update
+          rustup run stable rustc --version --verbose
+          rustup run stable cargo --version --verbose
+          command -v rustc
+          command -v cargo
+          python3 .ci/bootstrap.py
+      - name: Verify and package the immutable receipt
+        shell: bash
+        working-directory: source
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          WORKFLOW_REVISION: ${{ github.workflow_sha }}
+          ARTIFACT_ROOT: ${{ runner.temp }}/ccid-artifacts
+          CARGO_TARGET_DIR: ${{ runner.temp }}/ccid-target
+        run: |
+          set -euo pipefail
+          target="$(rustup run stable rustc -vV | sed -n 's/^host: //p')"
+          artifact="$ARTIFACT_ROOT/$SOURCE_REVISION/$target"
+          test -x "$artifact/ccid"
+          test -f "$artifact/receipt.json"
+          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_revision"])' "$artifact/receipt.json")" = "$SOURCE_REVISION"
+          binary_sha256="$(sha256sum "$artifact/ccid" | cut -d' ' -f1)"
+          test "$binary_sha256" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["binary_sha256"])' "$artifact/receipt.json")"
+          rustc_version="$(rustup run stable rustc -vV)"
+          printf '%s\n' "$rustc_version" > "$artifact/toolchain.txt"
+          toolchain_sha256="$(sha256sum "$artifact/toolchain.txt" | cut -d' ' -f1)"
+          git -c protocol.version=2 fetch --no-tags --depth=1 origin "$WORKFLOW_REVISION"
+          workflow_sha256="$(git show "$WORKFLOW_REVISION:.github/workflows/bootstrap.yml" | sha256sum | cut -d' ' -f1)"
+          manifest_sha256="$(sha256sum .ci/ccid.toml | cut -d' ' -f1)"
+          lock_sha256="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          source_tree_sha256="$(git archive "$SOURCE_REVISION" | sha256sum | cut -d' ' -f1)"
+          python3 - "$artifact" "$SOURCE_REVISION" "$WORKFLOW_REVISION" "$target" "$binary_sha256" "$toolchain_sha256" "$workflow_sha256" "$manifest_sha256" "$lock_sha256" "$source_tree_sha256" "${{ github.run_id }}" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          toolchain = (root / 'toolchain.txt').read_text()
+          keys = ('source_revision', 'workflow_revision', 'target',
+                  'binary_sha256', 'rustc', 'toolchain_sha256',
+                  'workflow_sha256', 'manifest_sha256',
+                  'dependency_snapshot', 'source_tree_sha256',
+                  'release_tag', 'workflow_run_id')
+          values = (sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5],
+                    toolchain, sys.argv[6], sys.argv[7], sys.argv[8],
+                    sys.argv[9], sys.argv[10], 'ccid-' + sys.argv[2],
+                    int(sys.argv[11]))
+          (root / 'receipt.json').write_text(
+              json.dumps(dict(zip(keys, values)), sort_keys=True) + '\n')
+          PY
+      - name: Package the verified binary and receipt
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          ARTIFACT_ROOT: ${{ runner.temp }}/ccid-artifacts
+          ARCHIVE_ROOT: ${{ runner.temp }}/ccid-release
+        run: |
+          set -euo pipefail
+          artifact="$ARTIFACT_ROOT/$SOURCE_REVISION/x86_64-unknown-linux-gnu"
+          archive="$ARCHIVE_ROOT/ccid-$SOURCE_REVISION-linux-x86_64.zip"
+          test -x "$artifact/ccid"
+          test -f "$artifact/receipt.json"
+          mkdir -p "$ARCHIVE_ROOT"
+          python3 - "$artifact" "$archive" <<'PY'
+          import pathlib, sys, zipfile
+          source, destination = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
+              for name in ('ccid', 'receipt.json'):
+                  path = source / name
+                  info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = 0o100700 << 16 if name == 'ccid' else 0o100600 << 16
+                  bundle.writestr(info, path.read_bytes())
+          with zipfile.ZipFile(destination) as bundle:
+              if set(bundle.namelist()) != {'ccid', 'receipt.json'}:
+                  raise SystemExit('release archive entry set is not exact')
+          PY
+          sha256sum "$archive" | tee "$ARCHIVE_ROOT/archive.sha256"
+
+      - name: Transfer the verified release package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ccid-release-${{ inputs.source_revision }}
+          path: |
+            ${{ runner.temp }}/ccid-release/ccid-${{ inputs.source_revision }}-linux-x86_64.zip
+            ${{ runner.temp }}/ccid-release/archive.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish Linux release asset
+    needs: linux-tool
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download the verified release package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ccid-release-${{ inputs.source_revision }}
+          path: ${{ runner.temp }}/ccid-release
+      - name: Publish or reuse the exact immutable release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          WORKFLOW_REVISION: ${{ github.workflow_sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          ARCHIVE_ROOT: ${{ runner.temp }}/ccid-release
+        run: |
+          set -euo pipefail
+          tag="ccid-$SOURCE_REVISION"
+          asset="ccid-$SOURCE_REVISION-linux-x86_64.zip"
+          archive="$ARCHIVE_ROOT/$asset"
+          test -f "$archive"
+          test "$(stat -c%s "$archive")" -le 33554432
+          test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$ARCHIVE_ROOT/archive.sha256")"
+          python3 - "$archive" "$SOURCE_REVISION" "$WORKFLOW_REVISION" "$WORKFLOW_RUN_ID" <<'PY'
+          import hashlib, json, pathlib, sys, zipfile
+          archive, revision, workflow_revision, workflow_run_id = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+          with zipfile.ZipFile(archive) as bundle:
+              entries = bundle.infolist()
+              if [entry.filename for entry in entries] != ['ccid', 'receipt.json']:
+                  raise SystemExit('release archive entries are not exact')
+              if any(entry.file_size > (32 * 1024 * 1024 if entry.filename == 'ccid' else 128 * 1024) for entry in entries):
+                  raise SystemExit('release archive entry exceeds its bound')
+              receipt = json.loads(bundle.read('receipt.json'))
+              binary = bundle.read('ccid')
+          if (receipt.get('source_revision') != revision
+                  or receipt.get('release_tag') != 'ccid-' + revision
+                  or receipt.get('target') != 'x86_64-unknown-linux-gnu'
+                  or receipt.get('binary_sha256') != hashlib.sha256(binary).hexdigest()
+                  or receipt.get('workflow_revision') != workflow_revision
+                  or not isinstance(receipt.get('workflow_sha256'), str)
+                  or receipt.get('workflow_run_id') != workflow_run_id
+                  or workflow_run_id <= 0):
+              raise SystemExit('release receipt identity mismatch')
+          PY
+          # Read the receipt from the ZIP without trusting an extracted path.
+          receipt_workflow_revision="$(python3 - "$archive" <<'PY'
+          import json, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as bundle:
+              print(json.loads(bundle.read('receipt.json'))['workflow_revision'])
+          PY
+          )"
+          expected_workflow_sha256="$(python3 - "$archive" <<'PY'
+          import json, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as bundle:
+              print(json.loads(bundle.read('receipt.json'))['workflow_sha256'])
+          PY
+          )"
+          workflow_json="$ARCHIVE_ROOT/workflow.json"
+          gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/bootstrap.yml?ref=$receipt_workflow_revision" >"$workflow_json"
+          python3 - "$archive" "$workflow_json" <<'PY'
+          import base64, hashlib, json, sys, zipfile
+          archive, metadata = sys.argv[1], sys.argv[2]
+          with zipfile.ZipFile(archive) as bundle:
+              receipt = json.loads(bundle.read('receipt.json'))
+          encoded = json.load(open(metadata)).get('content', '').replace('\n', '').replace('\r', '')
+          if hashlib.sha256(base64.b64decode(encoded, validate=True)).hexdigest() != receipt['workflow_sha256']:
+              raise SystemExit('bootstrap workflow digest does not match receipt')
+          PY
+          repository_url="https://github.com/$GITHUB_REPOSITORY.git"
+          tag_refs="$(git ls-remote "$repository_url" "refs/tags/$tag" "refs/tags/$tag^{}")"
+          tag_sha="$(awk -v ref="refs/tags/$tag" '$2 == ref {print $1}' <<<"$tag_refs")"
+          peeled_sha="$(awk -v ref="refs/tags/$tag^{}" '$2 == ref {print $1}' <<<"$tag_refs")"
+          if [[ -n "$tag_sha" ]]; then
+            test "${peeled_sha:-$tag_sha}" = "$SOURCE_REVISION"
+          fi
+          release="$ARCHIVE_ROOT/release.json"
+          release_http="$(curl --silent --show-error --max-time 60 --proto '=https' --header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2026-03-10' --output "$release" --write-out '%{http_code}' "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          case "$release_http" in
+            200) ;;
+            404) test -z "$tag_sha" ;;
+            *) echo "unexpected release lookup HTTP $release_http" >&2; exit 1 ;;
+          esac
+          if [[ "$release_http" == 200 ]]; then
+            test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$release")" = "$tag"
+            asset_count="$(python3 - "$release" "$asset" <<'PY'
+          import json, sys
+          assets = json.load(open(sys.argv[1])).get('assets', [])
+          print(sum(item.get('name') == sys.argv[2] for item in assets))
+          PY
+            )"
+            case "$asset_count" in
+              1) ;;
+              0) test -n "$tag_sha" ;;
+              *) echo 'release contains duplicate exact asset names' >&2; exit 1 ;;
+            esac
+            if [[ "$asset_count" == 1 ]]; then
+              existing="$ARCHIVE_ROOT/existing.zip"
+              asset_url="$(python3 - "$release" "$asset" <<'PY'
+          import json, sys
+          matches = [item for item in json.load(open(sys.argv[1])).get('assets', []) if item.get('name') == sys.argv[2]]
+          print(matches[0]['browser_download_url'])
+          PY
+              )"
+              expected_remote_sha="$(python3 - "$release" "$asset" <<'PY'
+          import json, sys
+          matches = [item for item in json.load(open(sys.argv[1])).get('assets', []) if item.get('name') == sys.argv[2]]
+          digest = matches[0].get('digest', '')
+          if not digest.startswith('sha256:'):
+              raise SystemExit('existing asset lacks a SHA-256 digest')
+          print(digest[7:])
+          PY
+              )"
+              curl --fail --location --max-redirs 5 --proto '=https' --proto-redir '=https' --max-filesize 33554432 --max-time 60 --output "$existing" "$asset_url"
+              test "$(stat -c%s "$existing")" -le 33554432
+              test "$(sha256sum "$existing" | cut -d' ' -f1)" = "$expected_remote_sha"
+              python3 - "$existing" "$SOURCE_REVISION" "$expected_workflow_sha256" "$WORKFLOW_REVISION" "$WORKFLOW_RUN_ID" <<'PY'
+          import hashlib, json, pathlib, sys, zipfile
+          archive, revision, workflow_sha256, workflow_revision, workflow_run_id = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+          with zipfile.ZipFile(archive) as bundle:
+              entries = bundle.infolist()
+              if [entry.filename for entry in entries] != ['ccid', 'receipt.json']:
+                  raise SystemExit('existing release asset entries are not exact')
+              if any(entry.file_size > (32 * 1024 * 1024 if entry.filename == 'ccid' else 128 * 1024) for entry in entries):
+                  raise SystemExit('existing release asset entry exceeds its bound')
+              receipt = json.loads(bundle.read('receipt.json'))
+              binary = bundle.read('ccid')
+              if (receipt.get('source_revision') != revision
+                      or receipt.get('release_tag') != 'ccid-' + revision
+                      or receipt.get('target') != 'x86_64-unknown-linux-gnu'
+                      or receipt.get('binary_sha256') != hashlib.sha256(binary).hexdigest()
+                      or receipt.get('workflow_sha256') != workflow_sha256
+                      or receipt.get('workflow_revision') != workflow_revision
+                      or receipt.get('workflow_run_id') != workflow_run_id
+                      or workflow_run_id <= 0):
+                  raise SystemExit('existing release asset identity mismatch')
+          PY
+              exit 0
+            fi
+          fi
+          if [[ -n "$tag_sha" ]]; then
+            test "$release_http" = 200
+            gh release upload "$tag" "$archive" --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" "$archive" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_REVISION" --title "$tag" --notes "Immutable ccid Linux tool for source $SOURCE_REVISION."
+          fi

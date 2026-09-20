@@ -1,0 +1,343 @@
+name: ccid reusable Linux check
+
+on:
+  workflow_call:
+    inputs:
+      source_commit:
+        description: Full caller commit to check
+        required: true
+        type: string
+      checks:
+        description: Exact comma-separated ccid check selectors
+        required: true
+        type: string
+      request_id:
+        description: Caller correlation identifier
+        required: true
+        type: string
+      dependency_snapshot:
+        description: SHA-256 recorded by the caller at the committed dependency snapshot
+        required: true
+        type: string
+      tool_revision:
+        description: Full ccid source revision represented by the downloaded binary
+        required: true
+        type: string
+      tool_run_id:
+        description: Completed bootstrap workflow run producing the release asset
+        required: true
+        type: string
+      tool_asset_id:
+        description: Exact release asset id from the bootstrap run
+        required: true
+        type: string
+      tool_archive_sha256:
+        description: SHA-256 of the exact public release ZIP
+        required: true
+        type: string
+      tool_binary_sha256:
+        description: Expected SHA-256 of the ccid binary
+        required: true
+        type: string
+      manifest_sha256:
+        description: SHA-256 of the caller's committed .ci/ccid.toml
+        required: true
+        type: string
+      config_sha256:
+        description: SHA-256 of the caller's committed .ci/providers.toml
+        required: true
+        type: string
+      tool_bootstrap_sha256:
+        description: SHA-256 of the producing bootstrap workflow bytes
+        required: true
+        type: string
+
+      ci_jobs:
+        description: Positive Cargo and command CPU allocation
+        required: false
+        type: number
+        default: 4
+      ci_test_threads:
+        description: Positive test thread allocation
+        required: false
+        type: number
+        default: 4
+      ci_min_available_mb:
+        description: Memory reserve required before starting checks
+        required: false
+        type: number
+        default: 4096
+      ci_timeout:
+        description: Positive selected-check deadline in seconds
+        required: false
+        type: number
+        default: 1800
+      setup_rust:
+        description: Refresh the stable toolchain when selected checks use Rust
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  check:
+    name: ccid/${{ inputs.request_id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      CHECKS: ${{ inputs.checks }}
+      REQUEST_ID: ${{ inputs.request_id }}
+      DEPENDENCY_SNAPSHOT: ${{ inputs.dependency_snapshot }}
+      TOOL_REVISION: ${{ inputs.tool_revision }}
+      TOOL_RUN_ID: ${{ inputs.tool_run_id }}
+      TOOL_ASSET_ID: ${{ inputs.tool_asset_id }}
+      TOOL_ARCHIVE_SHA256: ${{ inputs.tool_archive_sha256 }}
+      TOOL_BINARY_SHA256: ${{ inputs.tool_binary_sha256 }}
+      MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+      CONFIG_SHA256: ${{ inputs.config_sha256 }}
+      TOOL_BOOTSTRAP_SHA256: ${{ inputs.tool_bootstrap_sha256 }}
+      CI_JOBS: ${{ inputs.ci_jobs }}
+      CI_TEST_THREADS: ${{ inputs.ci_test_threads }}
+      CI_MIN_AVAILABLE_MB: ${{ inputs.ci_min_available_mb }}
+      CI_TIMEOUT: ${{ inputs.ci_timeout }}
+      RUSTUP_TOOLCHAIN: stable
+      CI_REPOSITORY_URL: https://github.com/${{ github.repository }}
+      CI_COMMIT_SHA: ${{ inputs.source_commit }}
+    steps:
+      - name: Initialize run directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            "CI_CACHE_ROOT=$RUNNER_TEMP/ccid-cache" \
+            "SOURCE_ROOT=$RUNNER_TEMP/ccid-source" \
+            "TOOL_ROOT=$RUNNER_TEMP/ccid-tool" \
+            "RESULT_ROOT=$RUNNER_TEMP/ccid-result" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ccid-result"
+      - name: Validate resource allocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variable in CI_JOBS CI_TEST_THREADS CI_MIN_AVAILABLE_MB CI_TIMEOUT; do
+            [[ "${!variable}" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid positive resource input: $variable" >&2; exit 2; }
+          done
+      - name: Validate immutable inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TOOL_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPENDENCY_SNAPSHOT" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TOOL_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TOOL_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$CONFIG_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TOOL_BOOTSTRAP_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$TOOL_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TOOL_ASSET_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$REQUEST_ID" =~ ^[A-Za-z0-9_.:-]+$ ]]
+          [[ "$CHECKS" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]]
+          mkdir -p "$SOURCE_ROOT" "$TOOL_ROOT" "$RESULT_ROOT"
+      - name: Fetch and guard the exact caller source
+        shell: bash
+        env:
+          SOURCE_URL: https://github.com/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          git init --initial-branch=source "$SOURCE_ROOT"
+          git -C "$SOURCE_ROOT" remote add origin "$SOURCE_URL"
+          git -C "$SOURCE_ROOT" -c protocol.version=2 fetch --no-tags --depth=1 origin "$SOURCE_COMMIT"
+          git -C "$SOURCE_ROOT" checkout --detach FETCH_HEAD
+          test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test -f "$SOURCE_ROOT/.ci/ccid.toml"
+          test -f "$SOURCE_ROOT/.ci/providers.toml"
+          test "$(sha256sum "$SOURCE_ROOT/.ci/ccid.toml" | cut -d' ' -f1)" = "$MANIFEST_SHA256"
+          test "$(sha256sum "$SOURCE_ROOT/.ci/providers.toml" | cut -d' ' -f1)" = "$CONFIG_SHA256"
+          python3 - "$SOURCE_ROOT" "$DEPENDENCY_SNAPSHOT" <<'PY'
+          import hashlib, json, os, pathlib, sys, tomllib
+          root, expected = pathlib.Path(sys.argv[1]), sys.argv[2]
+          config = tomllib.loads((root / '.ci/providers.toml').read_text())
+          selected = os.environ['CHECKS'].split(',')
+          reviewed = config.get('github', {}).get('checks', [])
+          if not selected or len(set(selected)) != len(selected) or not set(selected).issubset(reviewed):
+              raise SystemExit('Selected checks are outside the reviewed public provider contract')
+          resources = config.get('github', {}).get('resources')
+          variables = {'jobs': 'CI_JOBS', 'test_threads': 'CI_TEST_THREADS',
+                       'minimum_available_mb': 'CI_MIN_AVAILABLE_MB', 'timeout': 'CI_TIMEOUT'}
+          if resources is not None and (set(resources) != set(variables) or any(
+                  type(resources[name]) is not int or resources[name] != int(os.environ[variable])
+                  for name, variable in variables.items())):
+              raise SystemExit('Hosted allocation differs from the committed provider contract')
+          files = config.get('dependencies', {}).get('files')
+          if not isinstance(files, list) or not files or any(not isinstance(path, str) for path in files):
+              raise SystemExit('dependencies.files must be a nonempty string list')
+          if len(set(files)) != len(files):
+              raise SystemExit('dependencies.files contains duplicates')
+          mapping = {}
+          for name in files:
+              relative = pathlib.PurePosixPath(name)
+              if relative.is_absolute() or '..' in relative.parts:
+                  raise SystemExit(f'unsafe dependency path: {name}')
+              path = root / pathlib.Path(*relative.parts)
+              if path.is_symlink() or not path.is_file():
+                  raise SystemExit(f'dependency file is not a regular file: {name}')
+              mapping[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+          payload = json.dumps(mapping, sort_keys=True, separators=(',', ':')).encode()
+          actual = hashlib.sha256(payload).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'dependency snapshot mismatch: {actual}')
+          PY
+      - name: Download the exact public ccid release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="ccid-$TOOL_REVISION-linux-x86_64.zip"
+          tag="ccid-$TOOL_REVISION"
+          url="https://github.com/corbet-labs/ccid/releases/download/$tag/$asset"
+          mkdir -p "$TOOL_ROOT"
+          curl --fail --location --max-redirs 5 --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize 33554432 --max-time 60 --output "$TOOL_ROOT/archive.zip" "$url"
+          test "$(stat -c%s "$TOOL_ROOT/archive.zip")" -le 33554432
+          test "$(sha256sum "$TOOL_ROOT/archive.zip" | cut -d' ' -f1)" = "$TOOL_ARCHIVE_SHA256"
+      - name: Verify tool identity and artifact contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$TOOL_ROOT/archive.zip" "$TOOL_ROOT" <<'PY'
+          import pathlib, sys, zipfile
+          archive, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          with zipfile.ZipFile(archive) as bundle:
+              entries = bundle.infolist()
+              if [entry.filename for entry in entries] != ['ccid', 'receipt.json']:
+                  raise SystemExit('release archive entries are not exact')
+              if any(entry.file_size > (32 * 1024 * 1024 if entry.filename == 'ccid' else 128 * 1024) for entry in entries):
+                  raise SystemExit('release archive entry exceeds its bound')
+              for entry in entries:
+                  (root / entry.filename).write_bytes(bundle.read(entry))
+          PY
+          test -f "$TOOL_ROOT/receipt.json"
+          test "$(sha256sum "$TOOL_ROOT/ccid" | cut -d' ' -f1)" = "$TOOL_BINARY_SHA256"
+          chmod 700 "$TOOL_ROOT/ccid"
+          test -x "$TOOL_ROOT/ccid"
+          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_revision"])' "$TOOL_ROOT/receipt.json")" = "$TOOL_REVISION"
+          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["binary_sha256"])' "$TOOL_ROOT/receipt.json")" = "$TOOL_BINARY_SHA256"
+          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["target"])' "$TOOL_ROOT/receipt.json")" = "x86_64-unknown-linux-gnu"
+          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workflow_sha256"])' "$TOOL_ROOT/receipt.json")" = "$TOOL_BOOTSTRAP_SHA256"
+          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_tag"])' "$TOOL_ROOT/receipt.json")" = "ccid-$TOOL_REVISION"
+          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workflow_run_id"])' "$TOOL_ROOT/receipt.json")" = "$TOOL_RUN_ID"
+          test "$("$TOOL_ROOT/ccid" source-revision)" = "$TOOL_REVISION"
+      - name: Refresh the selected stable Rust toolchain
+        if: inputs.setup_rust
+        shell: bash
+        run: rustup update stable --no-self-update
+      - name: Run the exact selected checks
+        id: selected_checks
+        shell: bash
+        run: |
+          set +e
+          "$TOOL_ROOT/ccid" check --repo "$SOURCE_ROOT" --check "$CHECKS" 2>&1 | tee "$RESULT_ROOT/check.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > "$RESULT_ROOT/status"
+          exit 0
+      - name: Revalidate source and dependency locks after checks
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          prior="$(cat "$RESULT_ROOT/status" 2>/dev/null || printf '125')"
+          guard=0
+          if [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" != "$SOURCE_COMMIT" ]]; then guard=1; fi
+          if ! git -C "$SOURCE_ROOT" diff --quiet || [[ -n "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=all)" ]]; then guard=1; fi
+          if [[ "$(sha256sum "$SOURCE_ROOT/.ci/ccid.toml" | cut -d' ' -f1)" != "$MANIFEST_SHA256" ]]; then guard=1; fi
+          if [[ "$(sha256sum "$SOURCE_ROOT/.ci/providers.toml" | cut -d' ' -f1)" != "$CONFIG_SHA256" ]]; then guard=1; fi
+          if ! python3 - "$SOURCE_ROOT" "$DEPENDENCY_SNAPSHOT" <<'PY'
+          import hashlib, json, pathlib, sys, tomllib
+          root, expected = pathlib.Path(sys.argv[1]), sys.argv[2]
+          files = tomllib.loads((root / '.ci/providers.toml').read_text()).get('dependencies', {}).get('files')
+          if not isinstance(files, list) or not files or len(set(files)) != len(files):
+              raise SystemExit(1)
+          mapping = {}
+          for name in files:
+              relative = pathlib.PurePosixPath(name)
+              if relative.is_absolute() or '..' in relative.parts:
+                  raise SystemExit(1)
+              path = root / pathlib.Path(*relative.parts)
+              if path.is_symlink() or not path.is_file():
+                  raise SystemExit(1)
+              mapping[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+          actual = hashlib.sha256(json.dumps(mapping, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+          raise SystemExit(0 if actual == expected else 1)
+          PY
+          then guard=1; fi
+          printf '%s\n' "$guard" > "$RESULT_ROOT/guard_status"
+          if [[ "$guard" != 0 && "$prior" == 0 ]]; then prior=125; fi
+          printf '%s\n' "$prior" > "$RESULT_ROOT/status"
+          if [[ "$guard" != 0 ]]; then echo 'post-check provenance guard failed' > "$RESULT_ROOT/guard.log"; fi
+      - name: Write the result receipt
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(cat "$RESULT_ROOT/status" 2>/dev/null || printf '125')"
+          guard_status="$(cat "$RESULT_ROOT/guard_status" 2>/dev/null || printf '1')"
+          rustc_version="$(rustup run stable rustc -vV 2>/dev/null || true)"
+          node_version="$(node --version 2>/dev/null || true)"
+          bun_version="$(bun --version 2>/dev/null || true)"
+          python3 - "$RESULT_ROOT" "$SOURCE_COMMIT" "$CHECKS" "$REQUEST_ID" "$DEPENDENCY_SNAPSHOT" "$TOOL_REVISION" "$TOOL_RUN_ID" "$TOOL_ASSET_ID" "$TOOL_ARCHIVE_SHA256" "$TOOL_BINARY_SHA256" "$MANIFEST_SHA256" "$CONFIG_SHA256" "$TOOL_BOOTSTRAP_SHA256" "$status" "$guard_status" "$rustc_version" "$node_version" "$bun_version" <<'PY'
+          import json, os, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          allocations = []
+          if (root / 'check.log').is_file():
+              for line in (root / 'check.log').read_text(errors='replace').splitlines():
+                  try:
+                      event = json.loads(line)
+                  except ValueError:
+                      continue
+                  if isinstance(event, dict) and event.get('event') == 'allocation':
+                      allocations.append(event.get('budget'))
+          expected_budget = {name: int(os.environ[variable]) for name, variable in (
+              ('jobs', 'CI_JOBS'), ('test_threads', 'CI_TEST_THREADS'), ('timeout', 'CI_TIMEOUT'))}
+          budget = allocations[0] if len(allocations) == 1 else None
+          if int(sys.argv[14]) == 0 and (not isinstance(budget, dict) or
+                  any(type(budget.get(name)) is not int or budget[name] != value for name, value in expected_budget.items())):
+              (root / 'status').write_text('125\n')
+              raise SystemExit('Successful check lacks its exact requested resource allocation')
+          (root / 'result.json').write_text(json.dumps({
+              'source_commit': sys.argv[2],
+              'checks': sys.argv[3],
+              'request_id': sys.argv[4],
+              'dependency_snapshot': sys.argv[5],
+              'tool_revision': sys.argv[6],
+              'tool_run_id': int(sys.argv[7]),
+              'tool_asset_id': int(sys.argv[8]),
+              'tool_archive_sha256': sys.argv[9],
+              'tool_binary_sha256': sys.argv[10],
+              'manifest_sha256': sys.argv[11],
+              'config_sha256': sys.argv[12],
+              'tool_bootstrap_sha256': sys.argv[13],
+              'exit_code': int(sys.argv[14]),
+              'guard_status': int(sys.argv[15]),
+              'rustc': sys.argv[16],
+              'node': sys.argv[17],
+              'bun': sys.argv[18],
+              'python': sys.version,
+              'budget': budget,
+              'minimum_available_mb': int(os.environ['CI_MIN_AVAILABLE_MB']),
+          }, sort_keys=True) + '\n')
+          PY
+      - name: Upload the result receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ccid-result-${{ inputs.request_id }}
+          path: ${{ runner.temp }}/ccid-result
+          if-no-files-found: error
+          retention-days: 7
+      - name: Return the selected-check result
+        if: always()
+        shell: bash
+        run: exit "$(cat "$RESULT_ROOT/status" 2>/dev/null || printf '125')"

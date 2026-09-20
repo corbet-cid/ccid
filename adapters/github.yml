@@ -1,0 +1,86 @@
+# The dispatcher supplies reviewed immutable inputs; no project-specific runner.
+name: Reviewed public checks
+run-name: ccid/${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full source commit selected by the reviewed dispatcher
+        type: string
+        required: true
+      checks:
+        description: Exact reviewed selector from .ci/ccid.toml
+        type: string
+        required: true
+      request_id:
+        description: Dispatcher correlation identity
+        type: string
+        required: true
+      dependency_snapshot:
+        description: Committed dependency snapshot SHA-256
+        type: string
+        required: true
+      tool_revision:
+        description: Verified portable ccid source revision
+        type: string
+        required: true
+      tool_run_id:
+        description: Successful portable bootstrap run identity
+        type: string
+        required: true
+      tool_asset_id:
+        description: Exact portable binary release asset identity
+        type: string
+        required: true
+      tool_archive_sha256:
+        description: Portable binary ZIP SHA-256
+        type: string
+        required: true
+      tool_binary_sha256:
+        description: Portable binary SHA-256
+        type: string
+        required: true
+      manifest_sha256:
+        description: Committed ccid manifest SHA-256
+        type: string
+        required: true
+      config_sha256:
+        description: Committed provider mapping SHA-256
+        type: string
+        required: true
+      tool_bootstrap_sha256:
+        description: Verified producing bootstrap workflow SHA-256
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ccid-${{ inputs.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.event.repository.private == false
+    uses: corbet-labs/ccid/.github/workflows/reusable-check.yml@a0430c3a77c79cb921b0d8d8574903ff7d96945a
+    with:
+      source_commit: ${{ inputs.source_commit }}
+      checks: ${{ inputs.checks }}
+      request_id: ${{ inputs.request_id }}
+      dependency_snapshot: ${{ inputs.dependency_snapshot }}
+      tool_revision: ${{ inputs.tool_revision }}
+      tool_run_id: ${{ inputs.tool_run_id }}
+      tool_asset_id: ${{ inputs.tool_asset_id }}
+      tool_archive_sha256: ${{ inputs.tool_archive_sha256 }}
+      tool_binary_sha256: ${{ inputs.tool_binary_sha256 }}
+      manifest_sha256: ${{ inputs.manifest_sha256 }}
+      config_sha256: ${{ inputs.config_sha256 }}
+      tool_bootstrap_sha256: ${{ inputs.tool_bootstrap_sha256 }}
+      ci_jobs: 1
+      ci_test_threads: 1
+      ci_min_available_mb: 8192
+      ci_timeout: 120
+      setup_rust: false
