@@ -834,7 +834,11 @@ class Remote:
             payload = struct.pack("<I", len(metadata)) + metadata + struct.pack("<I", len(archive)) + archive
             result = self.http.json("PUT", "https://crates.io/api/v1/crates/new", data=payload,
                                     headers={"Authorization": token, "Content-Type": "application/octet-stream"})
-            require(result.get("ok") is True and not result.get("errors"), "Cargo did not confirm publication")
+            # Cargo's publish response contains optional warnings, not the
+            # `ok: true` field used by the yank/owner endpoints. Exact registry
+            # downloads still establish completion in the publication journal.
+            require(isinstance(result, dict) and not result.get("errors")
+                    and ("ok" not in result or result["ok"] is True), "Cargo did not confirm publication")
             return
         if registry == "pypi":
             artifact = data["python"][unit]

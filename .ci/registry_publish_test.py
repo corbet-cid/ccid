@@ -620,6 +620,28 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaises(pub.Failure):
             pub.rewrite_imports(b"import value from 'dep';", {"dep": "1.2.3"})
 
+    def test_cargo_publish_accepts_documented_response_and_preserves_exact_bytes(self):
+        bundle = SimpleNamespace(name="widget", version="1.2.3", repository=REPOSITORY)
+        archive = b"exact tested crate bytes"
+        metadata = {"name": "widget", "vers": "1.2.3"}
+        data = {"artifacts": {"widget-1.2.3.crate": archive}, "cargo_metadata": metadata}
+        for response in ({}, {"warnings": {"invalid_categories": [], "invalid_badges": [], "other": []}}, {"ok": True}):
+            with self.subTest(response=response):
+                http = SimpleNamespace(json=mock.Mock(return_value=response))
+                pub.Remote(bundle, http=http, environment={}).upload("cargo", "widget-1.2.3.crate", data, "fixture-token")
+                http.json.assert_called_once()
+                args, options = http.json.call_args
+                self.assertEqual(args, ("PUT", "https://crates.io/api/v1/crates/new"))
+                payload = options["data"]
+                length = pub.struct.unpack("<I", payload[:4])[0]
+                self.assertEqual(json.loads(payload[4:4 + length]), metadata)
+                self.assertEqual(pub.struct.unpack("<I", payload[4 + length:8 + length])[0], len(archive))
+                self.assertEqual(payload[8 + length:], archive)
+        for response in ({"errors": [{"detail": "rejected"}]}, {"ok": False}, {"ok": "true"}, [], None):
+            with self.subTest(response=response), self.assertRaises(pub.Failure):
+                http = SimpleNamespace(json=mock.Mock(return_value=response))
+                pub.Remote(bundle, http=http, environment={}).upload("cargo", "widget-1.2.3.crate", data, "fixture-token")
+
     def test_npm_upload_is_one_put_with_exact_archive(self):
         bundle = SimpleNamespace(name="widget", version="1.2.3", repository=REPOSITORY)
         http = FakeHttp()
