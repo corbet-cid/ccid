@@ -573,6 +573,24 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(pub.Failure, "conflicting"):
             npm_fixture(extra_source={"js/@example/widget/package.json": pub.json_bytes({**manifest, "license": "unreviewed"})})
 
+    def test_npm_scope_follows_committed_manifest_not_repository_owner(self):
+        def inspect(source, name):
+            bundle = pub.Bundle.__new__(pub.Bundle)
+            bundle.name, bundle.version, bundle.repository = "widget", "1.2.3", REPOSITORY
+            manifest = {"name": name, "version": "1.2.3", "license": "MIT"}
+            filename = name.replace("@", "").replace("/", "-") + "-1.2.3.tgz"
+            data = {"source": {path: pub.json_bytes(manifest) for path in source},
+                    "receipt": {"check": "js-package"}, "identity": {"producing_commit": COMMIT},
+                    "artifacts": {filename: tar({"package/package.json": pub.json_bytes(manifest)})}}
+            bundle.inspect_javascript(data, "npm")
+            return data["js_name"]
+        self.assertEqual(inspect(["js/@labs/widget/package.json"], "@labs/widget"), "@labs/widget")
+        self.assertEqual(inspect(["web/package.json"], "@labs/widget"), "@labs/widget")
+        with self.assertRaisesRegex(pub.Failure, "Ambiguous"):
+            inspect(["js/@labs/widget/package.json", "js/@other/widget/package.json"], "@labs/widget")
+        with self.assertRaisesRegex(pub.Failure, "identity mismatch"):
+            inspect(["js/@labs/widget/package.json"], "@other/widget")
+
     def test_import_keeps_old_producer_and_distinct_tag(self):
         bundle, files = cargo_fixture()
         self.assertEqual(bundle.channels["cargo"]["identity"]["producing_commit"], COMMIT)

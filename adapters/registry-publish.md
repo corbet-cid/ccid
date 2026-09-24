@@ -54,8 +54,12 @@ producing commit. Different channels may deliberately use different tested
 commits of the same package version, and the existing tag may differ; all those
 identities are preserved and the live tag must match the declared tag target.
 
-For npm, the source manifest may be at `js/@<owner>/<package>/package.json`
+For npm, the source manifest may be at `js/@<scope>/<package>/package.json`
 or `web/package.json`. If both exist they must describe the same manifest.
+The npm/JSR scope is read from the committed source (one `js/@<scope>/`
+directory, else the `web/package.json` name) and falls back to the GitHub
+owner only when neither exists: registry names never follow the organization
+that hosts the source. More than one scope directory is refused.
 The archived manifest must equal that source manifest, except that npm may add
 `gitHead` equal to the exact producing commit. This verified value is retained
 in the registry metadata; other generated manifest changes are rejected.

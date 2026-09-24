@@ -442,12 +442,26 @@ class Bundle:
         metadata.update(license_file=package.get("license-file"), keywords=package.get("keywords", []), categories=package.get("categories", []))
         data["cargo_metadata"] = metadata
 
+    def javascript_scope(self, source):
+        """Return the committed npm/JSR scope; registry names never follow the GitHub owner."""
+        pattern = r"js/(@[a-z0-9][a-z0-9._-]*)/" + re.escape(self.name) + r"/package\.json"
+        scopes = {match[1] for match in (re.fullmatch(pattern, path) for path in source) if match}
+        require(len(scopes) <= 1, "Ambiguous JavaScript package scope")
+        if scopes:
+            return scopes.pop()
+        if "web/package.json" in source:
+            name = json.loads(source["web/package.json"]).get("name", "")
+            if re.fullmatch(r"@[a-z0-9][a-z0-9._-]*/" + re.escape(self.name), name):
+                return name.split("/")[0]
+        return "@" + self.repository.split("/")[0]
+
     def inspect_javascript(self, data, registry):
         if registry == "jsr" and data["receipt"].get("layout") == "web-wasm-v1":
             self.inspect_generated_jsr(data)
             return
         source = data["source"]
-        prefix = "js/@" + self.repository.split("/")[0] + "/" + self.name + "/"
+        scope = self.javascript_scope(source)
+        prefix = "js/" + scope + "/" + self.name + "/"
         if registry == "npm":
             candidates = [path for path in (prefix, "web/") if path + "package.json" in source]
             require(bool(candidates), "JavaScript source manifest is missing")
@@ -456,7 +470,7 @@ class Bundle:
                     "Discovered JavaScript source manifests are conflicting")
             prefix = candidates[0]
         manifest = json.loads(source[prefix + "package.json"])
-        require(manifest["name"] == "@" + self.repository.split("/")[0] + "/" + self.name and manifest["version"] == self.version, "JavaScript package identity mismatch")
+        require(manifest["name"] == scope + "/" + self.name and manifest["version"] == self.version, "JavaScript package identity mismatch")
         require(not manifest.get("private") and "packageExtensions" not in manifest, "JavaScript manifest forbids publication")
         data["js_name"] = manifest["name"]
         data["js_manifest"] = manifest
@@ -483,7 +497,7 @@ class Bundle:
         expected["README.md"] = source["README.md"]
         licenses = {name: value for name, value in source.items() if name.startswith("LICENSES/")}
         for dependency in manifest.get("dependencies", {}):
-            component = dependency.removeprefix("@" + self.repository.split("/")[0] + "/")
+            component = dependency.removeprefix(scope + "/")
             prefix_license = "typst/vendor/" + component + "/LICENSES/"
             for name, value in source.items():
                 if name.startswith(prefix_license):
@@ -519,7 +533,7 @@ class Bundle:
         source, receipt = data["source"], data["receipt"]
         require(receipt["check"] == "jsr-package", "Generated JSR requires its own preparation check")
         origin = json.loads(source[".ci/jsr-input.json"])
-        name = "@" + self.repository.split("/")[0] + "/" + self.name
+        name = self.javascript_scope(source) + "/" + self.name
         require(receipt.get("original_npm") == origin and origin.get("schema") == 1
                 and origin.get("package") == name and origin.get("version") == self.version
                 and re.fullmatch(r"[0-9a-f]{40}", origin.get("source_commit", ""))
