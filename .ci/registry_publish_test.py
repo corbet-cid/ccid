@@ -573,6 +573,11 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(pub.Failure, "conflicting"):
             npm_fixture(extra_source={"js/@example/widget/package.json": pub.json_bytes({**manifest, "license": "unreviewed"})})
 
+    def test_upload_timeout_scales_with_request_size(self):
+        self.assertEqual(pub.request_timeout(None), 60)
+        self.assertEqual(pub.request_timeout(b"x" * (64 * 1024 * 300)), 360)
+        self.assertEqual(pub.request_timeout(b"x" * (200 * 1024 * 1024)), 1800)
+
     def test_npm_scope_follows_committed_manifest_not_repository_owner(self):
         def inspect(source, name):
             bundle = pub.Bundle.__new__(pub.Bundle)

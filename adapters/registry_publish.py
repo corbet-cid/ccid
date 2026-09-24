@@ -716,6 +716,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def request_timeout(data):
+    """Socket timeout for one request: uploads get time proportional to their size.
+
+    A flat 60 s cut off a 19 MB npm upload while the registry was still
+    processing it, which leaves an uncertain outcome that must not be retried.
+    Budget 64 KiB/s of upload bandwidth on top of the base, capped at 30 min.
+    """
+    return min(1800, 60 + len(data or b"") // (64 * 1024))
+
+
 class Http:
     def request(self, method, url, *, data=None, headers=None, missing=False, download=False, limit=MAX_BYTES):
         parsed = urllib.parse.urlsplit(url)
@@ -723,7 +733,7 @@ class Http:
         request_headers = {"User-Agent": USER_AGENT, "Cache-Control": "no-cache", **(headers or {})}
         request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
         try:
-            with urllib.request.build_opener(NoRedirect()).open(request, timeout=60) as response:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=request_timeout(data)) as response:
                 payload = response.read(limit + 1)
                 require(len(payload) <= limit, "Remote payload exceeds expected bounds")
                 return payload
