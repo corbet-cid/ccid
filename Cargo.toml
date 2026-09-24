@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.89"
 license-file = "LICENSE.md"
 description = "Shared check commands invoked by Crow"
-repository = "https://github.com/corbet-labs/ccid"
+repository = "https://github.com/corbet-libs/ccid"
 
 [features]
 windows-experimental = []

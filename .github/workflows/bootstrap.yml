@@ -52,6 +52,8 @@ jobs:
           CI_CACHE_ROOT: ${{ runner.temp }}/ccid-cache
           RUSTUP_TOOLCHAIN: stable
           MODE: build
+          # .ci/bootstrap.py imports the top-level ccid.py module from the checkout root.
+          PYTHONPATH: ${{ github.workspace }}/source
         run: |
           set -euo pipefail
           rustup update stable --no-self-update

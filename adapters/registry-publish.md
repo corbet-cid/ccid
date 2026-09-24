@@ -146,17 +146,41 @@ Already-present exact packages do not require registry publication credentials.
 Conflicting bytes, unexpected files, yanked versions and unknown HTTP outcomes
 remain failures. Missing versions are reported explicitly.
 
-`publish` requires `GH_TOKEN` for durable publication journaling and the selected
-missing destination's token: `CARGO_REGISTRY_TOKEN`, `NPM_TOKEN`, `JSR_TOKEN`, or
-`PYPI_TOKEN`. Missing credentials are named without reading secret stores or
-printing values. Token-backed publication stays on Crow. Hosted publication is
-currently limited to Cargo through its configured short-lived GitHub OIDC action;
-set `RELEASE_CARGO_AUTH=trusted` only in that workflow. Its normal token mode
-requires Cargo's live `trustpub_only` setting to be false. The publisher never
-changes that setting or creates a trusted publisher. A missing crate permits its
-first token publication; other HTTP failures remain failures and are not retried.
-GHA can inspect/reconcile
-all suitable public channels, and public preparation/checks remain GHA-preferred.
+`publish` requires `GH_TOKEN` for durable publication journaling and a
+credential for each selected missing destination. Missing credentials are named
+without reading secret stores or printing values. The default token mode uses
+`CARGO_REGISTRY_TOKEN`, `NPM_TOKEN`, `JSR_TOKEN`, or `PYPI_TOKEN`; token-backed
+publication stays on Crow. Its Cargo guard requires Cargo's live `trustpub_only`
+setting to be false. The publisher never changes that setting or creates a
+trusted publisher. A missing crate permits its first token publication; other
+HTTP failures remain failures and are not retried.
+
+### Trusted (OIDC) publication
+
+Each registry has its own selector. Unset or `token` keeps the token mode above
+unchanged; `trusted` uses the running GitHub Actions job's OIDC identity and
+needs no long-lived registry token. Any other value is refused.
+
+| Selector | Trusted credential |
+|---|---|
+| `RELEASE_CARGO_AUTH` | `CARGO_REGISTRY_TOKEN` from `rust-lang/crates-io-auth-action` in the same job; the settings read is skipped. |
+| `RELEASE_JSR_AUTH` | A GitHub ID token whose audience is `{"permissions":[{"permission":"package/publish","scope":S,"package":P,"version":V,"tarballHash":"sha256-<hex>"}]}`, the SHA-256 of the exact gzip request body. It is sent as `Authorization: githuboidc <token>`, as `deno publish` does. |
+| `RELEASE_NPM_AUTH` | A GitHub ID token with audience `npm:registry.npmjs.org`, exchanged by `POST https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/<escaped name>`. The returned short-lived token authorizes the usual single PUT. |
+| `RELEASE_PYPI_AUTH` | A GitHub ID token with audience `pypi`, exchanged by `POST https://pypi.org/_/oidc/mint-token` with `{"token": ...}`. The returned short-lived API token uploads as `__token__`. One token is minted per file. |
+
+Trusted JSR, npm and PyPI modes need `GITHUB_ACTIONS=true` and the
+`ACTIONS_ID_TOKEN_REQUEST_URL`/`ACTIONS_ID_TOKEN_REQUEST_TOKEN` variables that
+GitHub provides only to a job with `permissions: id-token: write`. Without them
+the publisher fails closed and never falls back to a token. The ID token request
+and exchange happen in the credential step, before any intent is claimed, so a
+refused exchange or missing registry rule leaves no journal and uploads nothing.
+Failure messages carry only the registry and HTTP status; ID tokens, exchanged
+tokens and response bodies are never logged or journaled. JSR accepts the ID
+token only when the package is linked to the workflow's GitHub repository; npm
+and PyPI require a trusted publisher rule naming the repository and workflow.
+Set a trusted selector only in the release workflow whose identity those
+registry rules name. GHA can inspect/reconcile all suitable public channels, and
+public preparation/checks remain GHA-preferred.
 
 An existing matching GitHub release and immutable tag are prerequisites. This
 command does not create a release/tag, submit a Typst Universe package, claim a
@@ -261,13 +285,20 @@ The single-request envelopes follow [Cargo's registry API](https://doc.rust-lang
 [JSR's management API](https://jsr.io/docs/api) and its
 [OpenAPI specification](https://api.jsr.io/.well-known/openapi), and
 [PyPI's upload protocol](https://docs.pypi.org/api/upload/).
-Source transformations and each registry's available provenance remain explicit;
-these custom token uploads do not claim an OIDC build attestation.
+Trusted modes follow [GitHub's OIDC token request](https://docs.github.com/en/actions/reference/security/oidc),
+[Deno's JSR publishing client](https://github.com/denoland/deno/blob/main/cli/tools/publish/mod.rs),
+[npm's OIDC exchange](https://github.com/npm/cli/blob/latest/lib/utils/oidc.js) and
+[PyPI's trusted publisher exchange](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
+Source transformations and each registry's available provenance remain explicit.
+Trusted modes authenticate with OIDC, but these custom uploads do not claim a
+provenance or build attestation.
 
 The `registry-publisher` ccid selector runs `.ci/registry_publish_test.py` with
 fake HTTP and temporary files. It covers exact artifact import, preserved producer
 identity, archive safety, download conflicts, JSR license/transformation behavior,
-per-request payloads, missing credentials, Cargo policy preservation, durable
+per-request payloads, missing credentials, Cargo policy preservation, trusted
+JSR/npm/PyPI ID-token audiences and exchanges, refused exchanges before intent,
+missing OIDC variables, unchanged token mode, durable
 intent ordering, lost responses, repeated invocations, competing claims,
 HTTP429 evidence capture, cooldowns, explicit recovery, legacy report limits and
 rejection of uncertain or conflicting recovery inputs.

@@ -35,6 +35,16 @@ import zipfile
 MAX_BYTES = 128 * 1024 * 1024
 CHANNELS = {"cargo", "npm", "jsr", "pypi"}
 TOKEN_NAMES = {"cargo": "CARGO_REGISTRY_TOKEN", "npm": "NPM_TOKEN", "jsr": "JSR_TOKEN", "pypi": "PYPI_TOKEN"}
+# Each selector is `token` (the default: a long-lived registry token from
+# TOKEN_NAMES) or `trusted` (a short-lived credential derived from the GitHub
+# Actions OIDC ID token of the running workflow).
+AUTH_MODES = {"cargo": "RELEASE_CARGO_AUTH", "npm": "RELEASE_NPM_AUTH", "jsr": "RELEASE_JSR_AUTH", "pypi": "RELEASE_PYPI_AUTH"}
+# npm derives its audience from the registry hostname; PyPI publishes its
+# audience at https://pypi.org/_/oidc/audience. JSR's audience is per upload.
+NPM_OIDC_AUDIENCE = "npm:registry.npmjs.org"
+PYPI_OIDC_AUDIENCE = "pypi"
+OIDC_RESPONSE_LIMIT = 64 * 1024
+LABELS = {"cargo": "Cargo", "npm": "npm", "jsr": "JSR", "pypi": "PyPI"}
 RECOVERY_COOLDOWN = 3600  # Client policy, not a claimed PyPI rate-limit window.
 USER_AGENT = "ccid-registry-publisher/1; https://github.com/corbet-labs/ccid"
 
@@ -70,6 +80,31 @@ def sha(data):
 
 def json_bytes(value):
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+
+
+class GithubOidcToken(str):
+    """A GitHub Actions ID token that JSR accepts directly with the `githuboidc` scheme.
+
+    The distinct type selects the authorization scheme; the value itself is never
+    logged, journaled or included in failure messages.
+    """
+
+
+def jsr_body(data):
+    """Return the one deterministic gzip tarball that is both hashed and uploaded.
+
+    JSR binds an OIDC publish permission to the SHA-256 of the exact request body,
+    so the body is built once and cached on the inspected channel data.
+    """
+    if "jsr_body" not in data:
+        raw = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w") as archive:
+            for path, payload in sorted(data["jsr_files"].items()):
+                info = tarfile.TarInfo(path)
+                info.size, info.mode, info.mtime = len(payload), 0o644, 0
+                archive.addfile(info, io.BytesIO(payload))
+        data["jsr_body"] = gzip.compress(raw.getvalue(), mtime=0)
+    return data["jsr_body"]
 
 
 def plain_path(value):
@@ -810,14 +845,76 @@ class Remote:
             present.add(filename)
         return present
 
-    def credentials(self, registry):
+    def auth_mode(self, registry):
+        variable = AUTH_MODES[registry]
+        mode = self.environment.get(variable, "token")
+        require(mode in {"token", "trusted"}, f"Unknown {variable} value; expected token or trusted")
+        return mode
+
+    def github_id_token(self, registry, audience):
+        """Request one GitHub Actions OIDC ID token; fail closed outside a permitted job."""
+        label = LABELS[registry]
+        request_url = self.environment.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+        request_token = self.environment.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+        require(self.environment.get("GITHUB_ACTIONS") == "true" and request_url and request_token,
+                f"{AUTH_MODES[registry]}=trusted requires a GitHub Actions job with `permissions: id-token: write` "
+                "(ACTIONS_ID_TOKEN_REQUEST_URL/ACTIONS_ID_TOKEN_REQUEST_TOKEN are absent); no token fallback was attempted")
+        separator = "&" if urllib.parse.urlsplit(request_url).query else "?"
+        try:
+            response = self.http.json("GET", request_url + separator + "audience=" + urllib.parse.quote(audience, safe=""),
+                                      headers={"Authorization": "Bearer " + request_token, "Accept": "application/json"},
+                                      limit=OIDC_RESPONSE_LIMIT)
+        except HttpFailure as error:
+            raise Failure(f"GitHub refused the {label} OIDC ID token request (HTTP {error.outcome['status']}); "
+                          "no intent was recorded and nothing was uploaded") from None
+        value = response.get("value") if isinstance(response, dict) else None
+        require(isinstance(value, str) and value.count(".") == 2, "GitHub did not return an OIDC ID token")
+        return value
+
+    def exchange(self, registry, url, **kwargs):
+        """Exchange an ID token for a short-lived registry token before any intent is claimed."""
+        label = LABELS[registry]
+        try:
+            response = self.http.json("POST", url, limit=OIDC_RESPONSE_LIMIT, **kwargs)
+        except HttpFailure as error:
+            raise Failure(f"{label} refused the trusted-publishing token exchange (HTTP {error.outcome['status']}); "
+                          "check the registry's trusted publisher rule. No intent was recorded and nothing was uploaded") from None
+        token = response.get("token") if isinstance(response, dict) else None
+        require(isinstance(token, str) and token, f"{label} token exchange returned no publication token")
+        return token
+
+    def trusted_credentials(self, registry, data):
+        if registry == "jsr":
+            # Deno's `deno publish` requests the same audience: a JSON permission
+            # list binding scope, package, version and the gzip body's SHA-256.
+            scope, name = data["js_name"].removeprefix("@").split("/", 1)
+            permission = {"permission": "package/publish", "scope": scope, "package": name,
+                          "version": self.bundle.version, "tarballHash": "sha256-" + sha(jsr_body(data))}
+            audience = json.dumps({"permissions": [permission]}, separators=(",", ":"))
+            return GithubOidcToken(self.github_id_token(registry, audience))
+        if registry == "npm":
+            identity = self.github_id_token(registry, NPM_OIDC_AUDIENCE)
+            # npm-package-arg's escapedName: a scoped name keeps `@` and encodes `/`.
+            escaped = urllib.parse.quote(data["js_name"], safe="@").replace("%2F", "%2f")
+            return self.exchange("npm", "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/" + escaped,
+                                 data=b"", headers={"Authorization": "Bearer " + identity, "Accept": "application/json"})
+        identity = self.github_id_token(registry, PYPI_OIDC_AUDIENCE)
+        return self.exchange("pypi", "https://pypi.org/_/oidc/mint-token", data=json.dumps({"token": identity}).encode(),
+                             headers={"Content-Type": "application/json", "Accept": "application/json"})
+
+    def credentials(self, registry, data=None):
         require(bool(self.environment.get("GH_TOKEN")), "GH_TOKEN is missing for durable publication journaling")
+        if registry != "cargo" and self.auth_mode(registry) == "trusted":
+            require(data is not None, "Trusted publication requires the inspected channel data")
+            return self.trusted_credentials(registry, data)
         variable = TOKEN_NAMES[registry]
         token = self.environment.get(variable, "")
         require(bool(token) and token != "null", variable + " is missing; configure the publication credential before uploading")
         if registry == "cargo":
             mode = self.environment.get("RELEASE_CARGO_AUTH", "token")
             require(mode in {"token", "trusted"}, "Unknown Cargo authentication mode")
+            # Cargo's exchange is performed by rust-lang/crates-io-auth-action,
+            # which supplies its short-lived result as CARGO_REGISTRY_TOKEN.
             if mode == "token":
                 settings = self.http.json("GET", "https://crates.io/api/v1/crates/" + self.bundle.name,
                                           headers={"Authorization": token}, missing=True)
@@ -874,16 +971,12 @@ class Remote:
             return
         # JSR's management API accepts the inspected file inventory in a gzip tar.
         # These are recorded source transformations, not a compilation step.
-        raw = io.BytesIO()
-        with tarfile.open(fileobj=raw, mode="w") as archive:
-            for path, payload in sorted(data["jsr_files"].items()):
-                info = tarfile.TarInfo(path)
-                info.size, info.mode, info.mtime = len(payload), 0o644, 0
-                archive.addfile(info, io.BytesIO(payload))
+        # A trusted (OIDC) credential is bound to this exact body's SHA-256.
         scope, name = data["js_name"].removeprefix("@").split("/", 1)
+        scheme = "githuboidc " if isinstance(token, GithubOidcToken) else "Bearer "
         response = self.http.json("POST", f"https://api.jsr.io/scopes/{scope}/packages/{name}/versions/{self.bundle.version}?config=/jsr.json",
-                                  data=gzip.compress(raw.getvalue(), mtime=0),
-                                  headers={"Authorization": "Bearer " + token, "Content-Type": "application/octet-stream", "Content-Encoding": "gzip"})
+                                  data=jsr_body(data),
+                                  headers={"Authorization": scheme + token, "Content-Type": "application/octet-stream", "Content-Encoding": "gzip"})
         require(re.fullmatch(r"[0-9a-f-]{36}", response.get("id", "")), "JSR did not return a publishing task identity")
         require(response.get("packageScope") == scope and response.get("packageName") == name
                 and response.get("packageVersion") == self.bundle.version, "JSR publishing task identity mismatch")
@@ -944,7 +1037,7 @@ class Publisher:
                         # No upload is allowed after an earlier durable intent, even
                         # when a fresh registry query still returns 404.
                         raise Failure("Previous publication intent exists but exact remote bytes are absent; reconcile read-only, never retry the upload")
-                    token = self.remote.credentials(registry)
+                    token = self.remote.credentials(registry, data)
                     durable_write(local, intent)
                     self.remote.persist_asset(remote_name, intent, claim=True)
                     present = self.finish_upload(registry, unit, data, token, stem, intent, 0)
@@ -1051,7 +1144,7 @@ class Publisher:
             next_stem = base + "-attempt-" + str(attempt + 1)
             require(not (self.root / (next_stem + "-intent.json")).exists()
                     and self.remote.asset(next_stem + "-intent.json") is None, "Recovery already claimed; reconcile its outcome instead of repeating it")
-            token = self.remote.credentials("pypi")
+            token = self.remote.credentials("pypi", data)
             intent = {"schema": 1, "status": "attempted", "identity": identity, "owner": secrets.token_hex(24),
                       "attempt": attempt + 1, "previous_intent_sha256": evidence["intent_sha256"],
                       "rejection_sha256": expected_sha256}

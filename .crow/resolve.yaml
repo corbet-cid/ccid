@@ -32,7 +32,7 @@ steps:
         TMPDIR="$${TMPDIR:-/tmp}"
         export TMPDIR
         export MODE=build
-        export CI_REPOSITORY_URL="$${CI_REPOSITORY_URL:-https://github.com/corbet-labs/ccid}"
+        export CI_REPOSITORY_URL="$${CI_REPOSITORY_URL:-https://github.com/corbet-libs/ccid}"
         exec python3 - <<'PY_RESOLVE'
         import hashlib, json, os, pathlib, re, runpy, shutil, signal, subprocess, sys, tarfile, tempfile
 

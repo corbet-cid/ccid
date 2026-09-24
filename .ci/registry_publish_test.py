@@ -35,6 +35,17 @@ def tar(files, commit=None):
     return output.getvalue()
 
 
+def tar_for_jsr(files):
+    """The publisher's documented JSR tar layout, rebuilt independently."""
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for path, payload in sorted(files.items()):
+            info = tarfile.TarInfo(path)
+            info.size, info.mode, info.mtime = len(payload), 0o644, 0
+            archive.addfile(info, io.BytesIO(payload))
+    return output.getvalue()
+
+
 def cargo_fixture(*, source_lock=b"version = 4\n", packaged_lock=None):
     manifest = b'[package]\nname = "widget"\nversion = "1.2.3"\nrepository = "https://github.com/example/widget"\nlicense = "MIT"\nrust-version = "1.94"\n'
     source = {"Cargo.toml": manifest, "Cargo.lock": source_lock, "src/lib.rs": b"pub fn value() {}\n",
@@ -219,7 +230,7 @@ class FakeRemote:
     def asset(self, name):
         return self.assets.get(name)
 
-    def credentials(self, registry):
+    def credentials(self, registry, data=None):
         return "fixture-token"
 
     def persist_asset(self, name, value, *, claim=False):
@@ -257,7 +268,178 @@ class FakeHttp:
         return json.loads(self.request(method, url, **kwargs))
 
 
+class RoutingHttp(FakeHttp):
+    """Answer requests by method and URL prefix; any unexpected request fails the test."""
+
+    def __init__(self, routes):
+        super().__init__()
+        self.routes = routes
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        for (route_method, prefix), response in self.routes.items():
+            if method == route_method and url.startswith(prefix):
+                if isinstance(response, Exception):
+                    raise response
+                return pub.json_bytes(response)
+        raise AssertionError("Unexpected fixture request: " + method + " " + url)
+
+
+ID_TOKEN_URL = "https://token.actions.example.invalid/fixture-token-request?api-version=2.0"
+ID_TOKEN = "fixture-header.fixture-claims.fixture-signature"
+
+
+def trusted_environment(registry, **changes):
+    environment = {"GH_TOKEN": "fixture-gh", pub.AUTH_MODES[registry]: "trusted", "GITHUB_ACTIONS": "true",
+                   "ACTIONS_ID_TOKEN_REQUEST_URL": ID_TOKEN_URL, "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "fixture-request-token"}
+    environment.update(changes)
+    return {key: value for key, value in environment.items() if value is not None}
+
+
+def id_token_request(call):
+    method, url, options = call
+    parsed = pub.urllib.parse.urlsplit(url)
+    query = pub.urllib.parse.parse_qs(parsed.query)
+    return method, parsed._replace(query="").geturl(), query, options["headers"]
+
+
+def trusted_channel(registry):
+    identity = {"registry": registry, "repository": REPOSITORY, "package": "widget", "version": "1.2.3"}
+    if registry == "npm":
+        return {"identity": identity, "js_name": "@example/widget", "artifacts": {"example-widget-1.2.3.tgz": b"npm bytes"}}
+    return {"identity": identity, "artifacts": {"widget-1.2.3-py3-none-any.whl": b"wheel bytes"}}
+
+
 class PublicationTests(unittest.TestCase):
+    def test_trusted_jsr_binds_github_id_token_to_the_exact_uploaded_body(self):
+        bundle = SimpleNamespace(name="widget", version="1.2.3", repository=REPOSITORY)
+        files = {"jsr.json": b'{"name":"@example/widget","version":"1.2.3","exports":"./src/index.ts"}',
+                 "src/index.ts": b"export const answer = 42;\n"}
+        data = {"js_name": "@example/widget", "jsr_files": files}
+        task = {"id": "12345678-1234-1234-1234-123456789abc", "packageScope": "example",
+                "packageName": "widget", "packageVersion": "1.2.3", "status": "pending"}
+        http = RoutingHttp({("GET", "https://token.actions.example.invalid/"): {"value": ID_TOKEN},
+                            ("POST", "https://api.jsr.io/"): task})
+        remote = pub.Remote(bundle, http=http, environment=trusted_environment("jsr"))
+        token = remote.credentials("jsr", data)
+        self.assertIsInstance(token, pub.GithubOidcToken)
+        method, base, query, headers = id_token_request(http.calls[0])
+        self.assertEqual((method, base), ("GET", ID_TOKEN_URL.split("?")[0]))
+        self.assertEqual(query["api-version"], ["2.0"])
+        self.assertEqual(headers["Authorization"], "Bearer fixture-request-token")
+        body = pub.gzip.compress(tar_for_jsr(files), mtime=0)
+        self.assertEqual(json.loads(query["audience"][0]), {"permissions": [{
+            "permission": "package/publish", "scope": "example", "package": "widget",
+            "version": "1.2.3", "tarballHash": "sha256-" + pub.sha(body)}]})
+        self.assertEqual(remote.upload("jsr", "source", data, token)["jsr_task"], task["id"])
+        method, url, options = http.calls[1]
+        self.assertEqual((method, url), ("POST", "https://api.jsr.io/scopes/example/packages/widget/versions/1.2.3?config=/jsr.json"))
+        self.assertEqual(options["headers"]["Authorization"], "githuboidc " + ID_TOKEN)
+        self.assertEqual(options["data"], body)
+        self.assertEqual(len(http.calls), 2)
+
+    def test_trusted_npm_exchanges_id_token_before_the_single_put(self):
+        bundle = SimpleNamespace(name="widget", version="1.2.3", repository=REPOSITORY)
+        data = {"js_name": "@example/widget", "artifacts": {"widget.tgz": b"exact npm bytes"},
+                "js_manifest": {"name": "@example/widget", "version": "1.2.3"}}
+        exchange = "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@example%2fwidget"
+        http = RoutingHttp({("GET", "https://token.actions.example.invalid/"): {"value": ID_TOKEN},
+                            ("POST", exchange): {"token": "fixture-npm-short-lived"},
+                            ("PUT", "https://registry.npmjs.org/@example%2Fwidget"): {"ok": True}})
+        remote = pub.Remote(bundle, http=http, environment=trusted_environment("npm"))
+        token = remote.credentials("npm", data)
+        self.assertEqual(token, "fixture-npm-short-lived")
+        _, _, query, _ = id_token_request(http.calls[0])
+        self.assertEqual(query["audience"], ["npm:registry.npmjs.org"])
+        method, url, options = http.calls[1]
+        self.assertEqual((method, url), ("POST", exchange))
+        self.assertEqual(options["headers"]["Authorization"], "Bearer " + ID_TOKEN)
+        remote.upload("npm", "widget.tgz", data, token)
+        method, url, options = http.calls[2]
+        self.assertEqual(method, "PUT")
+        self.assertEqual(options["headers"]["Authorization"], "Bearer fixture-npm-short-lived")
+        self.assertEqual(len(http.calls), 3)
+
+    def test_trusted_pypi_mints_api_token_used_as_dunder_token(self):
+        bundle = SimpleNamespace(name="widget", version="1.2.3", repository=REPOSITORY)
+        unit = "widget-1.2.3-py3-none-any.whl"
+        data = {"artifacts": {unit: b"wheel bytes"},
+                "python": {unit: {"fields": [("name", "widget"), ("version", "1.2.3")], "filetype": "bdist_wheel", "pyversion": "py3"}}}
+        http = RoutingHttp({("GET", "https://token.actions.example.invalid/"): {"value": ID_TOKEN},
+                            ("POST", "https://pypi.org/_/oidc/mint-token"): {"success": True, "token": "fixture-pypi-minted"},
+                            ("POST", "https://upload.pypi.org/legacy/"): {}})
+        remote = pub.Remote(bundle, http=http, environment=trusted_environment("pypi"))
+        token = remote.credentials("pypi", data)
+        self.assertEqual(token, "fixture-pypi-minted")
+        _, _, query, _ = id_token_request(http.calls[0])
+        self.assertEqual(query["audience"], ["pypi"])
+        method, url, options = http.calls[1]
+        self.assertEqual((method, url), ("POST", "https://pypi.org/_/oidc/mint-token"))
+        self.assertEqual(json.loads(options["data"]), {"token": ID_TOKEN})
+        remote.upload("pypi", unit, data, token)
+        authorization = http.calls[2][2]["headers"]["Authorization"]
+        self.assertEqual(pub.base64.b64decode(authorization.removeprefix("Basic ")), b"__token__:fixture-pypi-minted")
+
+    def test_refused_trusted_exchange_fails_before_any_intent_or_upload(self):
+        refusals = {"npm": ("POST", "https://registry.npmjs.org/-/npm/v1/oidc/", "https://registry.npmjs.org"),
+                    "pypi": ("POST", "https://pypi.org/_/oidc/mint-token", "https://pypi.org")}
+        for registry, (method, prefix, origin) in refusals.items():
+            for stage in ("exchange", "id-token"):
+                with self.subTest(registry=registry, stage=stage):
+                    routes = {("GET", "https://token.actions.example.invalid/"): {"value": ID_TOKEN},
+                              (method, prefix): pub.HttpFailure(method, origin, 404)}
+                    if stage == "id-token":
+                        routes[("GET", "https://token.actions.example.invalid/")] = pub.HttpFailure(
+                            "GET", "https://token.actions.example.invalid", 403)
+                    bundle = SimpleNamespace(repository=REPOSITORY, version="1.2.3", digest="e" * 64,
+                                             channels={registry: trusted_channel(registry)})
+                    remote = FakeRemote()
+                    remote.credentials = pub.Remote(bundle, http=RoutingHttp(routes),
+                                                    environment=trusted_environment(registry)).credentials
+                    with tempfile.TemporaryDirectory() as temporary:
+                        with self.assertRaisesRegex(pub.Failure, "refused") as raised:
+                            pub.Publisher(bundle, remote, temporary).execute([registry], True)
+                        self.assertEqual(list(Path(temporary).rglob("*-intent.json")), [])
+                    self.assertNotIn("fixture", str(raised.exception))
+                    self.assertEqual((remote.assets, remote.uploads), ({}, []))
+
+    def test_trusted_mode_without_github_id_token_variables_fails_closed(self):
+        bundle = SimpleNamespace(name="widget", version="1.2.3", repository=REPOSITORY)
+        data = {"js_name": "@example/widget", "jsr_files": {"jsr.json": b"{}"}}
+        for registry in ("npm", "jsr", "pypi"):
+            for missing in ("ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "GITHUB_ACTIONS"):
+                with self.subTest(registry=registry, missing=missing):
+                    http = FakeHttp()
+                    environment = trusted_environment(registry, **{missing: None, pub.TOKEN_NAMES[registry]: "fixture-static"})
+                    with self.assertRaisesRegex(pub.Failure, "id-token: write") as raised:
+                        pub.Remote(bundle, http=http, environment=environment).credentials(registry, data)
+                    self.assertEqual(http.calls, [])
+                    self.assertNotIn("fixture", str(raised.exception))
+
+    def test_token_mode_stays_default_and_unknown_modes_are_refused(self):
+        bundle = SimpleNamespace(name="widget", version="1.2.3", repository=REPOSITORY)
+        for registry in ("npm", "jsr", "pypi"):
+            with self.subTest(registry=registry):
+                http = FakeHttp()
+                environment = {"GH_TOKEN": "fixture-gh", pub.TOKEN_NAMES[registry]: "fixture-static",
+                               "GITHUB_ACTIONS": "true", "ACTIONS_ID_TOKEN_REQUEST_URL": ID_TOKEN_URL,
+                               "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "fixture-request-token"}
+                token = pub.Remote(bundle, http=http, environment=environment).credentials(registry, {})
+                self.assertEqual(token, "fixture-static")
+                self.assertNotIsInstance(token, pub.GithubOidcToken)
+                explicit = pub.Remote(bundle, http=http, environment={**environment, pub.AUTH_MODES[registry]: "token"})
+                self.assertEqual(explicit.credentials(registry, {}), "fixture-static")
+                self.assertEqual(http.calls, [])
+                with self.assertRaisesRegex(pub.Failure, "Unknown " + pub.AUTH_MODES[registry]):
+                    pub.Remote(bundle, http=http, environment={**environment, pub.AUTH_MODES[registry]: "oidc"}).credentials(registry, {})
+                with self.assertRaisesRegex(pub.Failure, pub.TOKEN_NAMES[registry] + " is missing"):
+                    pub.Remote(bundle, http=http, environment={"GH_TOKEN": "fixture-gh"}).credentials(registry, {})
+        http = FakeHttp({"id": "12345678-1234-1234-1234-123456789abc", "packageScope": "example",
+                         "packageName": "widget", "packageVersion": "1.2.3"})
+        pub.Remote(bundle, http=http, environment={}).upload(
+            "jsr", "source", {"js_name": "@example/widget", "jsr_files": {"jsr.json": b"{}"}}, "fixture-static")
+        self.assertEqual(http.calls[0][2]["headers"]["Authorization"], "Bearer fixture-static")
+
     def test_generated_jsr_keeps_original_runtime_and_lossless_source_kit(self):
         bundle, data, published = generated_jsr_fixture()
         bundle.inspect_javascript(data, "jsr")
