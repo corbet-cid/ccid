@@ -39,6 +39,14 @@ fn apply(env: &mut Environment, available: u64, reserve: u64) -> Result<()> {
 }
 
 pub(crate) fn admit(env: &mut Environment) -> Result<()> {
+    if let Some(maximum) = value(env, "CI_MAX_IO_PSI_AVG10") {
+        let maximum = pressure_limit(&maximum)?;
+        let pressure = fs::read_to_string("/proc/pressure/io").map_err(|_| {
+            failure("Configured I/O pressure admission requires readable Linux PSI")
+        })?;
+        let observed = io_pressure(&pressure, maximum)?;
+        event(json!({"event":"io-admission","full_avg10":observed,"maximum":maximum}));
+    }
     let Some(reserve) = value(env, "CI_MIN_AVAILABLE_MB") else {
         return Ok(());
     };
@@ -86,9 +94,56 @@ pub(crate) fn admit(env: &mut Environment) -> Result<()> {
     }
 }
 
+fn pressure_limit(text: &str) -> Result<f64> {
+    let maximum: f64 = text.parse()?;
+    if !maximum.is_finite() || maximum <= 0.0 || maximum > 100.0 {
+        return Err(failure(
+            "CI_MAX_IO_PSI_AVG10 must be greater than zero and at most 100",
+        ));
+    }
+    Ok(maximum)
+}
+
+fn io_pressure(text: &str, maximum: f64) -> Result<f64> {
+    let observed = text
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("full"))
+                .then(|| fields.find_map(|field| field.strip_prefix("avg10=")?.parse::<f64>().ok()))
+                .flatten()
+        })
+        .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+        .ok_or_else(|| failure("Cannot establish full I/O pressure for configured admission"))?;
+    if observed >= maximum {
+        return Err(failure(format!("I/O admission refused: full avg10={observed}%, limit={maximum}%; retry when pressure subsides")));
+    }
+    Ok(observed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn io_pressure_is_explicit_bounded_and_fails_closed() {
+        for limit in ["0", "-1", "101", "NaN", "inf", ""] {
+            assert!(pressure_limit(limit).is_err());
+        }
+        assert_eq!(pressure_limit("2.5").unwrap(), 2.5);
+        assert_eq!(
+            io_pressure("some avg10=99.0\nfull avg10=2.4 avg60=1", 2.5).unwrap(),
+            2.4
+        );
+        for text in [
+            "full avg10=2.5",
+            "full avg10=99",
+            "some avg10=0",
+            "full avg10=NaN",
+            "full avg10=-1",
+        ] {
+            assert!(io_pressure(text, 2.5).is_err());
+        }
+    }
     #[test]
     fn cgroup_headroom_caps_host_memory_without_consulting_swap() {
         let mib = 1024 * 1024;

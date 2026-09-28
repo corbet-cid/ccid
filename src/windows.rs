@@ -1,7 +1,7 @@
 //! Native Windows backend. Release enablement requires native cancellation proof.
 #![forbid(unsafe_code)]
 
-use super::{event, failure, Result, Runner, INTERRUPTED};
+use super::{failure, Result, Runner, INTERRUPTED};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, JobObject, KillOnDrop};
 use serde_json::json;
 use std::{
@@ -58,7 +58,7 @@ pub(super) fn run(runner: &Runner, argv: &[String], capture: bool) -> Result<Str
         // Closing the job terminates remaining descendants even when the parent
         // exited first. A hard termination of ccid also closes this owned handle.
         drop(child);
-        event(json!({"event":"command","executable":Path::new(&argv[0]).file_name().map(|s|s.to_string_lossy()),"seconds":started.elapsed().as_secs_f64(),"exit_code":status.code()}));
+        runner.command_event(json!({"event":"command","executable":Path::new(&argv[0]).file_name().map(|s|s.to_string_lossy()),"seconds":started.elapsed().as_secs_f64(),"exit_code":status.code()}));
         if !status.success() { return Err(failure(format!("{} failed: {status}",Path::new(&argv[0]).file_name().unwrap_or_default().to_string_lossy()))); }
         if let Some(reader) = reader {
             let bytes = time::timeout(Duration::from_secs(10), reader).await

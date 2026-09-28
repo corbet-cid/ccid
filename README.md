@@ -8,6 +8,16 @@ jobs or pretend that one platform proves another. The Rust executor does not
 publish releases. The optional [registry publisher resource](adapters/registry-publish.md)
 provides explicit, separately invoked uploads of already-verified archives.
 
+[`ccid forge`](docs/repository-policy.md) validates multi-forge placement, derives
+the primary forge from CI, clones exact commits through declared read fallbacks,
+and supplies a deterministic execution-failover decision to provider adapters.
+
+[`ccid quality`](docs/quality.md) audits organization and repository presentation
+on GitHub and Forgejo through the separate, deterministic cqlt policy library.
+It collects read-only evidence and produces reproducible offline quality gates.
+`ccid quality prose` checks descriptions and documentation through cqlt's
+subordinate Vale backend, with a versioned writing policy and stable reports.
+
 The Rust command library forbids unsafe code in this crate and requires Rust
 1.89+ to build. Git and the selected check's existing tools are required at runtime.
 The checked Linux binary is built once per source revision and reused by Crow
@@ -166,8 +176,9 @@ live beneath explicitly configured `CI_CACHE_ROOT/targets`, or `CARGO_HOME/targe
 identity, not the manifest label. Cargo retains responsibility for compiler,
 profile, feature and dependency compatibility; source/tool revisions do not
 create new cache namespaces. Existing target trees, downloaded dependencies and
-compatible dependency artifacts are never moved or cleared. Workspace outputs
-are rebuilt when an archive is extracted at a different canonical source path.
+compatible dependency artifacts are never moved or cleared. Verified archives
+execute at the locked target's stable `.ccid/source-v1` path; its disposable
+contents are replaced for each run and removed on exit.
 
 Crow supplies `CI_REPOSITORY_URL`, a canonical forge URL without credentials.
 Local checks derive identity from Git origin, or use their canonical local path
@@ -179,9 +190,10 @@ that lock. It is cooperative:
 shared writable caches and a shared worker UID are not a security boundary.
 Repository scripts that internally change target paths need their own review.
 
-Each invocation owns temporary source/command directories beneath inherited
-`TMPDIR` (or the platform temporary directory), removing only those directories
-on handled exit. Operators choose a disk-backed parent and its orphan lifecycle.
+Each invocation owns temporary verification/command directories beneath inherited
+`TMPDIR` (or the platform temporary directory), plus the marked stable source
+directory under its target. It removes only its own contents on handled exit.
+Operators choose disk-backed parents and their orphan lifecycle.
 ccid does not clear pre-existing scratch. Unix outer-process SIGKILL is covered
 by the supervisor described below; killing that supervisor or losing the host
 can still leave scratch behind.
@@ -219,10 +231,10 @@ The standalone `verify-source` interface remains available without cache reuse.
 Under the target lock, archive checks compare the canonical source root plus source
 bytes, type, mode and directory membership with `.ccid/source-state.json`.
 Unchanged regular files/directories reuse their recorded mtimes only at the same
-canonical source root. A new disposable extraction path gives workspace inputs
-fresh mtimes, forcing Cargo to rebuild outputs that may embed absolute source
-paths such as `CARGO_MANIFEST_DIR`, while retaining the shared dependency cache
-and compatible dependency artifacts. Changed inputs also get fresh mtimes,
+canonical source root. Stable-path execution preserves compiled paths such as
+`CARGO_MANIFEST_DIR` and allows unchanged workspace artifacts to stay fresh.
+Moving the target or using a resolver candidate still invalidates those paths.
+Changed inputs get fresh mtimes,
 including rollback to an older Git revision. Symlink mtimes remain freshly
 extracted, which can cause extra work. Metadata written before source-root tracking
 is treated as nonmatching rather than failing the check. Local `check --repo` never

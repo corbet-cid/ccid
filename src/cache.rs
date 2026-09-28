@@ -36,7 +36,7 @@ pub(crate) fn repository_identity(root: &Path, env: &Environment, archive: bool)
     Ok(format!("local:{}", root.display()))
 }
 
-fn canonical_repository(url: &str) -> Result<String> {
+pub(crate) fn canonical_repository(url: &str) -> Result<String> {
     let location = if let Some(rest) = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -170,6 +170,98 @@ pub(crate) fn scratch(env: &mut Environment) -> Result<tempfile::TempDir> {
         set(env, name, scratch.path().as_os_str());
     }
     Ok(scratch)
+}
+
+/// Disposable contents at a stable path. Never retain generated files between
+/// runs. The enclosing target lock protects both this path and Cargo's outputs.
+pub(crate) struct StableSource(PathBuf);
+impl StableSource {
+    pub(crate) fn prepare(source: &Path, target: &Path) -> Result<Self> {
+        if target.starts_with(source) {
+            return Err(failure(
+                "Stable archive source cannot contain its target cache",
+            ));
+        }
+        let root = target.join(".ccid/source-v1");
+        let marker = target.join(".ccid/source-v1.owner");
+        const OWNER: &[u8] = b"ccid-verified-source-v1\n";
+        match fs::symlink_metadata(&marker) {
+            Ok(m) if m.is_file() && fs::read(&marker)? == OWNER => (),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if root.symlink_metadata().is_ok() {
+                    return Err(failure(
+                        "Refusing to replace an unowned stable source directory",
+                    ));
+                }
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&marker)?;
+                file.write_all(OWNER)?;
+            }
+            _ => return Err(failure("Invalid stable source ownership marker")),
+        }
+        match fs::symlink_metadata(&root) {
+            Ok(m) if m.is_dir() => fs::remove_dir_all(&root)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            _ => {
+                return Err(failure(
+                    "Stable source path must be an owned directory, never a link",
+                ))
+            }
+        }
+        fs::create_dir(&root)?;
+        let owned = Self(root);
+        copy_source(source, owned.path())?;
+        event(json!({"event":"stable-source","path":owned.path()}));
+        Ok(owned)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for StableSource {
+    fn drop(&mut self) {
+        // remove_dir_all does not follow symlinks. Only this versioned,
+        // ccid-owned directory is disposable; no cache artifact is removed.
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            if error.kind() != io::ErrorKind::NotFound {
+                eprintln!(
+                    "ccid: cannot remove owned source {}: {error}",
+                    self.0.display()
+                );
+            }
+        }
+    }
+}
+
+fn copy_source(source: &Path, destination: &Path) -> Result<()> {
+    for child in fs::read_dir(source)? {
+        let child = child?;
+        let from = child.path();
+        let to = destination.join(child.file_name());
+        let kind = child.file_type()?;
+        if kind.is_dir() {
+            fs::create_dir(&to)?;
+            copy_source(&from, &to)?;
+        } else if kind.is_file() {
+            fs::copy(&from, &to)?;
+        } else if kind.is_symlink() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+            #[cfg(windows)]
+            if from.is_dir() {
+                std::os::windows::fs::symlink_dir(fs::read_link(&from)?, &to)?;
+            } else {
+                std::os::windows::fs::symlink_file(fs::read_link(&from)?, &to)?;
+            }
+        } else {
+            return Err(failure("Unexpected special file in verified source"));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -408,6 +500,35 @@ impl Freshness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn stable_sources_remove_only_owned_contents_and_refuse_symlink_roots() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let source = temp.path().join("input");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(target.join(".ccid/source-v1")).unwrap();
+        fs::write(source.join("value"), "source").unwrap();
+        assert!(StableSource::prepare(&source, &target).is_err());
+        fs::remove_dir(target.join(".ccid/source-v1")).unwrap();
+        std::os::unix::fs::symlink("value", source.join("link")).unwrap();
+        {
+            let owned = StableSource::prepare(&source, &target).unwrap();
+            assert_eq!(
+                fs::read_link(owned.path().join("link")).unwrap(),
+                PathBuf::from("value")
+            );
+            fs::write(owned.path().join("generated"), "discard").unwrap();
+        }
+        assert!(!target.join(".ccid/source-v1").exists());
+        {
+            let owned = StableSource::prepare(&source, &target).unwrap();
+            assert!(!owned.path().join("generated").exists());
+        }
+        std::os::unix::fs::symlink(&source, target.join(".ccid/source-v1")).unwrap();
+        assert!(StableSource::prepare(&source, &target).is_err());
+        assert_eq!(fs::read_to_string(source.join("value")).unwrap(), "source");
+    }
     #[test]
     fn identity_preserves_forge_and_owner_not_just_project_slug() {
         assert_eq!(

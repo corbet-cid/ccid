@@ -143,6 +143,10 @@ mod linux {
                 0,
                 "owned source and command scratch cleaned"
             );
+            assert!(
+                !self.target.join(".ccid/source-v1").exists(),
+                "stable source contents must be disposable too"
+            );
             let value = fs::read_to_string(self.root.join("fixture-output"))
                 .unwrap()
                 .trim()
@@ -152,7 +156,7 @@ mod linux {
     }
 
     #[test]
-    fn verified_archives_rebuild_moved_roots_and_invalidate_changed_inputs_and_failure() {
+    fn verified_archives_reuse_stable_roots_and_invalidate_changed_inputs_and_failure() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().to_path_buf();
         let repo = root.join("repo");
@@ -199,10 +203,8 @@ mod linux {
         assert!(initial.1 > 0);
         assert_eq!(initial.2, "1:A:runtime");
         let warm = f.run(&first, "build", true);
-        assert!(
-            warm.1 > 0,
-            "a moved archive root must rebuild workspace outputs"
-        );
+        assert_eq!(warm.1, 0, "unchanged workspace artifacts must be fresh");
+        assert!(warm.0 > 0);
         assert_eq!(warm.2, "1:A:runtime");
         fs::write(f.repo.join("src/main.rs"), "fn main() { let runtime = std::fs::read_to_string(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/runtime.txt\")).unwrap(); println!(\"2:{}:{}\", include!(concat!(env!(\"OUT_DIR\"), \"/value.rs\")), runtime); }\n").unwrap();
         fs::write(f.repo.join("inputs/b"), "B").unwrap();
@@ -218,7 +220,7 @@ mod linux {
         let deletion = f.run(&deleted, "build", true);
         assert!(deletion.1 > 0);
         assert_eq!(deletion.2, "2:B:runtime");
-        assert!(f.run(&deleted, "build", true).1 > 0);
+        assert_eq!(f.run(&deleted, "build", true).1, 0);
         fs::write(f.repo.join("inputs/b"), "C").unwrap();
         let input = commit(&f.repo);
         let input_changed = f.run(&input, "build", true);
