@@ -1,6 +1,12 @@
 //! Cache ownership and freshness for verified, disposable archive sources.
 use super::*;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs::{File, OpenOptions, TryLockError},
+    io::{Read, Write},
+    path::PathBuf,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub(crate) fn repository_identity(root: &Path, env: &Environment, archive: bool) -> Result<String> {
     if archive

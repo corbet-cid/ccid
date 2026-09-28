@@ -123,6 +123,49 @@ See [cqlt's prose contract](https://github.com/corbet-foss/cqlt/blob/main/docs/p
 for deterministic replay, rule meanings and their limits. Prose findings assess
 style; factual consistency and audience fit require separate editorial review.
 
+### Semantic review with Jev
+
+`ccid quality semantic` uses cqlt's optional, version-pinned Jev policy. The
+input is an explicit JSON array of cases. Each has `subject` and `state` with
+`audience`, `description`, and `facts`. Facts may contain `purpose`, `kind`,
+`maturity`, `capabilities`, and `limitations`. No forge data is collected by
+this command, and no claim is marked true merely because a field is missing.
+
+```sh
+ccid quality semantic --input cases.json
+ccid quality semantic --input cases.json --replay recorded.json
+```
+
+The first command is a dry run: it prints the request hash and byte count for
+each case without network access. Replay verifies exact request hashes and
+prints the report. For an explicitly approved hosted run, supply the key through
+`TYPESAFE_API_KEY` and hard caps for that invocation:
+
+```sh
+ccid quality semantic --input cases.json --live --record recorded.json \
+  --max-requests 8 --max-request-bytes 131072
+```
+
+Live mode sends one HTTPS POST per case to TypeSafe's `/v1/systemone` endpoint.
+It requires an existing curl 8.3+ and writes each successful raw response to
+the private record file before proceeding. The key is expanded inside curl;
+it is absent from command arguments and reports. Each call has a timeout and
+1-MiB response cap. The command makes no automatic retries. A failed HTTP call
+or invalid response is an error; successful earlier responses remain recorded.
+The record path must not already exist and is reserved before the first call.
+The byte cap limits request volume, not the provider's dollar billing; the
+report records the returned token usage. No paid schedule is installed by this
+command. Keep input, records, and reports private
+when they contain nonpublic material. Hosted calls incur provider charges and
+send the explicit case state to TypeSafe.
+
+The report presents separate purpose, claim support, and maturity judgments,
+each with its full probability distribution. Missing evidence yields `unknown`;
+other outcomes require `review`. There is
+no combined score or automatic failure threshold. These model judgments are
+unverified until evaluated against reviewed, held-out examples. See
+[cqlt's semantic contract](https://github.com/corbet-foss/cqlt/blob/main/docs/semantic.md).
+
 ### Other checks
 
 Use existing tools for deeper checks: [alint](https://github.com/asamarts/alint)

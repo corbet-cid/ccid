@@ -1,0 +1,283 @@
+//! Check-specific command builders and validation.
+use crate::{event, failure, strings, validate_command, value, Check, Environment, Result, Runner};
+use serde_json::json;
+use std::{ffi::OsString, fs, path::Path};
+
+pub(crate) fn cargo_prefix(check: &Check, runner: &Runner) -> Result<(Vec<String>, Vec<String>)> {
+    let toolchain = check.toolchain.as_deref().unwrap_or("system");
+    let mut cargo = if toolchain == "system" {
+        strings(&["cargo"])
+    } else {
+        strings(&["rustup", "run", toolchain, "cargo"])
+    };
+    let rustc = if toolchain == "system" {
+        strings(&["rustc", "--version"])
+    } else {
+        strings(&["rustup", "run", toolchain, "rustc", "--version"])
+    };
+    if value(&runner.environment, "CI_LINKER").as_deref() == Some("mold") {
+        let driver = mold_driver(&runner.environment)?;
+        runner.run(&[driver.clone(), "--version".into()], false)?;
+        cargo.splice(0..0, [driver, "-run".into()]);
+    }
+    Ok((cargo, rustc))
+}
+pub(crate) fn mold_driver(environment: &Environment) -> Result<String> {
+    let paths = environment
+        .get(&OsString::from("PATH"))
+        .ok_or_else(|| failure("CI_LINKER=mold requires PATH"))?;
+    let executable = std::env::split_paths(paths)
+        .map(|path| path.join(if cfg!(windows) { "mold.exe" } else { "mold" }))
+        .find(|path| path.is_file())
+        .ok_or_else(|| failure("CI_LINKER=mold requires an installed mold executable"))?;
+    let resolved = executable.canonicalize()?;
+    if let Some(root) = resolved.parent().and_then(Path::parent) {
+        let metadata = root.join("nix-support/orig-bintools");
+        if metadata.is_file() {
+            return Ok(Path::new(fs::read_to_string(metadata)?.trim())
+                .join("bin/mold")
+                .to_string_lossy()
+                .into_owned());
+        }
+    }
+    Ok(executable.to_string_lossy().into_owned())
+}
+pub fn cargo_commands(
+    check: &Check,
+    cargo: &[String],
+    test_threads: &str,
+) -> Result<Vec<Vec<String>>> {
+    let mut options = strings(&["--locked"]);
+    if check.workspace {
+        options.push("--workspace".into());
+    }
+    if check.all_features {
+        options.push("--all-features".into());
+    }
+    for p in &check.packages {
+        options.extend(["--package".into(), p.clone()]);
+    }
+    for p in &check.exclude {
+        options.extend(["--exclude".into(), p.clone()]);
+    }
+    if !check.features.is_empty() {
+        options.extend(["--features".into(), check.features.join(",")]);
+    }
+    if check.release {
+        options.push("--release".into());
+    }
+    let defaults = strings(&["fmt", "test", "clippy"]);
+    let actions = check.actions.as_ref().unwrap_or(&defaults);
+    if actions.is_empty() {
+        return Err(failure("Cargo action selection is empty"));
+    }
+    let mut commands = Vec::new();
+    for action in actions {
+        let mut command = cargo.to_vec();
+        match action.as_str() {
+            "fmt" => command.extend(strings(&["fmt", "--all", "--", "--check"])),
+            "test" => match check.test_runner.as_deref().unwrap_or("cargo") {
+                "cargo" => {
+                    command.push("test".into());
+                    command.extend(options.clone());
+                    if check.all_targets {
+                        command.push("--all-targets".into());
+                    }
+                }
+                "nextest" => {
+                    command.extend(strings(&["nextest", "run", "--test-threads", test_threads]));
+                    command.extend(options.clone());
+                    commands.push(command);
+                    command = cargo.to_vec();
+                    command.extend(strings(&["test", "--doc"]));
+                    command.extend(options.clone());
+                }
+                _ => return Err(failure("Unknown Cargo test runner")),
+            },
+            "clippy" => {
+                command.extend(strings(&["clippy", "--all-targets"]));
+                command.extend(options.clone());
+                command.extend(strings(&["--", "-D", "warnings"]));
+            }
+            "check" | "build" => {
+                command.push(action.clone());
+                command.extend(options.clone());
+                if check.all_targets {
+                    command.push("--all-targets".into());
+                }
+            }
+            _ => return Err(failure(format!("Unknown Cargo action: {action}"))),
+        }
+        commands.push(command);
+    }
+    Ok(commands)
+}
+pub(crate) fn nix_check(check: &Check, runner: &mut Runner) -> Result<()> {
+    if cfg!(windows) {
+        return Err(failure(
+            "Nix checks require a supported Nix host; Windows is unsupported",
+        ));
+    }
+    let mode = nix_mode(check)?;
+    if runner.nix_inventory.is_none() {
+        let system = runner.run(
+            &strings(&[
+                "nix",
+                "eval",
+                "--impure",
+                "--raw",
+                "--expr",
+                "builtins.currentSystem",
+            ]),
+            true,
+        )?;
+        let inventory = runner.run(
+            &strings(&[
+                "nix",
+                "eval",
+                "--no-update-lock-file",
+                "--json",
+                &format!(".#checks.{system}"),
+                "--apply",
+                "builtins.attrNames",
+            ]),
+            true,
+        )?;
+        runner.nix_inventory = Some((system, serde_json::from_str(&inventory)?));
+    }
+    let (system, inventory) = runner
+        .nix_inventory
+        .as_ref()
+        .ok_or_else(|| failure("Missing Nix inventory"))?;
+    if inventory.is_empty() {
+        return Err(failure("No native checks declared; refusing empty success"));
+    }
+    if let Some(expected) = &check.expected_checks {
+        let mut expected = expected.clone();
+        let mut actual = inventory.clone();
+        expected.sort();
+        actual.sort();
+        if actual != expected {
+            return Err(failure("Native inventory differs from expected_checks"));
+        }
+    }
+    event(json!({"event":"nix-inventory", "system":system, "checks":inventory, "mode":mode}));
+    let mut command = strings(&[
+        "nix",
+        "flake",
+        "check",
+        "--no-update-lock-file",
+        "--keep-going",
+        "--print-build-logs",
+    ]);
+    match mode {
+        "list" => return Ok(()),
+        "native" => {}
+        "eval" => command.extend(strings(&["--all-systems", "--no-build"])),
+        "all-systems" => command.push("--all-systems".into()),
+        "named" => {
+            if check.checks.is_empty() || check.checks.iter().any(|c| !inventory.contains(c)) {
+                return Err(failure(
+                    "Named Nix checks must be a nonempty subset of native checks",
+                ));
+            }
+            command = strings(&[
+                "nix",
+                "build",
+                "--no-update-lock-file",
+                "--no-link",
+                "--keep-going",
+                "--print-build-logs",
+            ]);
+            for name in &check.checks {
+                command.push(format!(
+                    ".#checks.{system}.{}",
+                    serde_json::to_string(name)?
+                ));
+            }
+        }
+        _ => return Err(failure("Unknown Nix mode")),
+    }
+    runner.run(&command, false)?;
+    Ok(())
+}
+pub(crate) fn javascript_executable(manager: &str, windows: bool) -> &str {
+    match (manager, windows) {
+        ("npm", true) => "npm.cmd",
+        ("pnpm", true) => "pnpm.cmd",
+        _ => manager,
+    }
+}
+pub(crate) fn javascript_commands(check: &Check) -> Result<Vec<Vec<String>>> {
+    let manager = check.manager.as_deref().unwrap_or("npm");
+    let executable = javascript_executable(manager, cfg!(windows));
+    let install = match manager {
+        "npm" => strings(&[
+            executable,
+            "ci",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+        ]),
+        "bun" => strings(&[executable, "install", "--frozen-lockfile"]),
+        "pnpm" => strings(&[executable, "install", "--frozen-lockfile"]),
+        _ => return Err(failure("JavaScript manager must be npm, bun, or pnpm")),
+    };
+    let defaults = strings(&["test"]);
+    let scripts = check.scripts.as_ref().unwrap_or(&defaults);
+    if scripts.is_empty() {
+        return Err(failure("JavaScript script selection is empty"));
+    }
+    let mut commands = Vec::new();
+    if check.install.unwrap_or(true) {
+        commands.push(install);
+    }
+    for script in scripts {
+        if script.is_empty() {
+            return Err(failure("JavaScript script names must not be empty"));
+        }
+        commands.push(strings(&[executable, "run", script]));
+    }
+    Ok(commands)
+}
+
+fn nix_mode(check: &Check) -> Result<&str> {
+    let mode = check.mode.as_deref().unwrap_or("native");
+    match mode {
+        "list" | "native" | "eval" | "all-systems" => Ok(mode),
+        "named" if !check.checks.is_empty() && check.checks.iter().all(|name| !name.is_empty()) => {
+            Ok(mode)
+        }
+        "named" => Err(failure("Named Nix checks require nonempty check names")),
+        _ => Err(failure("Unknown Nix mode")),
+    }
+}
+
+pub(crate) fn validate_check(check: &Check) -> Result<()> {
+    let commands = match check.kind.as_str() {
+        "cargo" => {
+            if check.toolchain.as_deref() == Some("") {
+                return Err(failure("Cargo toolchain must not be empty"));
+            }
+            if !matches!(
+                check.test_runner.as_deref(),
+                None | Some("cargo" | "nextest")
+            ) {
+                return Err(failure("Unknown Cargo test runner"));
+            }
+            cargo_commands(check, &strings(&["cargo"]), "1")?
+        }
+        "javascript" => javascript_commands(check)?,
+        "nix" => {
+            nix_mode(check)?;
+            return Ok(());
+        }
+        "commands" if !check.commands.is_empty() => check.commands.clone(),
+        "commands" => return Err(failure("Custom command selection is empty")),
+        _ => return Err(failure(format!("Unknown check kind: {}", check.kind))),
+    };
+    for command in commands {
+        validate_command(&command)?;
+    }
+    Ok(())
+}

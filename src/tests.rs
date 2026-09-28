@@ -1,4 +1,14 @@
 use super::*;
+use crate::{
+    checks::{javascript_executable, mold_driver},
+    source::resolve_archive_path,
+};
+use std::{
+    collections::BTreeSet,
+    fs::{OpenOptions, TryLockError},
+    path::PathBuf,
+    process::{Command, Stdio},
+};
 use tempfile::TempDir;
 
 fn environment(items: &[(&str, &str)]) -> Environment {

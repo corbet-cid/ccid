@@ -426,7 +426,9 @@ fn compatibility(version: &str) -> Option<(u64, u64, u64)> {
     })
 }
 
-fn direct_package_versions(metadata: &str) -> Result<BTreeMap<String, BTreeSet<(u64, u64, u64)>>> {
+type PackageCompatibility = BTreeMap<String, BTreeSet<(u64, u64, u64)>>;
+
+fn direct_package_versions(metadata: &str) -> Result<PackageCompatibility> {
     let document: serde_json::Value = serde_json::from_str(metadata)?;
     let members = document
         .get("workspace_members")

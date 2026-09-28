@@ -54,6 +54,7 @@ if [[ $ci_mode == test ]]; then
   PYTHONPATH=. python3 .ci/release_publish_test.py
 fi
 cargo fmt --all -- --check
+cargo clippy --all-targets --release --locked --target "$ci_target" -- -D warnings
 cargo test --release --locked --target "$ci_target"
 [[ $ci_mode != test ]] || exit 0
 cargo build --release --locked --target "$ci_target"

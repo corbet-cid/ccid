@@ -1,5 +1,6 @@
 //! Forge adapters and CLI for the cqlt quality library.
 mod prose;
+mod semantic;
 use ccid::{Environment, Result, Runner};
 use clap::{Subcommand, ValueEnum};
 use cqlt::{Document, Organization, Policy, Repository, Severity, Snapshot, Status, Visibility};
@@ -29,6 +30,8 @@ pub enum Threshold {
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// Prepare, replay, or explicitly execute cqlt's Jev semantic review.
+    Semantic(semantic::Options),
     /// Check writing with cqlt's subordinate Vale backend. Requires installed Vale.
     Prose(prose::Options),
     /// Collect visible organizations and repositories using read-only forge APIs.
@@ -61,6 +64,7 @@ pub enum Action {
 
 pub fn run(action: Action) -> Result<u8> {
     match action {
+        Action::Semantic(options) => semantic::run(options),
         Action::Prose(options) => prose::run(options),
         Action::Check {
             snapshot,

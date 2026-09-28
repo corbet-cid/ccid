@@ -11,7 +11,7 @@ repository = "https://github.com/corbet-libs/ccid"
 windows-experimental = []
 
 [dependencies]
-cqlt = { git = "https://github.com/corbet-foss/cqlt", rev = "f67e442bc459e9df7359c71bd6a2f237e5dadd23" }
+cqlt = { git = "https://github.com/corbet-foss/cqlt", rev = "e6275c5373954ca7f3b4fc680ffaccc149dc32f6" }
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 process-wrap = { version = "10.0", default-features = false, features = ["std", "process-group", "job-object"] }
@@ -26,3 +26,12 @@ tempfile = "3"
 [target.'cfg(windows)'.dependencies]
 process-wrap = { version = "10.0", default-features = false, features = ["tokio1", "job-object", "kill-on-drop"] }
 tokio = { version = "1", features = ["rt", "process", "io-util", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

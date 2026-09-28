@@ -328,3 +328,5 @@ normal exit, timeout, Ctrl-C, parent-exits-first and forced runner termination
 before this backend becomes the default. This is an implementation available
 for validation, not a Windows success claim. Nix checks explicitly require a
 supported Nix host. No macOS or Windows hosted build is triggered by this repo.
+
+See the [code quality baseline](docs/code-quality.md) for enforced checks and review principles.
