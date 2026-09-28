@@ -3,6 +3,7 @@ use serde_json::json;
 use std::{
     fs,
     net::TcpListener,
+    os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -11,7 +12,11 @@ use std::{
 struct Daemon(Child);
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.0.kill();
+        // Git's dispatcher can retain a child git-daemon process. Terminate
+        // this fixture's entire isolated group, including inherited lock FDs.
+        let _ = Command::new("kill")
+            .args(["-TERM", "--", &format!("-{}", self.0.id())])
+            .status();
         let _ = self.0.wait();
     }
 }
@@ -58,6 +63,7 @@ fn exact_clone_falls_back_without_moving_refs_or_overwriting_existing_work() {
         .port();
     let _daemon = Daemon(
         Command::new("git")
+            .process_group(0)
             .args([
                 "daemon",
                 "--reuseaddr",
