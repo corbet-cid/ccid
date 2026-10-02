@@ -123,6 +123,11 @@ constraint responsibility. Ordinary checks continue to require `--locked`.
 The workflow that consumes a candidate must publish that exact snapshot to both
 provider paths, preserving one resolved lock identity.
 
+For multiple independent Cargo/npm graphs in one frozen candidate, use the
+[committed inventory mode](docs/resolve-inventory.md). Its graph/check list comes
+from verified source, never caller selectors. Existing single-root semantics stay
+unchanged.
+
 For an initial lock or a manifest change that makes the old lock unusable,
 explicitly pass `--generate-lockfile` (Crow variable
 `RESOLVE_GENERATE_LOCKFILE=1`). This runs `cargo generate-lockfile` followed by

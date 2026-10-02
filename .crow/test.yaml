@@ -5,6 +5,8 @@ skip_clone: true
 variables:
   SOURCE_ARCHIVE: {default: ""}
   SOURCE_SHA256: {default: ""}
+  DEPENDENCY_SOURCE_ARCHIVE: {default: ""}
+  DEPENDENCY_SOURCE_SHA256: {default: ""}
   CI_JOBS: {default: ""}
   CI_MEMORY_MB: {default: ""}
   CI_MEMORY_PER_JOB_MB: {default: ""}
@@ -23,6 +25,7 @@ steps:
         set -eu
         TMPDIR="$${TMPDIR:-/tmp}"
         export TMPDIR
+        export CI_REPOSITORY_URL="$${CI_REPOSITORY_URL:-https://github.com/corbet-libs/ccid}"
         export MODE=test
         exec python3 - <<'PY_BOOTSTRAP'
         import hashlib, os, pathlib, re, runpy, shutil, signal, subprocess, sys, tarfile, tempfile

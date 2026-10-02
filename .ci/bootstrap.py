@@ -4,7 +4,10 @@
 The Crow loader has already verified and privately staged this source. Do not
 invoke legacy run_checks: that entry point retains its old pinned cache policy.
 """
+import hashlib
 import os
+import re
+import tarfile
 from pathlib import Path
 import signal
 import sys
@@ -16,7 +19,7 @@ def interrupted(_signal, _frame):
     raise KeyboardInterrupt
 
 
-def main():
+def run_build():
     signal.signal(signal.SIGTERM, interrupted)
     environment = dict(os.environ)
     reserve = environment.get("CI_MIN_AVAILABLE_MB")
@@ -49,6 +52,37 @@ def main():
     ccid.event("bootstrap-budget", **resources)
     runner = ccid.Runner(Path.cwd(), environment, resources["timeout"])
     runner.run(["bash", ".ci/build.sh", environment.get("MODE") or "build"])
+
+
+def main():
+    archive = os.environ.get("DEPENDENCY_SOURCE_ARCHIVE", "")
+    digest = os.environ.get("DEPENDENCY_SOURCE_SHA256", "")
+    if not archive and not digest:
+        return run_build()
+    if not archive or not re.fullmatch("[0-9a-f]{64}", digest):
+        raise ccid.Failure("Dependency source archive and digest are required together")
+    with open(archive, "rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != digest:
+            raise ccid.Failure("Dependency source archive digest mismatch")
+        stream.seek(0)
+        with tarfile.open(fileobj=stream, mode="r:") as bundle:
+            members = [member for member in bundle if member.name == "closure.py"]
+            if len(members) != 1 or not members[0].isfile() or members[0].size > 1024 * 1024:
+                raise ccid.Failure("Invalid dependency source consumer")
+            program = bundle.extractfile(members[0]).read()
+    if hashlib.sha256(program).hexdigest() != "293450018834cd60ff58e0c62d78de8cfcf21c060fb4de5d905200afd0bd84da":
+        raise ccid.Failure("Unreviewed dependency source consumer")
+    namespace = {"__name__": "verified_dependency_source"}
+    exec(compile(program, "verified-dependency-source", "exec"), namespace)
+    # The source loader already verified this checkout; the unchanged consumer
+    # independently binds its original archive/locks and supplies process-local Git.
+    status = namespace["consume"](
+        archive, digest, os.environ["SOURCE_ARCHIVE"], os.environ["SOURCE_SHA256"],
+        os.environ["CI_COMMIT_SHA"], os.environ["CI_REPOSITORY_URL"],
+        os.environ.get("TMPDIR") or "/tmp",
+        [sys.executable, "-c", "import runpy; runpy.run_path('.ci/bootstrap.py')['run_build']()"],
+    )
+    raise SystemExit(status)
 
 
 if __name__ == "__main__":

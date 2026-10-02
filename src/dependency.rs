@@ -17,6 +17,9 @@ use tempfile::Builder;
 
 const RESOLVE_ENV: &str = "CCID_RESOLVE_CARGO";
 
+mod inventory;
+pub use inventory::resolve_inventory;
+
 #[derive(Debug, Serialize)]
 struct Receipt {
     schema: u32,

@@ -16,3 +16,8 @@ commands = [["python3", ".ci/registry_publish_test.py"]]
 [checks.hosted-contract]
 kind = "commands"
 commands = [["python3", ".ci/test_hosted_budget.py", "--lint"]]
+
+# Diagnostic prerequisite only: retain a real lock for the cqlt main transition.
+[checks.cqlt-main-lock]
+kind = "commands"
+commands = [["python3", ".ci/cqlt_main_lock.py"]]

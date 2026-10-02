@@ -28,7 +28,7 @@ mod source;
 
 pub use checks::cargo_commands;
 use checks::{cargo_prefix, javascript_commands, nix_check, validate_check};
-pub use dependency::resolve_cargo;
+pub use dependency::{resolve_cargo, resolve_inventory};
 pub use runner::Runner;
 use source::safe_relative;
 pub use source::{sha256_file, verify_source};

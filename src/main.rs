@@ -64,6 +64,9 @@ enum Action {
         output_dir: PathBuf,
         #[arg(long = "check")]
         checks: Vec<String>,
+        /// Resolve every graph and run every check in committed .ci/resolve.toml.
+        #[arg(long, conflicts_with_all = ["checks", "generate_lockfile"])]
+        inventory: bool,
         /// Generate a lock from the committed manifests when no coherent baseline exists.
         #[arg(long)]
         generate_lockfile: bool,
@@ -166,6 +169,7 @@ fn main() -> ExitCode {
             repo,
             output_dir,
             checks,
+            inventory,
             generate_lockfile,
             plan,
             parent_watch,
@@ -193,7 +197,11 @@ fn main() -> ExitCode {
                     };
                 }
             }
-            ccid::resolve_cargo(&repo, &output_dir, &checks, generate_lockfile, plan)
+            if inventory {
+                ccid::resolve_inventory(&repo, &output_dir, plan)
+            } else {
+                ccid::resolve_cargo(&repo, &output_dir, &checks, generate_lockfile, plan)
+            }
         }
     };
     match outcome {
@@ -202,5 +210,47 @@ fn main() -> ExitCode {
             eprintln!("ccid: {error}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod inventory_cli_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_inventory_refuses_caller_check_and_generation_overrides() {
+        for suffix in [vec!["--check", "native"], vec!["--generate-lockfile"]] {
+            let mut args = vec![
+                "ccid",
+                "cargo-resolve",
+                "--output-dir",
+                "artifacts",
+                "--inventory",
+            ];
+            args.extend(suffix);
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        assert!(Cli::try_parse_from([
+            "ccid",
+            "cargo-resolve",
+            "--output-dir",
+            "artifacts",
+            "--inventory"
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn existing_single_root_selection_remains_available() {
+        assert!(Cli::try_parse_from([
+            "ccid",
+            "cargo-resolve",
+            "--output-dir",
+            "artifacts",
+            "--check",
+            "native",
+            "--generate-lockfile",
+        ])
+        .is_ok());
     }
 }
