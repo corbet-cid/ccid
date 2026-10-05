@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
@@ -9,7 +9,6 @@ use std::{
     fs, io,
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -19,13 +18,19 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 pub type Environment = BTreeMap<OsString, OsString>;
 
 mod admission;
+mod budget;
 mod cache;
+mod cached;
 mod checks;
 mod dependency;
 pub mod forge;
+pub mod jobs;
 mod runner;
 mod source;
 
+use budget::positive;
+pub use budget::{budget, Budget};
+pub use cached::run_cached;
 pub use checks::cargo_commands;
 use checks::{cargo_prefix, javascript_commands, nix_check, validate_check};
 pub use dependency::resolve_cargo;
@@ -38,6 +43,35 @@ fn failure(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Syn
 }
 fn event(value: serde_json::Value) {
     println!("{value}");
+    append_receipt(&value);
+}
+
+/// Optional machine-readable copy of every event, enabled by `CCID_RECEIPT=<file>`.
+/// `ccid cached` declares this file as a cached task output, so a result restored
+/// from the cache still carries the receipt of the run that produced it.
+fn append_receipt(value: &serde_json::Value) {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    static RECEIPT: OnceLock<Option<Mutex<fs::File>>> = OnceLock::new();
+    let file = RECEIPT.get_or_init(|| {
+        let path = std::env::var_os("CCID_RECEIPT").filter(|p| !p.is_empty())?;
+        let path = Path::new(&path);
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => Some(Mutex::new(file)),
+            Err(error) => {
+                eprintln!("ccid: cannot open CCID_RECEIPT {}: {error}", path.display());
+                None
+            }
+        }
+    });
+    if let Some(file) = file {
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(file, "{value}");
+        }
+    }
 }
 fn value(environment: &Environment, name: &str) -> Option<String> {
     environment
@@ -47,76 +81,6 @@ fn value(environment: &Environment, name: &str) -> Option<String> {
 }
 fn set(environment: &mut Environment, name: &str, v: impl Into<OsString>) {
     environment.insert(name.into(), v.into());
-}
-fn positive(v: &str, name: &str) -> Result<u64> {
-    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) || v.starts_with('0') {
-        return Err(failure(format!("{name} must be a positive integer")));
-    }
-    Ok(v.parse()?)
-}
-fn cpu_budget() -> u64 {
-    let available = thread::available_parallelism().map_or(1, |n| n.get() as u64);
-    if let Ok(quota) = fs::read_to_string("/sys/fs/cgroup/cpu.max") {
-        let fields: Vec<_> = quota.split_whitespace().collect();
-        if fields.first() == Some(&"max") {
-            return available;
-        }
-        if let [q, p] = fields.as_slice() {
-            if let (Ok(q), Ok(p)) = (q.parse::<u64>(), p.parse::<u64>()) {
-                if let Some(jobs) = q.checked_div(p) {
-                    return available.min(jobs.max(1));
-                }
-            }
-        }
-    }
-    available.clamp(1, 4)
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct Budget {
-    pub jobs: u64,
-    pub test_threads: u64,
-    pub nix_jobs: u64,
-    pub nix_cores: u64,
-    pub memory_mb: Option<u64>,
-    pub timeout: u64,
-}
-pub fn budget(environment: &Environment) -> Result<Budget> {
-    let jobs = value(environment, "CI_JOBS").or_else(|| value(environment, "CARGO_BUILD_JOBS"));
-    let mut jobs = positive(&jobs.unwrap_or_else(|| cpu_budget().to_string()), "CI_JOBS")?;
-    let memory = value(environment, "CI_MEMORY_MB")
-        .map(|v| positive(&v, "CI_MEMORY_MB"))
-        .transpose()?;
-    if let Some(per_job) = value(environment, "CI_MEMORY_PER_JOB_MB") {
-        let per_job = positive(&per_job, "CI_MEMORY_PER_JOB_MB")?;
-        let allocation =
-            memory.ok_or_else(|| failure("CI_MEMORY_PER_JOB_MB requires CI_MEMORY_MB"))?;
-        if allocation < per_job {
-            return Err(failure("Memory allocation cannot fit one job"));
-        }
-        jobs = jobs.min(allocation / per_job);
-    }
-    let nix_jobs = positive(
-        &value(environment, "CI_NIX_JOBS").unwrap_or_else(|| "1".into()),
-        "CI_NIX_JOBS",
-    )?;
-    if nix_jobs > jobs {
-        return Err(failure("CI_NIX_JOBS exceeds the allocated CPU budget"));
-    }
-    Ok(Budget {
-        jobs,
-        test_threads: positive(
-            &value(environment, "CI_TEST_THREADS").unwrap_or_else(|| jobs.to_string()),
-            "CI_TEST_THREADS",
-        )?,
-        nix_jobs,
-        nix_cores: jobs / nix_jobs,
-        memory_mb: memory,
-        timeout: positive(
-            &value(environment, "CI_TIMEOUT").unwrap_or_else(|| "2700".into()),
-            "CI_TIMEOUT",
-        )?,
-    })
 }
 
 fn strings(args: &[&str]) -> Vec<String> {
@@ -138,6 +102,8 @@ struct Manifest {
     schema: u32,
     project: String,
     checks: BTreeMap<String, Check>,
+    #[serde(default)]
+    jobs: BTreeMap<String, jobs::Job>,
 }
 #[derive(Debug, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -160,7 +126,55 @@ pub struct Check {
     scripts: Option<Vec<String>>,
     install: Option<bool>,
     commands: Vec<Vec<String>>,
+    cache_outputs: Vec<String>,
+    cache_tools: Vec<Vec<String>>,
+    cache_env: Vec<String>,
 }
+/// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
+fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
+    let bytes = fs::read(root.join(manifest))?;
+    let parsed: Manifest = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    let slug = &parsed.project;
+    if parsed.schema != 1
+        || slug.is_empty()
+        || !slug.as_bytes()[0].is_ascii_alphanumeric()
+        || !slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+    {
+        return Err(failure(
+            "Manifest requires schema=1 and a plain project slug",
+        ));
+    }
+    Ok((parsed, bytes))
+}
+
+/// Resolve comma-separated selectors to declared check names and validate the
+/// complete selection before any check can execute. Planning and execution
+/// share the same command builders and static rules.
+fn select_checks(manifest: &Manifest, selectors: &[String]) -> Result<Vec<String>> {
+    let mut selected = Vec::new();
+    for selector in selectors {
+        for name in selector.split(',').filter(|s| !s.is_empty()) {
+            if !selected.contains(&name.to_owned()) {
+                selected.push(name.to_owned());
+            }
+        }
+    }
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|name| !manifest.checks.contains_key(name))
+    {
+        return Err(failure("Select one or more declared nonempty check names"));
+    }
+    for name in &selected {
+        validate_check(&manifest.checks[name])
+            .map_err(|error| failure(format!("Invalid check {name}: {error}")))?;
+    }
+    Ok(selected)
+}
+
 pub fn run_checks(repo: &Path, manifest: &Path, selectors: &[String], plan: bool) -> Result<()> {
     run_checks_inner(repo, manifest, selectors, plan, CheckContext::default())
 }
@@ -237,42 +251,9 @@ fn run_checks_inner(
     } = context;
     let archive = verified_commit.is_some();
     let root = repo.canonicalize()?;
-    let manifest_path = root.join(manifest);
-    let bytes = fs::read(&manifest_path)?;
-    let manifest: Manifest = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    let (manifest, bytes) = load_manifest(&root, manifest)?;
     let slug = &manifest.project;
-    if manifest.schema != 1
-        || slug.is_empty()
-        || !slug.as_bytes()[0].is_ascii_alphanumeric()
-        || !slug
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-    {
-        return Err(failure(
-            "Manifest requires schema=1 and a plain project slug",
-        ));
-    }
-    let mut selected = Vec::new();
-    for selector in selectors {
-        for name in selector.split(',').filter(|s| !s.is_empty()) {
-            if !selected.contains(&name.to_owned()) {
-                selected.push(name.to_owned());
-            }
-        }
-    }
-    if selected.is_empty()
-        || selected
-            .iter()
-            .any(|name| !manifest.checks.contains_key(name))
-    {
-        return Err(failure("Select one or more declared nonempty check names"));
-    }
-    // Validate the complete selection before any earlier check can execute.
-    // Planning and execution share the same command builders and static rules.
-    for name in &selected {
-        validate_check(&manifest.checks[name])
-            .map_err(|error| failure(format!("Invalid check {name}: {error}")))?;
-    }
+    let selected = select_checks(&manifest, selectors)?;
     let mut environment = base_environment.unwrap_or_else(|| std::env::vars_os().collect());
     if let Some(commit) = verified_commit {
         set(&mut environment, "CI_COMMIT_SHA", commit);

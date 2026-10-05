@@ -1,10 +1,12 @@
 //! Cache ownership and freshness for verified, disposable archive sources.
 use super::*;
+use serde::Serialize;
 use std::{
     fs::{File, OpenOptions, TryLockError},
     io::{Read, Write},
     path::PathBuf,
     process::Command,
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 

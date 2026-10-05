@@ -18,6 +18,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Execute one exact archived job supplied by a scheduler adapter.
+    ExecuteJob {
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long, hide = true)]
+        parent_watch: bool,
+    },
+    /// Plan a repository job for Crow or Argo; adapters submit the returned command.
+    Job {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = ".ci/ccid.toml")]
+        manifest: PathBuf,
+        #[arg(long)]
+        job: String,
+        #[arg(long, value_enum)]
+        scheduler: Option<ccid::jobs::Scheduler>,
+    },
     /// Repository placement, exact cloning and execution failover policy.
     Forge {
         #[command(subcommand)]
@@ -57,6 +75,22 @@ enum Action {
         #[arg(long, hide = true, conflicts_with = "plan")]
         parent_watch: bool,
     },
+    /// Run selected checks through moon so unchanged inputs reuse earlier results.
+    /// Requires `moon` and this ccid revision on PATH; `CCID_REMOTE_CACHE` enables
+    /// a shared remote cache. The moon configuration is generated per run.
+    Cached {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = ".ci/ccid.toml")]
+        manifest: PathBuf,
+        #[arg(long = "check", required = true)]
+        checks: Vec<String>,
+        #[arg(long)]
+        plan: bool,
+        /// Ignore cached results and run every selected check (periodic uncached runs).
+        #[arg(long, conflicts_with = "plan")]
+        force: bool,
+    },
     CargoResolve {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -77,6 +111,45 @@ enum Action {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let outcome = match cli.action {
+        Action::ExecuteJob {
+            request,
+            parent_watch,
+        } => {
+            if let Err(error) =
+                ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
+            {
+                eprintln!("ccid: cannot install cancellation handler: {error}");
+                return ExitCode::from(2);
+            }
+            #[cfg(unix)]
+            if parent_watch {
+                if let Err(error) = supervision::watch_parent() {
+                    eprintln!("ccid: cannot watch enclosing process: {error}");
+                    return ExitCode::from(2);
+                }
+            } else {
+                return match supervision::execute() {
+                    Ok(status) => ExitCode::from(status.code().unwrap_or(2) as u8),
+                    Err(error) => {
+                        eprintln!("ccid: cannot supervise job: {error}");
+                        ExitCode::from(2)
+                    }
+                };
+            }
+            std::fs::read(request)
+                .map_err(Into::into)
+                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+                .and_then(|request| ccid::jobs::execute(&request))
+        }
+        Action::Job {
+            repo,
+            manifest,
+            job,
+            scheduler,
+        } => ccid::jobs::plan(&repo, &manifest, &job, scheduler).and_then(|plan| {
+            println!("{}", serde_json::to_string(&plan)?);
+            Ok(())
+        }),
         Action::Forge { action } => {
             if let Err(error) =
                 ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
@@ -161,6 +234,22 @@ fn main() -> ExitCode {
             } else {
                 ccid::run_checks(&repo, &manifest, &checks, plan)
             }
+        }
+        Action::Cached {
+            repo,
+            manifest,
+            checks,
+            plan,
+            force,
+        } => {
+            if let Err(error) =
+                ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
+            {
+                eprintln!("ccid: cannot install cancellation handler: {error}");
+                return ExitCode::from(2);
+            }
+            // Each check moon starts is an ordinary, separately supervised `ccid check`.
+            ccid::run_cached(&repo, &manifest, &checks, plan, force)
         }
         Action::CargoResolve {
             repo,

@@ -8,6 +8,7 @@ use std::{
     fs::{OpenOptions, TryLockError},
     path::PathBuf,
     process::{Command, Stdio},
+    thread,
 };
 use tempfile::TempDir;
 
