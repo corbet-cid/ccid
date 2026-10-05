@@ -96,6 +96,17 @@ workflow, and `command` is the same entrypoint used by its Argo counterpart.
 This explicit choice does not retry failures on another scheduler or duplicate
 active work. Queue-aware automatic selection remains a separate policy.
 
+`ccid render` generates the manual Crow adapter and shared job inventory from
+these definitions; `ccid render --check` detects drift without writing files.
+See [adapter rendering](docs/rendering.md) for the tool pin and staging contract.
+This repository declares `verify` for its full checks and `compile` for a narrow
+Rust build, both using the same verified job runtime.
+
+`ccid forge sync` inspects explicitly selected replicas and reconciles them only
+with `--apply`. It never force-pushes or deletes refs. See
+[forge reconciliation](docs/forge-sync.md) for completion semantics and external
+content limits.
+
 ## Manifest
 
 Each repository owns `.ci/ccid.toml`:

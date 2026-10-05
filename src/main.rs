@@ -10,7 +10,7 @@ mod forge_cli;
 mod quality;
 
 #[derive(Parser)]
-#[command(about = "Shared check commands invoked by Crow", version)]
+#[command(about = "Shared checks and repository jobs for Crow or Argo", version)]
 struct Cli {
     #[command(subcommand)]
     action: Action,
@@ -22,8 +22,21 @@ enum Action {
     ExecuteJob {
         #[arg(long)]
         request: PathBuf,
+        /// Require the archived job to match the scheduler's source identity.
+        #[arg(long)]
+        expect_commit: Option<String>,
         #[arg(long, hide = true)]
         parent_watch: bool,
+    },
+    /// Generate owned scheduler adapters from the repository job manifest.
+    Render {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = ".ci/ccid.toml")]
+        manifest: PathBuf,
+        /// Detect missing or changed generated adapters without writing.
+        #[arg(long)]
+        check: bool,
     },
     /// Plan a repository job for Crow or Argo; adapters submit the returned command.
     Job {
@@ -113,6 +126,7 @@ fn main() -> ExitCode {
     let outcome = match cli.action {
         Action::ExecuteJob {
             request,
+            expect_commit,
             parent_watch,
         } => {
             if let Err(error) =
@@ -138,9 +152,27 @@ fn main() -> ExitCode {
             }
             std::fs::read(request)
                 .map_err(Into::into)
-                .and_then(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
-                .and_then(|request| ccid::jobs::execute(&request))
+                .and_then(|bytes| {
+                    serde_json::from_slice::<ccid::jobs::Request>(&bytes).map_err(Into::into)
+                })
+                .and_then(|request| {
+                    if expect_commit
+                        .as_ref()
+                        .is_some_and(|expected| expected != &request.commit)
+                    {
+                        return Err("Job source does not match the scheduler commit".into());
+                    }
+                    ccid::jobs::execute(&request)
+                })
         }
+        Action::Render {
+            repo,
+            manifest,
+            check,
+        } => ccid::render::render(&repo, &manifest, check).and_then(|report| {
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }),
         Action::Job {
             repo,
             manifest,

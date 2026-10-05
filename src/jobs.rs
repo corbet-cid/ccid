@@ -63,6 +63,7 @@ pub fn execute(request: &Request) -> Result<()> {
         environment.insert(key.into(), value.into());
     }
     environment.insert("CI_COMMIT_SHA".into(), request.commit.clone().into());
+    environment.insert("CCID_BIN".into(), std::env::current_exe()?.into_os_string());
     crate::admission::admit(&mut environment)?;
     let scratch = crate::cache::scratch(&mut environment)?;
     let bundle = scratch.path().join("source.bundle");

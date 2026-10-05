@@ -90,8 +90,45 @@ impl Runner {
             ))
         }
     }
+    /// Capture bounded binary output with stdin read from a caller-owned file.
+    /// The file is opened read-only; ownership, contents and lifetime remain the
+    /// caller's responsibility. The ordinary `run` path keeps null stdin.
+    pub fn run_bytes_with_input_file(
+        &self,
+        argv: &[String],
+        input: &std::path::Path,
+    ) -> Result<Vec<u8>> {
+        validate_command(argv)?;
+        if INTERRUPTED.load(Ordering::SeqCst) || Instant::now() >= self.deadline {
+            return Err(failure("Check interrupted or total deadline exceeded"));
+        }
+        #[cfg(unix)]
+        {
+            self.run_unix_bytes(argv, true, Some(input))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = input;
+            Err(failure(
+                "Binary input execution requires the verified Unix backend",
+            ))
+        }
+    }
     #[cfg(unix)]
     fn run_unix(&self, argv: &[String], capture: bool) -> Result<String> {
+        Ok(
+            String::from_utf8(self.run_unix_bytes(argv, capture, None)?)?
+                .trim()
+                .to_owned(),
+        )
+    }
+    #[cfg(unix)]
+    fn run_unix_bytes(
+        &self,
+        argv: &[String],
+        capture: bool,
+        input: Option<&Path>,
+    ) -> Result<Vec<u8>> {
         let started = Instant::now();
         let mut command = Command::new(&argv[0]);
         command
@@ -99,7 +136,12 @@ impl Runner {
             .current_dir(&self.root)
             .env_clear()
             .envs(&self.environment);
-        command.stdin(Stdio::null()).stderr(Stdio::inherit());
+        command
+            .stdin(match input {
+                Some(path) => Stdio::from(std::fs::File::open(path)?),
+                None => Stdio::null(),
+            })
+            .stderr(Stdio::inherit());
         command.stdout(if capture {
             Stdio::piped()
         } else {
@@ -173,8 +215,8 @@ impl Runner {
             if bytes.len() > 16 * 1024 * 1024 {
                 return Err(failure("Captured command output exceeded 16 MiB"));
             }
-            return Ok(String::from_utf8(bytes)?.trim().to_owned());
+            return Ok(bytes);
         }
-        Ok(String::new())
+        Ok(Vec::new())
     }
 }

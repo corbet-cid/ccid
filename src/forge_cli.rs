@@ -45,6 +45,27 @@ pub enum Action {
         #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
     },
+    /// Reconcile declared secondaries from the primary; writes require --apply.
+    Sync {
+        #[arg(long)]
+        policy: PathBuf,
+        #[arg(long)]
+        repository: String,
+        #[arg(
+            long = "ref",
+            required_unless_present = "all_refs",
+            conflicts_with = "all_refs"
+        )]
+        refs: Vec<String>,
+        #[arg(long)]
+        all_refs: bool,
+        #[arg(long = "to", visible_alias = "destination", required = true)]
+        destinations: Vec<String>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: u64,
+    },
 }
 
 fn read(path: PathBuf) -> Result<Policy> {
@@ -61,6 +82,39 @@ pub fn run(action: Action) -> Result<()> {
                 "{}",
                 serde_json::json!({"valid":true,"repositories":policy.repositories.len()})
             );
+        }
+        Action::Sync {
+            policy,
+            repository,
+            refs,
+            all_refs,
+            destinations,
+            apply,
+            timeout,
+        } => {
+            let report = ccid::forge_sync::reconcile(
+                &read(policy)?,
+                &repository,
+                &refs,
+                all_refs,
+                &destinations,
+                apply,
+                Duration::from_secs(timeout),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            let blocked = report.replicas.iter().any(|replica| {
+                matches!(
+                    replica.state,
+                    ccid::forge_sync::State::Blocked | ccid::forge_sync::State::Pending
+                )
+            });
+            let source_blocked = matches!(
+                report.source_state,
+                ccid::forge_sync::State::Blocked | ccid::forge_sync::State::Pending
+            );
+            if source_blocked || blocked || (apply && !report.completed()) {
+                return Err("Reconciliation is incomplete; inspect the JSON report".into());
+            }
         }
         Action::Plan { policy, repository } => {
             println!(

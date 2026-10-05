@@ -11,6 +11,10 @@ same read transport. Attribute rules constrain declarations; they do not infer
 ownership or create repositories. Visibility uses cqlt's type. Declared attributes
 remain claims until a collector verifies them; presentation checks remain in cqlt.
 
+`ccid forge sync` provides explicit, bounded, fast-forward-only reconciliation from
+the declared primary to selected secondaries. See [its safety and completeness
+contract](forge-sync.md), including offline replicas and external content.
+
 `ccid forge clone --policy forges.json --repository widget --commit FULL_SHA
 --destination NEW_DIRECTORY` tries the primary then the declared clone fallbacks.
 Each attempt has a bounded timeout and an isolated object database. Only the

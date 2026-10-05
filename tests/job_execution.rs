@@ -23,7 +23,7 @@ fn archived_job_preserves_exact_source_and_rejects_tampered_history() {
     fs::create_dir_all(repo.join(".ci")).unwrap();
     git(&repo, &["init", "-q", "-b", "source"]);
     fs::write(repo.join(".ci/ccid.toml"), "schema=1\nproject='fixture'\n[checks.test]\nkind='commands'\ncommands=[['true']]\n[jobs.verify]\nchecks=['test']\nworkflow='verify'\ncommand=['sh','.ci/run.sh']\n").unwrap();
-    fs::write(repo.join(".ci/run.sh"), "set -eu\ntest \"$(git rev-parse HEAD)\" = \"$CI_COMMIT_SHA\"\ntest \"$CHECKS\" = test\nprintf '%s' \"$CI_COMMIT_SHA\" > \"$RESULT\"\n").unwrap();
+    fs::write(repo.join(".ci/run.sh"), "set -eu\ntest -x \"$CCID_BIN\"\ntest \"$(git rev-parse HEAD)\" = \"$CI_COMMIT_SHA\"\ntest \"$CHECKS\" = test\nprintf '%s' \"$CI_COMMIT_SHA\" > \"$RESULT\"\n").unwrap();
     git(&repo, &["add", ".ci"]);
     git(
         &repo,
@@ -62,18 +62,25 @@ fn archived_job_preserves_exact_source_and_rejects_tampered_history() {
         "archive":archive,"sha256":ccid::sha256_file(&archive).unwrap(),
         "commit":commit,"bundle":bundle,"bundle_sha256":ccid::sha256_file(&bundle).unwrap(),
         "tool_revision":ccid::SOURCE_REVISION,"job":"verify",
-        "environment":{"RESULT":result, "CI_COMMIT_SHA":"untrusted-override", "CI_MIN_AVAILABLE_MB":"1"}
+        "environment":{"RESULT":result, "CI_COMMIT_SHA":"untrusted-override", "CCID_BIN":"/nonexistent/untrusted-override", "CI_MIN_AVAILABLE_MB":"1"}
     });
     let input = temp.path().join("request.json");
-    let run = |request: &serde_json::Value| {
+    let run = |request: &serde_json::Value, expected: &str| {
         fs::write(&input, serde_json::to_vec(request).unwrap()).unwrap();
         Command::new(env!("CARGO_BIN_EXE_ccid"))
             .args(["execute-job", "--request"])
             .arg(&input)
+            .args(["--expect-commit", expected])
             .output()
             .unwrap()
     };
-    let output = run(&request);
+    let rejected = run(&request, &"0".repeat(40));
+    assert!(!rejected.status.success());
+    assert!(
+        !result.exists(),
+        "Scheduler commit mismatch must not execute the job"
+    );
+    let output = run(&request, &commit);
     assert!(
         output.status.success(),
         "{}",
@@ -82,6 +89,6 @@ fn archived_job_preserves_exact_source_and_rejects_tampered_history() {
     assert_eq!(fs::read_to_string(&result).unwrap(), commit);
     fs::remove_file(&result).unwrap();
     request["bundle_sha256"] = json!("0".repeat(64));
-    assert!(!run(&request).status.success());
+    assert!(!run(&request, &commit).status.success());
     assert!(!result.exists(), "Rejected inputs must not execute the job");
 }

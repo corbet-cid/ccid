@@ -24,7 +24,9 @@ mod cached;
 mod checks;
 mod dependency;
 pub mod forge;
+pub mod forge_sync;
 pub mod jobs;
+pub mod render;
 mod runner;
 mod source;
 
@@ -104,6 +106,8 @@ struct Manifest {
     checks: BTreeMap<String, Check>,
     #[serde(default)]
     jobs: BTreeMap<String, jobs::Job>,
+    #[serde(default)]
+    render: Option<render::Config>,
 }
 #[derive(Debug, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]

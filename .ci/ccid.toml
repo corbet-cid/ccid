@@ -9,6 +9,12 @@ commands = [["bash", ".ci/build.sh", "test"]]
 kind = "commands"
 commands = [["bash", ".ci/build.sh"]]
 
+# A narrow Rust compile gate; the bootstrap remains responsible for publishing tools.
+[checks.compile]
+kind = "cargo"
+actions = ["build"]
+release = true
+
 [checks.registry-publisher]
 kind = "commands"
 commands = [["python3", ".ci/registry_publish_test.py"]]
@@ -16,3 +22,15 @@ commands = [["python3", ".ci/registry_publish_test.py"]]
 [checks.hosted-contract]
 kind = "commands"
 commands = [["python3", ".ci/test_hosted_budget.py", "--lint"]]
+
+[jobs.verify]
+scheduler = "crow"
+checks = ["test"]
+workflow = "repository-jobs"
+command = ["bash", ".ci/run-job.sh"]
+
+[jobs.compile]
+scheduler = "crow"
+checks = ["compile"]
+workflow = "repository-jobs"
+command = ["bash", ".ci/run-job.sh"]
