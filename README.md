@@ -49,7 +49,7 @@ to manufacture a new green badge.
 [moon](https://moonrepo.dev): each check becomes one moon task whose command is
 the ordinary `ccid check` for that check. moon hashes the repository inputs plus a
 tool identity (this ccid revision, the linker request and the toolchain versions
-of the selected checks) and skips checks whose exact inputs already passed. With
+of each check) and skips checks whose exact inputs already passed. With
 `CCID_REMOTE_CACHE=grpc://host:9092` (or `http(s)://`), results are shared through
 a Bazel Remote API cache such as bazel-remote, so another runner or machine reuses
 them. Each restored result carries the original receipt
@@ -65,7 +65,25 @@ example `.prototools`), which are hashed as repository inputs.
 
 Declare `cache_tools = [["go", "version"], ["git", "--version"]]` on custom
 checks to hash the actual installed tools, and `cache_env = ["CGO_ENABLED"]`
-for environment settings that affect their results. Declare produced files with
+for environment settings that affect their results. These identities are per check;
+selecting an additional check does not add its environment or tools to the others.
+Commit and branch identity are absent by default. A check that stamps Git metadata
+must declare `cache_commit = true`, which requires an exact `CI_COMMIT_SHA` and
+hashes it for that check alone. Listing `CI_COMMIT_SHA` in `cache_env` without this
+opt-in is rejected. Content-only build commands must also disable implicit VCS
+stamping (for example Go's `-buildvcs=false`). Receipts retain the producing commit;
+a restored receipt is evidence for that original run, not a new execution.
+
+Optional `cache_inputs = ["src/**", "Cargo.toml", "Cargo.lock", "build.rs"]`
+selects repository-relative file paths/globs for one check. Omit it to hash the
+full repository. `.git/`, `target/`, `.moon/`, `.ccid/`, generated `moon.yml` and
+declared outputs are always excluded. Explicit patterns must cover dependencies,
+scripts, tool pins and fixtures the command reads. The check's full declaration
+is always hashed, even when its manifest is outside those patterns. Narrow inputs
+allow a documentation-only commit to reuse code checks; the full-repository
+default still invalidates on documentation edits.
+
+Declare produced files with
 `cache_outputs = ["app"]`; cache hits restore these along with the receipt.
 Output paths are relative to the repository. The remote endpoint is passed to
 moon through its environment, so changing the cache address does not rewrite

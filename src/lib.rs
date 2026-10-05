@@ -109,7 +109,7 @@ struct Manifest {
     #[serde(default)]
     render: Option<render::Config>,
 }
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, serde::Serialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Check {
     kind: String,
@@ -133,6 +133,8 @@ pub struct Check {
     cache_outputs: Vec<String>,
     cache_tools: Vec<Vec<String>>,
     cache_env: Vec<String>,
+    cache_commit: bool,
+    cache_inputs: Option<Vec<String>>,
 }
 /// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
 fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
