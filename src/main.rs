@@ -151,6 +151,20 @@ enum Action {
 }
 
 fn main() -> ExitCode {
+    // Hidden compiler-wrapper diagnostic mode for one frozen library
+    // build: Cargo invokes this binary as RUSTC_WORKSPACE_WRAPPER with
+    // the real compiler first (workspace members only; artifacts cache
+    // separately by filename hash). Env-gated (cargo cannot inject
+    // subcommand names); all other invocations parse the CLI below as usual.
+    if std::env::var_os(ccid::rustc_diag::MODE_ENV).is_some() {
+        return match ccid::rustc_diag::run_wrapped() {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("ccid: compiler diagnostic failed: {error}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let cli = Cli::parse();
     let outcome = match cli.action {
         Action::ExecuteJob {

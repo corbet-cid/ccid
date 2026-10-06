@@ -27,6 +27,7 @@ pub mod jobs;
 pub mod push;
 pub mod render;
 mod runner;
+pub mod rustc_diag;
 mod source;
 pub mod tor;
 pub(crate) mod tor_inputs;

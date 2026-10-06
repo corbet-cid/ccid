@@ -51,6 +51,19 @@ pub(crate) struct Manifest {
     pub(crate) live_inputs: BTreeMap<String, LiveInput>,
     pub(crate) live_tools: BTreeMap<String, LiveFixed>,
     pub(crate) live_drivers: BTreeMap<String, LiveDriver>,
+    pub(crate) diag: BTreeMap<String, DiagWatch>,
+}
+
+/// Pinned instrumented library for the compiler-wrapper diagnostic: the
+/// relative file inside the composed candidate tree plus the committed
+/// original and deterministic diagnostic digests. The runtime requires
+/// this table; render ignores it (no Crow variables involved).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DiagWatch {
+    pub(crate) file: String,
+    pub(crate) sha256: String,
+    pub(crate) diagnostic_sha256: String,
 }
 
 fn valid_name(name: &str) -> bool {
@@ -193,6 +206,22 @@ impl Manifest {
                 return Err(failure(format!("Invalid live driver digest: {name}")));
             }
         }
+        for (name, watch) in &self.diag {
+            if !valid_name(name) {
+                return Err(failure(format!("Invalid diag watch name: {name}")));
+            }
+            if !valid_relative_path(&watch.file) {
+                return Err(failure(format!("Invalid diag watch file: {name}")));
+            }
+            if !valid_sha256(&watch.sha256) {
+                return Err(failure(format!("Invalid diag watch digest: {name}")));
+            }
+            if !valid_sha256(&watch.diagnostic_sha256) {
+                return Err(failure(format!(
+                    "Invalid diag watch diagnostic digest: {name}"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -284,6 +313,10 @@ sha256 = "6ad575e38543b9668379894ca8752361aa4b76bc28b66cf69a7c6b66fa4a9e22"
 [live-drivers.helpers]
 file = ".ci/v01-records.py"
 sha256 = "64796854b4d018d455b06d3ac67db5cc78a3058440c758a1161fb52d7f7e7e0a"
+[diag.watch-lib]
+file = "src/tor_records.rs"
+sha256 = "437f7324c7882ae1b14dc4735d685992afd65a82bb180a15e1deee9bff085895"
+diagnostic_sha256 = "56d6de3757ac3aa976d96be74156148dd4e0ddc27adda1a332bb7633fdc4e4a2"
 "#;
 
     fn manifest(text: &str) -> Manifest {
@@ -299,6 +332,11 @@ sha256 = "64796854b4d018d455b06d3ac67db5cc78a3058440c758a1161fb52d7f7e7e0a"
         assert_eq!(parsed.live_inputs.len(), 3);
         assert_eq!(parsed.live_tools.len(), 12);
         assert_eq!(parsed.live_drivers.len(), 3);
+        assert_eq!(parsed.diag.len(), 1);
+        assert_eq!(
+            parsed.diag["watch-lib"].sha256,
+            "437f7324c7882ae1b14dc4735d685992afd65a82bb180a15e1deee9bff085895"
+        );
         assert!(parsed.live_inputs["v01-source-bundle"]
             .digest_variable
             .ends_with("_BUNDLE_SHA256"));

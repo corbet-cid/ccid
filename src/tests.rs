@@ -20,6 +20,24 @@ fn environment(items: &[(&str, &str)]) -> Environment {
 }
 
 #[test]
+fn deno_checks_install_locked_dependencies_then_run_tasks() {
+    let check = Check {
+        kind: "javascript".into(),
+        manager: Some("deno".into()),
+        scripts: Some(strings(&["check", "test"])),
+        ..Check::default()
+    };
+    assert_eq!(
+        checks::javascript_commands(&check).unwrap(),
+        vec![
+            strings(&["deno", "install", "--frozen-lockfile"]),
+            strings(&["deno", "task", "check"]),
+            strings(&["deno", "task", "test"]),
+        ]
+    );
+}
+
+#[test]
 fn memory_budget_limits_concurrent_jobs() {
     let b = budget(&environment(&[
         ("CI_JOBS", "16"),

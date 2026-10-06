@@ -702,7 +702,9 @@ fn read_browser_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
     let mut expected: Vec<String> = BROWSER_ENV_KEYS.iter().map(ToString::to_string).collect();
     expected.sort();
     if keys != expected {
-        return Err(failure("Browser environment file must declare exactly TORJS_DIST, TOR_GATEWAY_BIN and FERRY_BROWSER"));
+        return Err(failure(
+            "Browser environment file must declare exactly TORJS_DIST, TOR_GATEWAY_BIN and FERRY_BROWSER",
+        ));
     }
     for key in ["TORJS_DIST", "FERRY_BROWSER"] {
         if !Path::new(&values[key]).is_dir() {
@@ -1431,6 +1433,17 @@ fn v01_tor_live_inner(
     let manifest = tor_inputs::load_manifest(repo)?.ok_or_else(|| {
         failure("Tor job requires the committed .ci/live-inputs.toml for v01-tor-live")
     })?;
+    // Compiler-wrapper diagnostic pin: the exact frozen library this job
+    // instruments. Committed here, never taken from caller-supplied env.
+    let diag = manifest
+        .diag
+        .get("watch-lib")
+        .ok_or_else(|| failure("Tor job live manifest declares no diag watch-lib pin"))?;
+    if diag.file != "src/tor_records.rs" {
+        return Err(failure(
+            "Tor job diag watch-lib must pin src/tor_records.rs",
+        ));
+    }
     let manifest_inputs = v01_inputs(&manifest, &["v01-tor-live"])?;
     let mut resolved: BTreeMap<String, String> = BTreeMap::new();
     let mut root_commit = String::new();
@@ -1533,6 +1546,42 @@ fn v01_tor_live_inner(
         .get("python")
         .ok_or_else(|| failure("Tor job live tools declare no python"))?;
     let target = target_subdir(base, "v01-tor-live")?;
+    // Compiler-wrapper diagnostic binary: a copy of this verified tool
+    // inside job-private scratch, so the workspace-wrapper path is unique
+    // per attempt (isolating filename-hashed artifacts) while dependency
+    // caches stay shared. A preexisting workspace wrapper is never
+    // overridden or disabled: its presence fails clearly instead.
+    if base
+        .get(&OsString::from("RUSTC_WORKSPACE_WRAPPER"))
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(failure(
+            "Tor job refuses a preexisting RUSTC_WORKSPACE_WRAPPER; unset it to run v01-tor-live",
+        ));
+    }
+    let wrapper = scratch.path().join("ccid-rustc-wrapper");
+    let own = std::env::current_exe()
+        .map_err(|_| failure("Tor job cannot locate its own executable for wrapper staging"))?;
+    fs::copy(&own, &wrapper)
+        .map_err(|_| failure("Tor job cannot stage its diagnostic wrapper copy".to_owned()))?;
+    if sha256_file(&wrapper)? != sha256_file(&own)? {
+        return Err(failure(
+            "Tor job diagnostic wrapper copy differs from its own binary",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&wrapper)
+            .map_err(|_| failure("Tor job cannot inspect its diagnostic wrapper copy".to_owned()))?
+            .permissions()
+            .mode();
+        if mode & 0o111 == 0 {
+            return Err(failure("Tor job diagnostic wrapper copy is not executable"));
+        }
+    }
+    let wrapper_receipt = evidence.join("compiler-diagnostic.jsonl");
     let mut driver_env = vec![
         (
             "V01_EVIDENCE_DIR".to_owned(),
@@ -1563,6 +1612,24 @@ fn v01_tor_live_inner(
         ("CI_PIPELINE_NUMBER".to_owned(), pipeline),
         ("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned()),
         ("PYTHONNOUSERSITE".to_owned(), "1".to_owned()),
+        // Compiler-wrapper diagnostic: workspace members build through the
+        // staged copy above (unique per attempt); the wrapper instruments
+        // only the pinned frozen library and restores it afterwards.
+        // Plain RUSTC_WRAPPER, if set, stays untouched for cargo to nest.
+        (
+            "RUSTC_WORKSPACE_WRAPPER".to_owned(),
+            wrapper.to_string_lossy().into_owned(),
+        ),
+        ("CCID_RUSTC_DIAG".to_owned(), "1".to_owned()),
+        (
+            "CCID_DIAG_ROOT".to_owned(),
+            scratch.path().to_string_lossy().into_owned(),
+        ),
+        ("CCID_DIAG_ORIGINAL_SHA256".to_owned(), diag.sha256.clone()),
+        (
+            "CCID_DIAG_RECEIPT".to_owned(),
+            wrapper_receipt.to_string_lossy().into_owned(),
+        ),
     ];
     for (variable, path) in &resolved {
         driver_env.push((variable.clone(), path.clone()));
@@ -1637,6 +1704,40 @@ fn v01_tor_live_inner(
     if text.lines().filter(|line| *line == marker).count() != 1 {
         return Err(failure("Tor job live driver contract marker missing"));
     }
+    // Compiler-wrapper diagnostic evidence: nonempty JSONL, every entry for
+    // the pinned library with a clean compile and verified restore. A
+    // missing receipt means the instrumented unit never compiled and must
+    // never pass, even when the driver is otherwise green.
+    let wrapper_lines: Vec<String> = fs::read_to_string(&wrapper_receipt)
+        .map_err(|_| {
+            failure(
+                "Tor job compiler diagnostic receipt missing; refusing uninstrumented pass"
+                    .to_owned(),
+            )
+        })?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    if wrapper_lines.is_empty() {
+        return Err(failure(
+            "Tor job compiler diagnostic receipt empty; refusing uninstrumented pass",
+        ));
+    }
+    for line in &wrapper_lines {
+        let entry: Value = serde_json::from_str(line)
+            .map_err(|_| failure("Tor job compiler diagnostic receipt is not JSON".to_owned()))?;
+        let approved = entry.get("crate_name").and_then(Value::as_str) == Some("cmsh")
+            && entry.get("compiler_exit").and_then(Value::as_u64) == Some(0)
+            && entry.get("restored").and_then(Value::as_bool) == Some(true)
+            && entry.get("original_sha256").and_then(Value::as_str) == Some(diag.sha256.as_str())
+            && entry.get("diagnostic_sha256").and_then(Value::as_str)
+                == Some(diag.diagnostic_sha256.as_str());
+        if !approved {
+            return Err(failure(
+                "Tor job compiler diagnostic receipt does not record a clean instrumented compile",
+            ));
+        }
+    }
     Ok(json!({
         "inputs": manifest_inputs
             .into_iter()
@@ -1651,6 +1752,14 @@ fn v01_tor_live_inner(
             "runtime_copy": V01_RUNTIME_DRIVER,
             "runtime_sha256": runtime_digest,
             "adaptation": "single path literal dir=\"/tmp\" to dir=\"/var/tmp\"; assertions unchanged",
+        },
+        "diagnostic": {
+            "library": diag.file.as_str(),
+            "original_sha256": diag.sha256.as_str(),
+            "diagnostic_sha256": diag.diagnostic_sha256.as_str(),
+            "wrapper_receipt": wrapper_receipt.to_string_lossy(),
+            "compiler_runs": wrapper_lines.len(),
+            "note": "Executed library bytes were diagnostic, not original; probe sources and assertions stay original.",
         },
         "evidence": {"dir": v01_evidence.to_string_lossy()},
         "source_archive_sha256": optional(base, "SOURCE_SHA256"),
@@ -2927,6 +3036,10 @@ sha256 = "e917c01a724e0622601835f8a6f1c8bff102f5f40a61152ce95a099a4bc7ba61"
 [live-tools.wasm-libstd]
 path = "/nix/store/xvp6nfxayb07si2jaggqwvx3iykw89g2-rustc-1.98.1/lib/rustlib/wasm32-unknown-unknown/lib/libstd-0d5130a4ee2cc288.rlib"
 sha256 = "61ce675fface73dbbf431603767a3aa7f05bf9d6995d0555855fa5e4ead667e6"
+[diag.watch-lib]
+file = "src/tor_records.rs"
+sha256 = "437f7324c7882ae1b14dc4735d685992afd65a82bb180a15e1deee9bff085895"
+diagnostic_sha256 = "56d6de3757ac3aa976d96be74156148dd4e0ddc27adda1a332bb7633fdc4e4a2"
 [live-drivers.harness]
 file = ".ci/v01-tor-live.py"
 sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"

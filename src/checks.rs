@@ -221,7 +221,12 @@ pub(crate) fn javascript_commands(check: &Check) -> Result<Vec<Vec<String>>> {
         ]),
         "bun" => strings(&[executable, "install", "--frozen-lockfile"]),
         "pnpm" => strings(&[executable, "install", "--frozen-lockfile"]),
-        _ => return Err(failure("JavaScript manager must be npm, bun, or pnpm")),
+        "deno" => strings(&[executable, "install", "--frozen-lockfile"]),
+        _ => {
+            return Err(failure(
+                "JavaScript manager must be npm, bun, pnpm, or deno",
+            ))
+        }
     };
     let defaults = strings(&["test"]);
     let scripts = check.scripts.as_ref().unwrap_or(&defaults);
@@ -236,7 +241,8 @@ pub(crate) fn javascript_commands(check: &Check) -> Result<Vec<Vec<String>>> {
         if script.is_empty() {
             return Err(failure("JavaScript script names must not be empty"));
         }
-        commands.push(strings(&[executable, "run", script]));
+        let action = if manager == "deno" { "task" } else { "run" };
+        commands.push(strings(&[executable, action, script]));
     }
     Ok(commands)
 }
