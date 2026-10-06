@@ -30,10 +30,10 @@ const TEMPLATE_VARIABLES: [&str; 11] = [
     "SOURCE_SHA256",
 ];
 
-/// Auxiliary source declared in `.ci/archives.toml`, mirroring the dispatch
-/// helper's pinned-source schema (names, kinds, revisions, workflow scoping).
-/// Render emits only variable declarations; kinds and revisions are validated
-/// but not emitted, so they are not stored.
+/// Auxiliary source declared in `.ci/archives.toml` or `.ci/live-inputs.toml`,
+/// mirroring the dispatch helper's pinned-source schema (names, workflow
+/// scoping). Render emits only variable declarations; kinds, revisions,
+/// digests and defaults are validated but not emitted, so they are not stored.
 struct PinnedSource {
     archive_variable: String,
     digest_variable: String,
@@ -220,6 +220,38 @@ fn pinned_sources(repo: &Path) -> Result<BTreeMap<String, PinnedSource>> {
     Ok(sources)
 }
 
+/// Read `.ci/live-inputs.toml` through the shared strict parser and merge
+/// its staged-file inputs into the declaration map, so workflow adapters
+/// declare them identically to `.ci/archives.toml` kinds. Absence means no
+/// live inputs. Digests and defaults are validated by the shared parser and
+/// enforced at runtime by Rust; render emits only variable declarations.
+fn live_inputs(repo: &Path) -> Result<BTreeMap<String, PinnedSource>> {
+    let Some(manifest) = crate::tor_inputs::load_manifest(repo)? else {
+        return Ok(BTreeMap::new());
+    };
+    let mut sources = BTreeMap::new();
+    let mut declared = std::collections::BTreeSet::new();
+    for (name, input) in &manifest.live_inputs {
+        for variable in [&input.archive_variable, &input.digest_variable] {
+            if TEMPLATE_VARIABLES.contains(&variable.as_str()) || !declared.insert(variable.clone())
+            {
+                return Err(failure(format!(
+                    "Live input variable reserved or duplicated: {variable}"
+                )));
+            }
+        }
+        sources.insert(
+            name.clone(),
+            PinnedSource {
+                archive_variable: input.archive_variable.clone(),
+                digest_variable: input.digest_variable.clone(),
+                workflows: input.workflows.clone(),
+            },
+        );
+    }
+    Ok(sources)
+}
+
 /// Render one workflow adapter, appending declared auxiliary variables that
 /// apply to it. Output is byte-identical to the plain template when none apply.
 fn workflow_adapter(
@@ -361,7 +393,14 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         jobs: BTreeMap::new(),
         push_consumers: BTreeMap::new(),
     };
-    let sources = pinned_sources(repo)?;
+    let mut sources = pinned_sources(repo)?;
+    for (name, source) in live_inputs(repo)? {
+        if sources.insert(name.clone(), source).is_some() {
+            return Err(failure(format!(
+                "Live input name collides with a pinned source: {name}"
+            )));
+        }
+    }
     let mut outputs = BTreeMap::new();
     for name in parsed.jobs.keys() {
         let plan = jobs::plan(repo, manifest, name, None)?;
@@ -726,6 +765,68 @@ workflows = ["tor-snowflake"]
             workflow_adapter("abc", "tor-snowflake", &empty).unwrap(),
             expected
         );
+    }
+
+    fn live_manifest(text: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".ci")).unwrap();
+        fs::write(root.path().join(".ci/live-inputs.toml"), text).unwrap();
+        root
+    }
+
+    const LIVE_FIXTURE: &str = r#"
+schema = 1
+[live-inputs.v01-source-bundle]
+archive_variable = "V01_SOURCE_BUNDLE"
+digest_variable = "V01_SOURCE_BUNDLE_SHA256"
+sha256 = "a89129a0f4e827c807f1453ef40c5968d1a063267d4be8741783abdaa31e82b6"
+default_path = "/workspaces/ci-sources/v01-tor-records/a89129a0f4e827c807f1453ef40c5968d1a063267d4be8741783abdaa31e82b6.tar"
+workflows = ["v01-tor-live"]
+[live-inputs.v01-root-source]
+archive_variable = "V01_ROOT_SOURCE_ARCHIVE"
+digest_variable = "V01_ROOT_SOURCE_SHA256"
+sha256 = "a84b41fcf68d71507db9e46072c3c329ec1b2667114c38fe3ff275bd7ab6cb1d"
+default_path = "/workspaces/ci-sources/146/a84b41fcf68d71507db9e46072c3c329ec1b2667114c38fe3ff275bd7ab6cb1d.tar"
+commit = "bb0f72d89dbfc5323580205740139fc84cc7a284"
+workflows = ["v01-tor-live"]
+[live-tools.receipt]
+path = "/workspaces/component-releases/cmsg/20a55ac8159811bbac7c8370ae7f28fc075f2153/tor-tools/tools.json"
+sha256 = "b3a64bbc373b886dc164e859c1d26e7a4055a7d65b8c2556a0bd2cff4ac152e0"
+[live-drivers.harness]
+file = ".ci/v01-tor-live.py"
+sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"
+"#;
+
+    #[test]
+    fn live_inputs_declare_scoped_workflow_variables() {
+        let root = live_manifest(LIVE_FIXTURE);
+        let parsed = live_inputs(root.path()).unwrap();
+        assert_eq!(parsed.len(), 2);
+        let rendered = workflow_adapter("abc", "v01-tor-live", &parsed).unwrap();
+        assert!(rendered.contains("V01_SOURCE_BUNDLE: {default: \"\"}"));
+        assert!(rendered.contains("V01_SOURCE_BUNDLE_SHA256: {default: \"\"}"));
+        assert!(rendered.contains("V01_ROOT_SOURCE_ARCHIVE: {default: \"\"}"));
+        assert!(rendered.contains("V01_ROOT_SOURCE_SHA256: {default: \"\"}"));
+        let other = workflow_adapter("abc", "tor-records", &parsed).unwrap();
+        assert!(!other.contains("V01_SOURCE_BUNDLE"));
+        let absent = tempfile::tempdir().unwrap();
+        assert!(live_inputs(absent.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_inputs_reject_drifted_declarations() {
+        // Shape-valid digests parse; tampering is caught at runtime digest
+        // verification, not at render.
+        let tampered = LIVE_FIXTURE.replace("a89129a0", "b89129a0");
+        assert!(live_inputs(live_manifest(&tampered).path()).is_ok());
+        let unknown_key = LIVE_FIXTURE.replace("sha256 = ", "digest = ");
+        assert!(live_inputs(live_manifest(&unknown_key).path()).is_err());
+        let relative = LIVE_FIXTURE.replace("/workspaces/", "workspaces/");
+        assert!(live_inputs(live_manifest(&relative).path()).is_err());
+        let bad_commit = LIVE_FIXTURE.replace("bb0f72d89dbfc5323580205740139fc84cc7a284", "xyz");
+        assert!(live_inputs(live_manifest(&bad_commit).path()).is_err());
+        let unscoped = LIVE_FIXTURE.replace("workflows = [\"v01-tor-live\"]", "workflows = []");
+        assert!(live_inputs(live_manifest(&unscoped).path()).is_err());
     }
 
     #[test]

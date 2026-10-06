@@ -25,7 +25,8 @@
 //! (`{"testOnly": false, "snowflake": true}`); the node driver's stdout/stderr
 //! stay suppressed and only the structured contract evidence is validated.
 use crate::{
-    event, failure, sha256_file, verify_source, Environment, Result, Runner, SOURCE_REVISION,
+    event, failure, sha256_file, tor_inputs, verify_source, Environment, Result, Runner,
+    SOURCE_REVISION,
 };
 use clap::Subcommand;
 use serde_json::{json, Value};
@@ -38,7 +39,9 @@ use std::{
 };
 
 /// Stage timeouts in seconds. Dispatch must set `CI_TIMEOUT` at or above the
-/// largest stage of the selected job (7200 snowflake, 5400 private/records).
+/// largest stage of the selected job (7200 snowflake, 5400 private/records,
+/// 14400 v01-tor-live: the frozen driver caps its fixture at 3600 seconds and
+/// resolve/build/probe headroom follows the 291/12-class full-run shape).
 const TOOLCHAIN_PROBE_TIMEOUT: u64 = 120;
 const GIT_OPERATION_TIMEOUT: u64 = 600;
 const TOR_TOOLS_TIMEOUT: u64 = 1800;
@@ -48,6 +51,7 @@ const OPENSSL_TIMEOUT: u64 = 300;
 const NODE_DRIVER_TIMEOUT: u64 = 1620;
 const RECORDS_TIMEOUT: u64 = 5400;
 const CARGO_BUILD_TIMEOUT: u64 = 1800;
+const V01_TOR_LIVE_TIMEOUT: u64 = 14400;
 
 /// Expected keys of the browser-build environment file. Any deviation fails
 /// closed, mirroring the verify job's exact gate on `$GITHUB_ENV`.
@@ -83,6 +87,15 @@ pub enum Action {
         #[arg(long, hide = true)]
         parent_watch: bool,
     },
+    /// cmsh original nine-onion Records contract on the private Tor network.
+    V01TorLive {
+        /// Staged source root (main-owned manifest; frozen inputs arrive staged).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Internal: watch the enclosing executor instead of supervising.
+        #[arg(long, hide = true)]
+        parent_watch: bool,
+    },
 }
 
 impl Action {
@@ -91,7 +104,8 @@ impl Action {
         match self {
             Action::PrivateNetwork { parent_watch, .. }
             | Action::Records { parent_watch, .. }
-            | Action::SnowflakeBrowser { parent_watch, .. } => *parent_watch,
+            | Action::SnowflakeBrowser { parent_watch, .. }
+            | Action::V01TorLive { parent_watch, .. } => *parent_watch,
         }
     }
 
@@ -99,7 +113,8 @@ impl Action {
         match self {
             Action::PrivateNetwork { repo, .. }
             | Action::Records { repo, .. }
-            | Action::SnowflakeBrowser { repo, .. } => repo,
+            | Action::SnowflakeBrowser { repo, .. }
+            | Action::V01TorLive { repo, .. } => repo,
         }
     }
 }
@@ -112,6 +127,7 @@ pub fn run(action: &Action) -> Result<()> {
         Action::PrivateNetwork { .. } => private_network(repo, &environment),
         Action::Records { .. } => records(repo, &environment),
         Action::SnowflakeBrowser { .. } => snowflake_browser(repo, &environment),
+        Action::V01TorLive { .. } => v01_tor_live(repo, &environment),
     }
 }
 
@@ -1180,6 +1196,392 @@ fn records_inner(
         "source_archive_sha256": optional(base, "SOURCE_SHA256"),
         "adapter": {"job": "records", "command": "ccid tor records"},
         "note": "Live cdht Records evidence is owned by this cmsh probe at the pinned cdht revision; cdht sim checks prove nothing about Tor.",
+    }))
+}
+
+/// Frozen nine-onion driver set executed transitionally: the exact B3
+/// qualifier scripts, verified by blob SHA-256 after extraction from the
+/// staged frozen root archive. No new Python logic; all orchestration is Rust.
+const V01_DRIVER_FILES: [&str; 3] = [
+    ".ci/v01-tor-live.py",
+    ".ci/v01-tor-records.py",
+    ".ci/v01-records.py",
+];
+
+/// Compatibility normalization for the frozen B3 driver: its fixture
+/// scratch hardcodes `dir="/tmp"`, whose worker-namespace mode (2777,
+/// non-sticky) the native ownership checks refuse; `/var/tmp` (1777,
+/// sticky) is the trusted standard root. Applied in safe Rust to a
+/// separate adjacent runtime copy only after the original archive and
+/// driver hashes verify; the original stays byte-identical. Exactly one
+/// occurrence is required; anything else fails closed. This does NOT
+/// claim byte-identity of the executed file: only this path literal is
+/// adapted, every assertion stays unchanged.
+const V01_TMPDIR_CALL: &str = "TemporaryDirectory(prefix=\"v01tor-\", dir=\"/tmp\")";
+const V01_TMPDIR_NORMALIZED: &str = "TemporaryDirectory(prefix=\"v01tor-\", dir=\"/var/tmp\")";
+/// Distinct runtime filename so the driver's root-vs-sibling integrity
+/// check keeps matching the byte-exact originals beside it.
+const V01_RUNTIME_DRIVER: &str = "v01-tor-live-runtime.py";
+
+fn v01_normalize_tmpdir(original: &str) -> Result<String> {
+    if original.matches("dir=\"/tmp\"").count() != 1 {
+        return Err(failure(
+            "Tor job live driver has an unexpected /tmp literal set",
+        ));
+    }
+    if original.matches(V01_TMPDIR_CALL).count() != 1 {
+        return Err(failure(
+            "Tor job live driver compatibility call changed shape",
+        ));
+    }
+    Ok(original.replacen(V01_TMPDIR_CALL, V01_TMPDIR_NORMALIZED, 1))
+}
+
+/// Staged live inputs for this job, resolved from the shared manifest
+/// with the exact expected input set enforced: no missing, renamed, or
+/// extra entries pass. Supplied environment paths are overrides only;
+/// committed digests stay the trust anchor.
+/// Expected Crow variable pair per staged input name. Names and pairs
+/// are enforced together so renamed or duplicated variables fail before
+/// launch rather than resolving to the wrong file.
+const V01_INPUT_VARIABLES: [(&str, &str, &str); 3] = [
+    (
+        "v01-source-bundle",
+        "V01_SOURCE_BUNDLE",
+        "V01_SOURCE_BUNDLE_SHA256",
+    ),
+    (
+        "v01-chutney",
+        "V01_CHUTNEY_SOURCE_ARCHIVE",
+        "V01_CHUTNEY_SOURCE_SHA256",
+    ),
+    (
+        "v01-root-source",
+        "V01_ROOT_SOURCE_ARCHIVE",
+        "V01_ROOT_SOURCE_SHA256",
+    ),
+];
+
+/// Expected fixed tool names: receipt plus the three retained executables.
+const V01_TOOL_NAMES: [&str; 4] = ["python", "receipt", "tor", "tor-gencert"];
+
+fn v01_inputs(
+    manifest: &tor_inputs::Manifest,
+    workflows: &[&str],
+) -> Result<Vec<tor_inputs::LiveInput>> {
+    let mut inputs = Vec::new();
+    for input in manifest.live_inputs.values() {
+        if let Some(scoped) = &input.workflows {
+            if !scoped
+                .iter()
+                .any(|workflow| workflows.contains(&workflow.as_str()))
+            {
+                continue;
+            }
+        }
+        inputs.push(input.clone());
+    }
+    let mut names: Vec<&str> = inputs.iter().map(|input| input.name.as_str()).collect();
+    names.sort();
+    if names != ["v01-chutney", "v01-root-source", "v01-source-bundle"] {
+        return Err(failure(
+            "Tor job live inputs declare an unexpected input set",
+        ));
+    }
+    for (name, archive_variable, digest_variable) in V01_INPUT_VARIABLES {
+        let input = inputs
+            .iter()
+            .find(|input| input.name == name)
+            .ok_or_else(|| failure(format!("Tor job live inputs declare no {name}")))?;
+        if input.archive_variable != archive_variable || input.digest_variable != digest_variable {
+            return Err(failure(format!(
+                "Tor job live input {name} declares unexpected variables"
+            )));
+        }
+    }
+    let mut variables: Vec<&str> = inputs
+        .iter()
+        .flat_map(|input| {
+            [
+                input.archive_variable.as_str(),
+                input.digest_variable.as_str(),
+            ]
+        })
+        .collect();
+    variables.sort();
+    variables.dedup();
+    if variables.len() != 2 * inputs.len() {
+        return Err(failure("Tor job live inputs declare duplicated variables"));
+    }
+    Ok(inputs)
+}
+
+fn v01_tor_live(repo: &Path, env: &Environment) -> Result<()> {
+    // Same owner-private mask as the other Chutney jobs: this runs in its
+    // own `ccid tor` child process.
+    #[cfg(unix)]
+    restrict_tor_process_umask();
+    let commit = hex_identity(&required(env, "CI_COMMIT_SHA")?, "CI_COMMIT_SHA")?;
+    let evidence = evidence_root(env, "cmsh-tor", "v01-tor-live")?;
+    // Use the trusted /var/tmp root like the other native jobs.
+    let scratch = native_tor_scratch()?;
+    let global = global_deadline(env)?;
+    let mut base = env.clone();
+    apply_tor_scratch_env(&mut base, &scratch);
+    let mut stages = Vec::new();
+    let detail = v01_tor_live_inner(
+        repo,
+        &base,
+        global,
+        &scratch,
+        &evidence,
+        &commit,
+        &mut stages,
+    );
+    // No salvage pass: the frozen driver writes all evidence incrementally
+    // into the job-owned evidence directory below, so completed artifacts
+    // already persist on failure paths.
+    finish(&evidence, env, "v01-tor-live", &commit, stages, detail)
+}
+
+fn v01_tor_live_inner(
+    repo: &Path,
+    base: &Environment,
+    global: Instant,
+    scratch: &tempfile::TempDir,
+    evidence: &Path,
+    commit: &str,
+    stages: &mut Vec<Value>,
+) -> Result<Value> {
+    let pipeline = required(base, "CI_PIPELINE_NUMBER")?;
+    // Resolve every staged input against its committed digest. Supplied
+    // environment paths are overrides only; the committed digest is the
+    // trust anchor in all cases. Absence of the manifest fails here: the
+    // runtime always requires it.
+    let manifest = tor_inputs::load_manifest(repo)?.ok_or_else(|| {
+        failure("Tor job requires the committed .ci/live-inputs.toml for v01-tor-live")
+    })?;
+    let manifest_inputs = v01_inputs(&manifest, &["v01-tor-live"])?;
+    let mut resolved: BTreeMap<String, String> = BTreeMap::new();
+    let mut root_commit = String::new();
+    let mut root_sha = String::new();
+    for input in &manifest_inputs {
+        let path = base
+            .get(&OsString::from(&input.archive_variable))
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| input.default_path.clone());
+        require_digest(Path::new(&path), &input.sha256)?;
+        if let Some(expected) = base
+            .get(&OsString::from(&input.digest_variable))
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+        {
+            if expected.to_lowercase() != input.sha256 {
+                return Err(failure(format!(
+                    "Tor job supplied digest differs from the committed pin: {}",
+                    input.digest_variable
+                )));
+            }
+        }
+        if input.name == "v01-root-source" {
+            root_commit = input.commit.clone().ok_or_else(|| {
+                failure("Tor job live input v01-root-source requires a commit pin")
+            })?;
+            root_sha = input.sha256.clone();
+        }
+        resolved.insert(input.archive_variable.clone(), path);
+    }
+    if root_commit.is_empty() {
+        return Err(failure(
+            "Tor job live inputs declare no v01-root-source commit",
+        ));
+    }
+    // Frozen drivers come from the verified frozen root archive: whole-tar
+    // digest, embedded commit identity, then per-blob digests. The branch
+    // ref stays alive as the object source; this job never clones or
+    // fetches.
+    let drivers = scratch.path().join("v01-drivers");
+    let root_archive = resolved
+        .get("V01_ROOT_SOURCE_ARCHIVE")
+        .ok_or_else(|| failure("Tor job live inputs declare no V01_ROOT_SOURCE_ARCHIVE"))?;
+    verify_source(Path::new(root_archive), &root_sha, &root_commit, &drivers)?;
+    {
+        let mut listed: Vec<&str> = manifest
+            .live_drivers
+            .values()
+            .map(|entry| entry.file.as_str())
+            .collect();
+        listed.sort();
+        let mut expected: Vec<&str> = V01_DRIVER_FILES.to_vec();
+        expected.sort();
+        if listed != expected {
+            return Err(failure(
+                "Tor job live drivers declare an unexpected file set",
+            ));
+        }
+    }
+    for relative in V01_DRIVER_FILES {
+        let expected = manifest
+            .live_drivers
+            .values()
+            .find(|entry| entry.file == relative)
+            .map(|entry| entry.sha256.clone())
+            .ok_or_else(|| failure(format!("Tor job live drivers declare no {relative}")))?;
+        require_digest(&drivers.join(relative), &expected)?;
+    }
+    // Fixed ambient tools and receipt, verified in place, never copied: the
+    // Nix runtime closure stays valid only at these paths. The exact four
+    // names are enforced so no tool is silently missing or added.
+    let mut tool_names: Vec<&str> = manifest.live_tools.keys().map(String::as_str).collect();
+    tool_names.sort();
+    if tool_names != V01_TOOL_NAMES {
+        return Err(failure("Tor job live tools declare an unexpected tool set"));
+    }
+    let mut tools = BTreeMap::new();
+    for (name, entry) in &manifest.live_tools {
+        require_digest(Path::new(&entry.path), &entry.sha256)?;
+        tools.insert(name.clone(), entry.path.clone());
+    }
+    // Compatibility runtime copy beside the byte-exact originals: the
+    // executed file adapts one trusted-root literal (digests of both
+    // recorded below); the driver's root-vs-sibling integrity check keeps
+    // matching the untouched originals, and `__file__`-relative helper
+    // loads resolve in the same directory.
+    let original_driver = drivers.join(".ci/v01-tor-live.py");
+    let original_digest = sha256_file(&original_driver)?;
+    let original_text = fs::read_to_string(&original_driver)
+        .map_err(|_| failure("Tor job live driver unreadable after verification".to_owned()))?;
+    let runtime_text = v01_normalize_tmpdir(&original_text)?;
+    let runtime_driver = drivers.join(format!(".ci/{V01_RUNTIME_DRIVER}"));
+    fs::write(&runtime_driver, runtime_text.as_bytes())
+        .map_err(|_| failure("Tor job live driver runtime copy unwritable".to_owned()))?;
+    let runtime_digest = sha256_file(&runtime_driver)?;
+    let v01_evidence = evidence.join("v01-evidence");
+    let python = tools
+        .get("python")
+        .ok_or_else(|| failure("Tor job live tools declare no python"))?;
+    let target = target_subdir(base, "v01-tor-live")?;
+    let mut driver_env = vec![
+        (
+            "V01_EVIDENCE_DIR".to_owned(),
+            v01_evidence.to_string_lossy().into_owned(),
+        ),
+        (
+            "V01_CHUTNEY_TREE_RECEIPT".to_owned(),
+            v01_evidence
+                .join("chutney-runtime-tree.json")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ("CARGO_TARGET_DIR".to_owned(), target),
+        (
+            "V01_TOR_LIVE_HARNESS".to_owned(),
+            runtime_driver.to_string_lossy().into_owned(),
+        ),
+        // Frozen driver requirements, unchanged from the branch qualifier:
+        // the harness checks the cvld clone URL and matches the frozen root
+        // commit against its own CI commit. Both are public frozen values,
+        // set here so the unmodified driver sees its exact expected setup.
+        ("CI".to_owned(), "true".to_owned()),
+        (
+            "CI_REPO_CLONE_URL".to_owned(),
+            "https://forge.corbet.ch/corbet-libs/cvld.git".to_owned(),
+        ),
+        ("CI_COMMIT_SHA".to_owned(), root_commit.clone()),
+        ("CI_PIPELINE_NUMBER".to_owned(), pipeline),
+        ("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned()),
+        ("PYTHONNOUSERSITE".to_owned(), "1".to_owned()),
+    ];
+    for (variable, path) in &resolved {
+        driver_env.push((variable.clone(), path.clone()));
+    }
+    // The frozen driver requires the committed digests explicitly alongside
+    // the paths (its own `h.required` gates); forward them from the
+    // committed manifest, never from supplied env alone (already cross-
+    // checked above).
+    for input in &manifest_inputs {
+        driver_env.push((input.digest_variable.clone(), input.sha256.clone()));
+    }
+    // The frozen driver names its Chutney input V01_CHUTNEY_ARCHIVE; the
+    // declared Crow variable keeps the existing auxiliary suffix pattern.
+    if let Some(chutney) = resolved.get("V01_CHUTNEY_SOURCE_ARCHIVE") {
+        driver_env.push(("V01_CHUTNEY_ARCHIVE".to_owned(), chutney.clone()));
+    }
+    // The frozen driver requires the root commit explicitly alongside the
+    // root archive (its workflow/root identity match); forward the
+    // committed pin, never the current job commit.
+    driver_env.push(("V01_ROOT_SOURCE_COMMIT".to_owned(), root_commit.clone()));
+    let (outcome, _) = run_stage(
+        base,
+        global,
+        Stage {
+            name: "v01-tor-live",
+            command: {
+                // Verified retained python from the tool manifest, never an
+                // ambient unverified interpreter.
+                let mut command = argv(&[python.as_str()]);
+                command.push(runtime_driver.to_string_lossy().into_owned());
+                command
+            },
+            workdir: scratch.path().to_owned(),
+            extra_env: driver_env,
+            timeout_secs: V01_TOR_LIVE_TIMEOUT,
+            capture_stdout: false,
+            mute_stdout: false,
+            mute_stderr: false,
+        },
+    )?;
+    stages.push(json!({"stage": "v01-tor-live", "seconds": outcome.seconds}));
+    // Driver exports audited: receipt.json is always written (finally
+    // block) and must record the exact pass status; contract.txt must
+    // carry the exact original success marker on exactly one complete
+    // line. All three checks live under the job-owned evidence root.
+    let receipt = v01_evidence.join("receipt.json");
+    let receipt_text = fs::read_to_string(&receipt)
+        .map_err(|_| failure("Tor job live driver left no receipt".to_owned()))?;
+    let receipt_status = serde_json::from_str::<Value>(&receipt_text)
+        .ok()
+        .and_then(|receipt| {
+            receipt
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    if receipt_status.as_deref() != Some("passed-original-private-nine-onion-contract") {
+        return Err(failure(
+            "Tor job live driver receipt does not record the exact pass status",
+        ));
+    }
+    let contract = v01_evidence.join("private-tor/contract.txt");
+    // Exact original success line (frozen driver SUCCESS value, single line):
+    // any truncation would weaken the gate the driver itself enforces.
+    let marker = "original ENV0/PeerInfo/FindNode and encrypted Get/Set/Watch over nine independent onion services passed; bootstrap storage absent; dynamic routing loss verified";
+    let text = fs::read_to_string(&contract)
+        .map_err(|_| failure("Tor job live driver left no contract evidence".to_owned()))?;
+    if text.lines().filter(|line| *line == marker).count() != 1 {
+        return Err(failure("Tor job live driver contract marker missing"));
+    }
+    Ok(json!({
+        "inputs": manifest_inputs
+            .into_iter()
+            .map(|input| (input.name, input.sha256))
+            .collect::<BTreeMap<String, String>>(),
+        "main_commit": commit,
+        "root_commit": root_commit,
+        "tools": tools,
+        "driver": {
+            "original": "v01-tor-live.py",
+            "original_sha256": original_digest,
+            "runtime_copy": V01_RUNTIME_DRIVER,
+            "runtime_sha256": runtime_digest,
+            "adaptation": "single path literal dir=\"/tmp\" to dir=\"/var/tmp\"; assertions unchanged",
+        },
+        "evidence": {"dir": v01_evidence.to_string_lossy()},
+        "source_archive_sha256": optional(base, "SOURCE_SHA256"),
+        "adapter": {"job": "v01-tor-live", "command": "ccid tor v01-tor-live"},
+        "note": "Original nine-onion Records contract via the frozen B3 driver; transitional until ported to safe Rust orchestration.",
     }))
 }
 
@@ -2392,5 +2794,152 @@ workflows = ["tor-jobs"]
         assert!(!Path::new(&second_path).exists());
         assert!(!Path::new(&native_path).exists());
         drop(canary);
+    }
+
+    const SAMPLE_LIVE_INPUTS: &str = r#"
+schema = 1
+[live-inputs.v01-source-bundle]
+archive_variable = "V01_SOURCE_BUNDLE"
+digest_variable = "V01_SOURCE_BUNDLE_SHA256"
+sha256 = "a89129a0f4e827c807f1453ef40c5968d1a063267d4be8741783abdaa31e82b6"
+default_path = "/workspaces/ci-sources/v01-tor-records/a89129a0f4e827c807f1453ef40c5968d1a063267d4be8741783abdaa31e82b6.tar"
+workflows = ["v01-tor-live"]
+[live-inputs.v01-chutney]
+archive_variable = "V01_CHUTNEY_SOURCE_ARCHIVE"
+digest_variable = "V01_CHUTNEY_SOURCE_SHA256"
+sha256 = "3d8748142f5d1fc3243371b33ff5a431d444c69b836d22718898f1787eec00ee"
+default_path = "/workspaces/ci-sources/10-source-chutney/3d8748142f5d1fc3243371b33ff5a431d444c69b836d22718898f1787eec00ee.tar"
+workflows = ["v01-tor-live"]
+[live-inputs.v01-root-source]
+archive_variable = "V01_ROOT_SOURCE_ARCHIVE"
+digest_variable = "V01_ROOT_SOURCE_SHA256"
+sha256 = "a84b41fcf68d71507db9e46072c3c329ec1b2667114c38fe3ff275bd7ab6cb1d"
+default_path = "/workspaces/ci-sources/146/a84b41fcf68d71507db9e46072c3c329ec1b2667114c38fe3ff275bd7ab6cb1d.tar"
+commit = "bb0f72d89dbfc5323580205740139fc84cc7a284"
+workflows = ["v01-tor-live"]
+[live-tools.receipt]
+path = "/workspaces/component-releases/cmsg/20a55ac8159811bbac7c8370ae7f28fc075f2153/tor-tools/tools.json"
+sha256 = "b3a64bbc373b886dc164e859c1d26e7a4055a7d65b8c2556a0bd2cff4ac152e0"
+[live-drivers.harness]
+file = ".ci/v01-tor-live.py"
+sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"
+"#;
+
+    fn live_repo(text: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".ci")).unwrap();
+        fs::write(root.path().join(".ci/live-inputs.toml"), text).unwrap();
+        root
+    }
+
+    fn shared_manifest(text: &str) -> tor_inputs::Manifest {
+        let root = live_repo(text);
+        tor_inputs::load_manifest(root.path())
+            .unwrap()
+            .expect("manifest present")
+    }
+
+    #[test]
+    fn v01_inputs_enforce_exact_input_set_through_shared_parser() {
+        let manifest = shared_manifest(SAMPLE_LIVE_INPUTS);
+        let inputs = v01_inputs(&manifest, &["v01-tor-live"]).unwrap();
+        assert_eq!(inputs.len(), 3);
+        let root = inputs
+            .iter()
+            .find(|input| input.name == "v01-root-source")
+            .unwrap();
+        assert_eq!(
+            root.commit.as_deref(),
+            Some("bb0f72d89dbfc5323580205740139fc84cc7a284")
+        );
+        assert_eq!(root.digest_variable, "V01_ROOT_SOURCE_SHA256");
+        // A manifest missing one entry, or scoped to another workflow,
+        // fails the exact-set gate rather than running degraded.
+        let lopped =
+            SAMPLE_LIVE_INPUTS.replace("[live-inputs.v01-chutney]", "[live-inputs.v01-chutney-x]");
+        assert!(v01_inputs(&shared_manifest(&lopped), &["v01-tor-live"]).is_err());
+        assert!(v01_inputs(&manifest, &["tor-records"]).is_err());
+    }
+
+    #[test]
+    fn v01_inputs_reject_renamed_or_duplicated_variables() {
+        let manifest = shared_manifest(SAMPLE_LIVE_INPUTS);
+        assert_eq!(v01_inputs(&manifest, &["v01-tor-live"]).unwrap().len(), 3);
+        // Renamed pair on one entry fails before launch.
+        let renamed = SAMPLE_LIVE_INPUTS.replace(
+            "archive_variable = \"V01_CHUTNEY_SOURCE_ARCHIVE\"",
+            "archive_variable = \"V01_SOURCE_BUNDLE\"",
+        );
+        assert!(v01_inputs(&shared_manifest(&renamed), &["v01-tor-live"]).is_err());
+        // Digest variable swapped onto the wrong entry fails as well.
+        let swapped = SAMPLE_LIVE_INPUTS.replace(
+            "digest_variable = \"V01_ROOT_SOURCE_SHA256\"",
+            "digest_variable = \"V01_SOURCE_BUNDLE_SHA256\"",
+        );
+        assert!(v01_inputs(&shared_manifest(&swapped), &["v01-tor-live"]).is_err());
+    }
+
+    #[test]
+    fn v01_digest_tampering_fails_closed_at_resolution() {
+        // Shape-valid tampering parses (the shared loader checks shape);
+        // resolution against the digest refuses.
+        let tampered = SAMPLE_LIVE_INPUTS.replace("a89129a0", "b89129a0");
+        let manifest = shared_manifest(&tampered);
+        let bundle = &manifest.live_inputs["v01-source-bundle"];
+        assert!(bundle.sha256.starts_with("b89129a0"));
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("bundle.tar");
+        fs::write(&file, b"tampered").unwrap();
+        assert!(require_digest(&file, &bundle.sha256).is_err());
+        // Unknown sections, traversal paths, and bad digests refuse at load.
+        let unknown = format!("{SAMPLE_LIVE_INPUTS}\n[extra]\n");
+        let root = live_repo(&unknown);
+        assert!(tor_inputs::load_manifest(root.path()).is_err());
+        let traversal = SAMPLE_LIVE_INPUTS.replace(
+            "/workspaces/ci-sources/v01-tor-records/",
+            "/workspaces/../x/",
+        );
+        let root = live_repo(&traversal);
+        assert!(tor_inputs::load_manifest(root.path()).is_err());
+        let absent = tempfile::tempdir().unwrap();
+        assert!(tor_inputs::load_manifest(absent.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn live_fixed_and_require_digest_fail_closed() {
+        let manifest = shared_manifest(SAMPLE_LIVE_INPUTS);
+        let receipt = &manifest.live_tools["receipt"];
+        // Missing file fails before any hash comparison. The committed
+        // ambient path is not used here: unit tests must not depend on
+        // worker ambient state, where the retained receipt exists.
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("absent.json");
+        assert!(require_digest(&missing, &receipt.sha256).is_err());
+        // Tampered content fails the digest gate; exact content passes.
+        let file = directory.path().join("tool");
+        fs::write(&file, b"tampered").unwrap();
+        assert!(require_digest(&file, &receipt.sha256).is_err());
+        fs::write(&file, b"").unwrap();
+        assert!(require_digest(&file, &receipt.sha256).is_err());
+        let empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert!(require_digest(&file, empty_sha).is_ok());
+    }
+
+    #[test]
+    fn v01_tmpdir_normalization_touches_exactly_one_literal() {
+        let original = "head\n    with tempfile.TemporaryDirectory(prefix=\"v01tor-\", dir=\"/tmp\") as scratch:\ntail\n";
+        let normalized = v01_normalize_tmpdir(original).unwrap();
+        assert!(normalized.contains("dir=\"/var/tmp\""));
+        assert!(!normalized.contains("dir=\"/tmp\""));
+        // Every other byte is preserved: only the adapted span differs.
+        assert_eq!(
+            normalized.len() as i64 - original.len() as i64,
+            "var/tmp".len() as i64 - "tmp".len() as i64
+        );
+        assert!(normalized.starts_with("head\n"));
+        assert!(normalized.ends_with("tail\n"));
+        assert!(v01_normalize_tmpdir("no scratch here").is_err());
+        let duplicated = format!("{original}{original}");
+        assert!(v01_normalize_tmpdir(&duplicated).is_err());
     }
 }

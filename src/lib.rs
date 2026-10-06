@@ -33,6 +33,7 @@ mod runner;
 mod source;
 pub mod status;
 pub mod tor;
+pub(crate) mod tor_inputs;
 
 use budget::positive;
 pub use budget::{budget, Budget};
