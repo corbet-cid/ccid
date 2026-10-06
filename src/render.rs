@@ -289,6 +289,19 @@ pub struct Config {
     /// Crow repo secret holding the tool path's sha256.
     #[serde(default = "default_tool_secret_binary_sha256")]
     pub tool_secret_binary_sha256: String,
+    /// Optional resolver credential projection.
+    ///
+    /// When present, render adds ONLY this fixed entry to the repository-job
+    /// step environment (never to native-status steps):
+    /// `CFRG_RESOLVER_FORGEJO_TOKEN: { from_secret: <name> }`.
+    /// This is a secret *reference* (name only); values are never embedded.
+    /// Absent by default: rendered output is byte-identical to the unopted
+    /// template. The referenced repository secret must already be configured
+    /// for the selected repository; ccid never distributes tokens fleet-wide.
+    /// Contribution checks (no secret configured) render unchanged.
+    /// No operator hostnames appear here.
+    #[serde(default)]
+    pub resolver_token_secret: Option<String>,
 }
 
 fn default_tool_secret_binary() -> String {
@@ -339,6 +352,8 @@ struct ConsumerPlan {
     self_name: String,
 }
 
+const RESOLVER_TOKEN_ENV: &str = "CFRG_RESOLVER_FORGEJO_TOKEN";
+
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub checked: bool,
@@ -382,6 +397,9 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             "Rendered tool revision must be a full lowercase Git SHA",
         ));
     }
+    if let Some(secret) = config.resolver_token_secret.as_deref() {
+        validate_resolver_token_secret(secret)?;
+    }
     if parsed.jobs.is_empty() {
         return Err(failure("Rendering requires at least one declared job"));
     }
@@ -406,7 +424,11 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         let plan = jobs::plan(repo, manifest, name, None)?;
         outputs.insert(
             PathBuf::from(format!(".crow/{}.yaml", plan.workflow)),
-            workflow_adapter(&config.tool_revision, &plan.workflow, &sources)?,
+            inject_resolver_token(
+                workflow_adapter(&config.tool_revision, &plan.workflow, &sources)?,
+                &config.tool_revision,
+                config.resolver_token_secret.as_deref(),
+            )?,
         );
         inventory.jobs.insert(name.clone(), plan);
     }
@@ -591,6 +613,25 @@ fn validate_push_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_resolver_token_secret(name: &str) -> Result<()> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return Err(failure(
+            "Invalid [render].resolver_token_secret: must be 1-64 characters",
+        ));
+    }
+    let first_ok = bytes[0].is_ascii_alphanumeric() || bytes[0] == b'_';
+    let rest_ok = bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-' || *b == b'.');
+    if !first_ok || !rest_ok {
+        return Err(failure(
+            "Invalid [render].resolver_token_secret: use [A-Za-z0-9_.-], leading [A-Za-z0-9_]",
+        ));
+    }
+    Ok(())
+}
+
 /// Userinfo (and therefore passwords) only exists in scheme URLs; scp-like
 /// `user@host:path` carries a login name but never a password.
 fn authority_has_userinfo(url: &str) -> bool {
@@ -641,6 +682,31 @@ fn validate_consumer(entry: &PushConsumer) -> Result<PushConsumer> {
         ));
     }
     Ok(entry.clone())
+}
+/// Inject the optional resolver token into an already-built Crow adapter.
+/// Absent secret returns the input byte-identical (preserving auxiliary
+/// source variables). Present secret appends exactly one
+/// `CFRG_RESOLVER_FORGEJO_TOKEN: { from_secret: <quoted> }` entry to the
+/// repository-job environment; native-status steps are untouched. The secret
+/// name is quoted with `serde_json` (valid YAML), never interpreted raw.
+fn inject_resolver_token(
+    base: String,
+    tool_revision: &str,
+    secret: Option<&str>,
+) -> Result<String> {
+    let Some(secret) = secret else {
+        return Ok(base);
+    };
+    validate_resolver_token_secret(secret)?;
+    // serde_json string quoting is valid YAML and escapes control chars.
+    let quoted = serde_json::to_string(secret)?;
+    let pin_line = format!("      CCID_REVISION: '{tool_revision}'\n");
+    if base.matches(&pin_line).count() != 1 {
+        return Err(failure("Render template lost its CCID_REVISION pin"));
+    }
+    let insertion =
+        format!("{pin_line}      {RESOLVER_TOKEN_ENV}:\n        from_secret: {quoted}\n");
+    Ok(base.replacen(&pin_line, &insertion, 1))
 }
 
 fn metadata(path: &Path) -> Result<Option<fs::Metadata>> {

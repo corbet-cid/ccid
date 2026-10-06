@@ -1943,7 +1943,7 @@ impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecordNetwor
             Some("cmsh"),
             Some(&manifest),
             &unit_argv(&lib),
-            root.path().join("elsewhere"),
+            &root.path().join("elsewhere"),
         )
         .is_err());
         assert!(resolve_target(Some("cmsh"), Some(&manifest), &[], root.path()).is_err());
