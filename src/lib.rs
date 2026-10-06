@@ -29,6 +29,7 @@ pub mod render;
 mod runner;
 mod source;
 pub mod tor;
+pub(crate) mod tor_inputs;
 
 use budget::positive;
 pub use budget::{budget, Budget};
