@@ -42,7 +42,7 @@ fn fixture(parent: &Path, name: &str, docs: &str, value: u64) -> PathBuf {
         "version = 4\n[[package]]\nname = \"cache-acceptance-fixture\"\nversion = \"0.0.0\"\n",
     )
     .unwrap();
-    fs::write(root.join("src/lib.rs"), format!("pub fn value() -> u64 {{ {value} }}\n#[test] fn compute() {{ let mut n = value(); for i in 0..30000000u64 {{ n = std::hint::black_box(n.wrapping_mul(6364136223846793005).wrapping_add(i)); }} assert_ne!(n, 0); }}\n")).unwrap();
+    fs::write(root.join("src/lib.rs"), format!("pub fn value() -> u64 {{ {value} }}\n#[test] fn compute() {{ assert!(std::env::var_os(\"CCID_RECEIPT\").is_none()); assert!(std::env::var_os(\"CCID_CACHE_CHILD\").is_none()); let mut n = value(); for i in 0..30000000u64 {{ n = std::hint::black_box(n.wrapping_mul(6364136223846793005).wrapping_add(i)); }} assert_ne!(n, 0); }}\n")).unwrap();
     fs::write(root.join("README.md"), docs).unwrap();
     fs::write(root.join(".ci/ccid.toml"), "schema = 1\nproject = 'cache-acceptance-fixture'\n[checks.test]\nkind = 'cargo'\nactions = ['test']\n").unwrap();
     git(&root, &["init", "--quiet"]);

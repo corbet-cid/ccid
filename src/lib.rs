@@ -287,6 +287,17 @@ fn run_checks_inner(
         // Moon adds task/workspace/run metadata after cmnp filters the parent
         // environment. It is orchestration context, never a check input.
         environment.retain(|key, _| !key.to_string_lossy().starts_with("MOON_"));
+        // ccid records its receipt from the process environment. Checked
+        // programs must not inherit it: nested command libraries could write
+        // generated receipt files into the otherwise immutable source tree.
+        for key in [
+            "CCID_RECEIPT",
+            "CCID_TOOL_IDENTITY",
+            "CCID_CACHE_CHILD",
+            "CCID_CACHE_REPLAY_ONLY",
+        ] {
+            environment.remove(std::ffi::OsStr::new(key));
+        }
     }
     if !cache_child && value(&environment, "CCID_RESULT_CACHE").is_some() {
         let requested = Instant::now()
