@@ -330,3 +330,74 @@ fn manual_only_manifests_render_byte_identical_inventories() {
         .is_none());
     assert!(render(root.path(), true).unwrap().checked);
 }
+
+#[test]
+fn resolver_token_secret_opt_in_projects_only_the_named_reference() {
+    let root = repository();
+    let without = manifest("verify", "argo");
+    fs::write(root.path().join(".ci/ccid.toml"), without).unwrap();
+    render(root.path(), false).unwrap();
+    let plain = fs::read_to_string(root.path().join(".crow/verify.yaml")).unwrap();
+    assert!(!plain.contains("CFRG_RESOLVER_FORGEJO_TOKEN"));
+    assert!(!plain.contains("from_secret"));
+
+    let with = manifest("verify", "argo").replace(
+        "[render]",
+        "[render]\nresolver_token_secret = 'forgejo_token'",
+    );
+    fs::write(root.path().join(".ci/ccid.toml"), with).unwrap();
+    render(root.path(), false).unwrap();
+    let keyed = fs::read_to_string(root.path().join(".crow/verify.yaml")).unwrap();
+    assert_eq!(keyed.matches("CFRG_RESOLVER_FORGEJO_TOKEN").count(), 1);
+    assert_eq!(keyed.matches("from_secret").count(), 1);
+    assert!(keyed.contains("from_secret: \"forgejo_token\""));
+    // Native-status steps never carry the reference.
+    let status_idx = keyed.find("native-status-pending").unwrap();
+    let job_idx = keyed.find("repository-job").unwrap();
+    assert!(!keyed[status_idx..job_idx].contains("CFRG_RESOLVER_FORGEJO_TOKEN"));
+
+    let bad = manifest("verify", "argo")
+        .replace("[render]", "[render]\nresolver_token_secret = 'bad name!'");
+    fs::write(root.path().join(".ci/ccid.toml"), bad).unwrap();
+    assert!(render(root.path(), false).is_err());
+}
+
+#[test]
+fn resolver_token_secret_preserves_auxiliary_source_variables() {
+    let root = repository();
+    fs::write(
+        root.path().join(".ci/archives.toml"),
+        "schema = 1\n\
+         [archives.shared]\n\
+         revision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n\
+         archive_variable = 'SHARED_SOURCE_ARCHIVE'\n\
+         digest_variable = 'SHARED_SOURCE_SHA256'\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.path().join(".ci/ccid.toml"),
+        manifest("verify", "argo"),
+    )
+    .unwrap();
+    render(root.path(), false).unwrap();
+    let plain = fs::read_to_string(root.path().join(".crow/verify.yaml")).unwrap();
+    assert!(plain.contains("SHARED_SOURCE_ARCHIVE: {default: \"\"}"));
+    assert!(plain.contains("SHARED_SOURCE_SHA256: {default: \"\"}"));
+    assert!(!plain.contains("CFRG_RESOLVER_FORGEJO_TOKEN"));
+
+    let with = manifest("verify", "argo").replace(
+        "[render]",
+        "[render]\nresolver_token_secret = 'forgejo_token'",
+    );
+    fs::write(root.path().join(".ci/ccid.toml"), with).unwrap();
+    render(root.path(), false).unwrap();
+    let keyed = fs::read_to_string(root.path().join(".crow/verify.yaml")).unwrap();
+    assert!(keyed.contains("SHARED_SOURCE_ARCHIVE: {default: \"\"}"));
+    assert!(keyed.contains("SHARED_SOURCE_SHA256: {default: \"\"}"));
+    assert_eq!(keyed.matches("CFRG_RESOLVER_FORGEJO_TOKEN").count(), 1);
+    assert!(keyed.contains("from_secret: \"forgejo_token\""));
+    let status_idx = keyed.find("native-status-pending").unwrap();
+    let job_idx = keyed.find("repository-job").unwrap();
+    assert!(!keyed[status_idx..job_idx].contains("CFRG_RESOLVER_FORGEJO_TOKEN"));
+}

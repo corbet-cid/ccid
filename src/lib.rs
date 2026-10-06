@@ -26,6 +26,7 @@ mod dependency;
 pub mod jobs;
 pub mod push;
 pub mod render;
+pub mod resolver;
 mod runner;
 mod source;
 pub mod tor;
@@ -468,7 +469,36 @@ fn run_checks_inner(
         cache::Freshness::invalidate(&target)?;
         None
     };
-    let mut runner = Runner::until(root, environment, deadline)?;
+    let mut runner = {
+        // Resolver pre-step at the common verified-source execution point
+        // (covers run_checks, run_archive_checks and Crow/Argo adapters).
+        // Runs AFTER Q's central cache routing above and AFTER stable
+        // source/scratch setup, so manifest/lock scanning reads checked
+        // source and installs config into the environment moved into Runner
+        // below, BEFORE any git fetch/check commands. jobs::execute reaches
+        // the same helper; the APPLIED marker keeps nested jobs->ccid
+        // execution to a single installation. Content identity stays
+        // semantic: pure cache keys exclude the selected store/jobdir and
+        // per-run metadata (see checks::validate_cached_contract); this only
+        // rewrites selected transport for declared inputs.
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
+        if remaining > 0 {
+            let scratch_path = _stable_scratch
+                .as_ref()
+                .map(|s| s.path())
+                .or(_scratch.as_ref().map(|s| s.path()));
+            if let Some(scratch_path) = scratch_path {
+                crate::resolver::maybe_prepare_runner_env(
+                    &mut environment,
+                    &root,
+                    scratch_path,
+                    &[],
+                    remaining,
+                )?;
+            }
+        }
+        Runner::until(root, environment, deadline)?
+    };
     for name in &selected {
         let check = &manifest.checks[name];
         let started = Instant::now();

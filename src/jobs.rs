@@ -91,6 +91,11 @@ pub struct Request {
     pub job: String,
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
+    /// Adapter-staged manual explicit Git URLs (`url`, `url#<sha>`,
+    /// `url?branch=X`, `url?tag=X`). Covers manual jobs whose fetches are not
+    /// declared in manifests. Empty by default; unknown entries fail closed.
+    #[serde(default)]
+    pub source_urls: Vec<String>,
 }
 
 /// Run the repository's entrypoint from verified source and exact local Git history.
@@ -132,7 +137,18 @@ pub fn execute(request: &Request) -> Result<()> {
     environment.insert("CHECKS".into(), planned.checks.join(",").into());
     environment.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     environment.insert("GIT_LFS_SKIP_SMUDGE".into(), "1".into());
+    // Resolver pre-step: runs AFTER the verified source unpack above, so
+    // manifest/lock scanning reads checked source, and installs config into
+    // the environment moved into Runner::new below so commands consume it.
+    // No runner config -> existing operation. Resolve errors fail closed.
     let timeout = crate::budget(&environment)?.timeout;
+    crate::resolver::maybe_prepare_runner_env(
+        &mut environment,
+        &root,
+        scratch.path(),
+        &request.source_urls,
+        timeout,
+    )?;
     let runner = Runner::new(root, environment, Duration::from_secs(timeout))?;
     let git = |args: Vec<String>| {
         let mut command = vec!["git".into(), "-c".into(), "core.hooksPath=/dev/null".into()];
@@ -624,6 +640,7 @@ mod tests {
             tool_revision: crate::SOURCE_REVISION.to_owned(),
             job: "job".to_owned(),
             environment: job_env,
+            source_urls: Vec::new(),
         };
         execute(&request).unwrap();
         let recorded = std::fs::read_to_string(&out).unwrap();
