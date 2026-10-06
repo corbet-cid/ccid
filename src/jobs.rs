@@ -62,6 +62,8 @@ pub fn execute(request: &Request) -> Result<()> {
         }
         environment.insert(key.into(), value.into());
     }
+    // Reporting is a distinct adapter step. Never hand its tokens to checks.
+    environment.retain(|key, _| !key.to_string_lossy().starts_with("CCID_STATUS_"));
     environment.insert("CI_COMMIT_SHA".into(), request.commit.clone().into());
     environment.insert("CCID_BIN".into(), std::env::current_exe()?.into_os_string());
     crate::admission::admit(&mut environment)?;

@@ -38,6 +38,10 @@ requires confirmed terminal cancellation and proof no execution began. Only an
 `absent` provider with the requested coverage can receive new work. Execution
 fallback never changes the primary forge or creates a second trigger.
 
+Repository access (organization membership, teams, repository collaborators)
+is mirrored across forges by a separate three-way merge; see
+[access sync](access-sync.md).
+
 The existing Crow/GitHub dispatcher retains its exact-request receipts, inventory,
 locking and cancellation checks. These generic policy functions are reusable by
 additional adapters; they are not an autonomous failover service. Paid providers

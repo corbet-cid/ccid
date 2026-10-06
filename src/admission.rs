@@ -1,5 +1,25 @@
 //! A bounded worker admission check, not a scheduler or a swap-occupancy rule.
 use super::*;
+use std::thread;
+
+/// How often a job held back by resource pressure checks again.
+const ADMISSION_POLL: Duration = Duration::from_secs(10);
+
+/// Transient resource pressure, worth waiting for; configuration errors are not.
+#[derive(Debug)]
+struct Refused(String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+fn refused(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(Refused(message.into()))
+}
 
 fn available_mb(meminfo: &str, limit: Option<u64>, current: Option<u64>) -> Result<u64> {
     let available = meminfo
@@ -22,7 +42,7 @@ fn available_mb(meminfo: &str, limit: Option<u64>, current: Option<u64>) -> Resu
 
 fn apply(env: &mut Environment, available: u64, reserve: u64) -> Result<()> {
     if available <= reserve {
-        return Err(failure(format!(
+        return Err(refused(format!(
             "Memory admission refused: {available} MiB available, {reserve} MiB reserve required"
         )));
     }
@@ -38,7 +58,35 @@ fn apply(env: &mut Environment, available: u64, reserve: u64) -> Result<()> {
     Ok(())
 }
 
+/// Admit a job, holding it for up to `CI_ADMISSION_WAIT_SECONDS` (default 0)
+/// while I/O or memory pressure refuses it, so a busy host delays work
+/// instead of failing it.
 pub(crate) fn admit(env: &mut Environment) -> Result<()> {
+    let wait = value(env, "CI_ADMISSION_WAIT_SECONDS")
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| failure("CI_ADMISSION_WAIT_SECONDS must be a non-negative integer"))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let deadline = Instant::now() + Duration::from_secs(wait);
+    loop {
+        match admit_once(env) {
+            Err(error)
+                if error.is::<Refused>()
+                    && Instant::now() < deadline
+                    && !INTERRUPTED.load(Ordering::SeqCst) =>
+            {
+                event(json!({"event":"admission-wait","reason":error.to_string()}));
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(ADMISSION_POLL.min(remaining));
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+fn admit_once(env: &mut Environment) -> Result<()> {
     if let Some(maximum) = value(env, "CI_MAX_IO_PSI_AVG10") {
         let maximum = pressure_limit(&maximum)?;
         let pressure = fs::read_to_string("/proc/pressure/io").map_err(|_| {
@@ -116,7 +164,7 @@ fn io_pressure(text: &str, maximum: f64) -> Result<f64> {
         .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
         .ok_or_else(|| failure("Cannot establish full I/O pressure for configured admission"))?;
     if observed >= maximum {
-        return Err(failure(format!("I/O admission refused: full avg10={observed}%, limit={maximum}%; retry when pressure subsides")));
+        return Err(refused(format!("I/O admission refused: full avg10={observed}%, limit={maximum}%; retry when pressure subsides")));
     }
     Ok(observed)
 }
@@ -143,6 +191,14 @@ mod tests {
         ] {
             assert!(io_pressure(text, 2.5).is_err());
         }
+        // Only real pressure waits; unreadable or invalid data fails at once.
+        assert!(io_pressure("full avg10=99", 2.5)
+            .unwrap_err()
+            .is::<Refused>());
+        assert!(!io_pressure("full avg10=NaN", 2.5)
+            .unwrap_err()
+            .is::<Refused>());
+        assert!(!pressure_limit("0").unwrap_err().is::<Refused>());
     }
     #[test]
     fn cgroup_headroom_caps_host_memory_without_consulting_swap() {
@@ -173,7 +229,7 @@ mod tests {
             ("CI_MEMORY_PER_JOB_MB".into(), "2048".into()),
             ("CI_JOBS".into(), "8".into()),
         ]);
-        assert!(apply(&mut env, 8192, 8192).is_err());
+        assert!(apply(&mut env, 8192, 8192).unwrap_err().is::<Refused>());
         apply(&mut env, 12288, 8192).unwrap();
         assert_eq!(budget(&env).unwrap().jobs, 2);
     }

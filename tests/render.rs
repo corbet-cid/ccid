@@ -162,6 +162,12 @@ fn generated_shell_preserves_request_data_and_binds_the_crow_source() {
     fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
     let yaml = fs::read_to_string(root.path().join(".crow/verify.yaml")).unwrap();
     let script = yaml
+        .split("  - name: repository-job\n")
+        .nth(1)
+        .unwrap()
+        .split("  - name: native-status-complete\n")
+        .next()
+        .unwrap()
         .split("      - |\n")
         .nth(1)
         .unwrap()

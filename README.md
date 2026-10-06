@@ -3,7 +3,7 @@
 Reusable check commands invoked by Crow or Argo on existing build workers.
 Repository manifests share the
 same Cargo, Nix, JavaScript, source-verification, cache, deadline and resource
-rules across providers. ccid does not install tools, host a service, schedule
+rules across providers. The ccid check executor does not install tools, host a service, schedule
 jobs or pretend that one platform proves another. The Rust executor does not
 publish releases. The optional [registry publisher resource](adapters/registry-publish.md)
 provides explicit, separately invoked uploads of already-verified archives.
@@ -124,6 +124,11 @@ Rust build, both using the same verified job runtime.
 with `--apply`. It never force-pushes or deletes refs. See
 [forge reconciliation](docs/forge-sync.md) for completion semantics and external
 content limits.
+
+The separate, opt-in [`ccid-pr-bridge`](docs/pr-bridge.md) binary reads GitLab
+merge requests and imports exact commits into a dedicated Forgejo fork. It
+does not schedule checks or execute contributed code; the executor's charter
+is unchanged. Import requires disabled CI and explicit flags.
 
 ## Manifest
 
