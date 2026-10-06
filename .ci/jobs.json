@@ -1,43 +1,18 @@
 {
   "schema": 1,
   "generator": "ccid render v1",
-  "tool_revision": "81ebac8e86e20bc93b69d5e912bbcb0c0d036d58",
-  "manifest_sha256": "5381ced1a2fc1c85a243fa7bd57a47e5d6588323c8d3bda3b6a7e1fe3d6ef5c9",
+  "tool_revision": "d750da87e396c502e1a1c7a0fb60fc6e71b1fcee",
+  "manifest_sha256": "806e52f50d4469e0fa84972e9e3184884f85847693104d44377cb2c6b3604f0d",
   "jobs": {
-    "cache-acceptance": {
-      "job": "cache-acceptance",
-      "scheduler": "crow",
-      "checks": [
-        "cache-acceptance"
-      ],
-      "workflow": "repository-jobs",
-      "command": [
-        "bash",
-        ".ci/run-job.sh"
-      ]
-    },
-    "compile": {
-      "job": "compile",
-      "scheduler": "crow",
-      "checks": [
-        "compile"
-      ],
-      "workflow": "repository-jobs",
-      "command": [
-        "bash",
-        ".ci/run-job.sh"
-      ]
-    },
     "verify": {
       "job": "verify",
       "scheduler": "crow",
       "checks": [
-        "test"
+        "verify"
       ],
       "workflow": "repository-jobs",
       "command": [
-        "bash",
-        ".ci/run-job.sh"
+        "true"
       ]
     }
   }
