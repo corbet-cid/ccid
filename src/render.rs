@@ -533,7 +533,7 @@ fn substitute(template: &str, config: &Config, pairs: &[(&str, &str)]) -> String
         .replace("CCID_SECRET_BINARY", &config.tool_secret_binary)
         .replace("CCID_SECRET_SHA", &config.tool_secret_binary_sha256);
     for (key, value) in pairs {
-        rendered = rendered.replace(*key, value);
+        rendered = rendered.replace(key, value);
     }
     rendered
 }

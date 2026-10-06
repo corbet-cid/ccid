@@ -518,7 +518,8 @@ pub(crate) fn namespace_dir(root: &Path, url: &str, branch: &str, job: &str) -> 
 /// Contention (another live builder holds the lock) is distinct from
 /// hard IO failures: callers wait on contention but fail loudly on IO or
 /// corrupt state. Kernel file lock, released automatically on crash.
-/// Test-only until a production job path calls it.
+/// Test-only: production paths use deadline-capped `lock_file_until` and
+/// `try_lock_file`.
 #[cfg(test)]
 pub(crate) fn lock_file(path: &Path, wait_secs: u64) -> Result<File> {
     let overall = Instant::now()
@@ -1919,7 +1920,8 @@ fn canonical_eq(left: &str, right: &str) -> Result<bool> {
 /// package selections: every git dependency declaring the refresh branch
 /// whose canonical source starts with an allowed prefix. No per-dep
 /// ls-remote sweep; Cargo's own fetch is the single resolution round.
-/// Test-only until a production refresh path calls it.
+/// Legacy helper, superseded in production by `select_active_graph`;
+/// retained test-only for the preserved root-table selection suite.
 #[cfg(test)]
 fn select_refresh(manifest: &toml::Value, refresh: &Refresh) -> Result<Vec<String>> {
     let mut selected = Vec::new();
@@ -2991,8 +2993,10 @@ mod tests {
                 Ok(output_for(body.clone()))
             }
         };
-        let second_handle =
-            std::thread::spawn(move || run_push_with(&second, &build2, &policy, 0, 2));
+        let second_handle = {
+            let policy = policy.clone();
+            std::thread::spawn(move || run_push_with(&second, &build2, &policy, 0, 2))
+        };
         let first_outcome = first_handle.join().unwrap().unwrap();
         let second_outcome = second_handle.join().unwrap().unwrap();
         assert_eq!(*calls.lock().unwrap(), 1, "one admitted build per burst");
@@ -3070,8 +3074,10 @@ mod tests {
         // A newer consumer event lands mid-build on the same branch: it
         // cannot attach (different sha, ancestry false here), so exactly
         // one later latest-head build runs for it.
-        let second_handle =
-            std::thread::spawn(move || run_push_with(&second, &build_second, &policy, 0, 10));
+        let second_handle = {
+            let policy = policy.clone();
+            std::thread::spawn(move || run_push_with(&second, &build_second, &policy, 0, 10))
+        };
         assert!(matches!(
             first_handle.join().unwrap().unwrap(),
             PushOutcome::Built { .. }
