@@ -113,7 +113,7 @@ impl Runner {
         }
         #[cfg(unix)]
         {
-            self.run_unix_bytes(argv, true, Some(input))
+            self.run_unix_bytes(argv, true, Some(input), None)
         }
         #[cfg(not(unix))]
         {
@@ -126,10 +126,26 @@ impl Runner {
     #[cfg(unix)]
     fn run_unix(&self, argv: &[String], capture: bool) -> Result<String> {
         Ok(
-            String::from_utf8(self.run_unix_bytes(argv, capture, None)?)?
+            String::from_utf8(self.run_unix_bytes(argv, capture, None, None)?)?
                 .trim()
                 .to_owned(),
         )
+    }
+    /// Read a bounded prefix and terminate the producer's owned group.
+    /// Only for format sniffing after object integrity was independently checked.
+    pub(crate) fn run_prefix(&self, argv: &[String], length: usize) -> Result<Vec<u8>> {
+        validate_command(argv)?;
+        if length == 0 || length > 16 * 1024 * 1024 || Instant::now() >= self.deadline {
+            return Err(failure("Invalid prefix bound or expired deadline"));
+        }
+        #[cfg(unix)]
+        {
+            self.run_unix_bytes(argv, true, None, Some(length))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(failure("Bounded prefix inspection requires Unix"))
+        }
     }
     #[cfg(unix)]
     fn run_unix_bytes(
@@ -137,6 +153,7 @@ impl Runner {
         argv: &[String],
         capture: bool,
         input: Option<&Path>,
+        prefix: Option<usize>,
     ) -> Result<Vec<u8>> {
         let started = Instant::now();
         let mut command = Command::new(&argv[0]);
@@ -174,7 +191,7 @@ impl Runner {
             thread::spawn(move || {
                 let mut bytes = Vec::new();
                 let result = stdout
-                    .take(16 * 1024 * 1024 + 1)
+                    .take(prefix.unwrap_or(16 * 1024 * 1024 + 1) as u64)
                     .read_to_end(&mut bytes)
                     .map(|_| bytes);
                 let _ = send.send(result);
@@ -202,6 +219,17 @@ impl Runner {
                     "Check interrupted or timed out; its owned process group/job was terminated",
                 ));
             }
+            if prefix.is_some() {
+                if let Some(Ok(output)) = reader.as_ref().map(|reader| reader.try_recv()) {
+                    let bytes = output?;
+                    let _ = child.0.start_kill();
+                    let _ = child.0.wait();
+                    if Some(bytes.len()) != prefix {
+                        return Err(failure("Truncated object prefix"));
+                    }
+                    return Ok(bytes);
+                }
+            }
             if let Some(status) = child.0.try_wait()? {
                 break status;
             }
@@ -212,7 +240,7 @@ impl Runner {
         self.command_event(
             json!({"event":"command", "executable":Path::new(&argv[0]).file_name().map(|s|s.to_string_lossy()), "seconds":started.elapsed().as_secs_f64(), "exit_code":status.code()}),
         );
-        if !status.success() {
+        if !status.success() && prefix.is_none() {
             return Err(failure(format!(
                 "{} failed: {status}",
                 Path::new(&argv[0])
@@ -225,6 +253,11 @@ impl Runner {
             let bytes = reader.recv_timeout(Duration::from_secs(10)).map_err(|_| {
                 failure("Captured output did not close after command termination")
             })??;
+            if let Some(expected) = prefix {
+                if bytes.len() != expected {
+                    return Err(failure("Truncated object prefix"));
+                }
+            }
             if bytes.len() > 16 * 1024 * 1024 {
                 return Err(failure("Captured command output exceeded 16 MiB"));
             }

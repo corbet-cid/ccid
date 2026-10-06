@@ -238,14 +238,20 @@ fn bounded_runner_preserves_binary_batch_input_and_null_stdin_default() {
 
 #[test]
 fn noncanonical_lfs_pointers_never_claim_payload_replication() {
-    for prefix in ["\n\t ", "\u{a0}\u{2003}"] {
+    for (prefix, padding) in [
+        ("\n\t ", 0),
+        ("\u{a0}\u{2003}", 0),
+        ("", 2000),
+        ("", 17 * 1024 * 1024),
+    ] {
         let f = Fixture::new();
         f.commit("first");
         fs::write(
             f.source.join("large"),
             format!(
-                "{prefix}version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 12345\n",
-                "a".repeat(64)
+                "{prefix}version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 12345\n{}",
+                "a".repeat(64),
+                " ".repeat(padding)
             ),
         )
         .unwrap();
@@ -419,4 +425,16 @@ fn policy_url_and_repository_path_injection_is_refused_before_transport() {
     }
     assert_eq!(git(&f.source, &["rev-parse", "refs/heads/main"]), first);
     assert!(git(&f.replica, &["for-each-ref"]).is_empty());
+}
+
+#[test]
+fn large_ordinary_blobs_are_inspected_without_exceeding_capture_limits() {
+    let f = Fixture::new();
+    f.commit("first");
+    fs::write(f.source.join("ordinary"), vec![b'x'; 17 * 1024 * 1024]).unwrap();
+    git(&f.source, &["add", "ordinary"]);
+    git(&f.source, &["commit", "-qm", "ordinary large blob"]);
+    let (output, report) = f.report(&["--all-refs", "--to", "replica", "--apply"]);
+    assert!(output.status.success(), "{report}");
+    assert_eq!(report["complete"], true);
 }

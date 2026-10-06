@@ -19,7 +19,7 @@ impl Content {
 
 pub(super) fn inspect(git: &Git, oid_bytes: usize) -> Result<Content> {
     // This object database contains only the complete fetched source closure.
-    // Small blobs include LFS pointers (git-lfs's pointer limit is 1024 bytes).
+    // Smudge decodes the first 1024 bytes, even for larger noncanonical blobs.
     // Trees carry gitlinks even when .gitmodules is absent or was later removed.
     let inventory = git.run(&[
         "cat-file",
@@ -27,6 +27,7 @@ pub(super) fn inspect(git: &Git, oid_bytes: usize) -> Result<Content> {
         "--batch-check=%(objectname) %(objecttype) %(objectsize)",
     ])?;
     let mut objects = Vec::new();
+    let mut content = Content::default();
     for line in inventory.lines() {
         let fields: Vec<_> = line.split(' ').collect();
         let [oid, kind, size] = fields.as_slice() else {
@@ -36,14 +37,19 @@ pub(super) fn inspect(git: &Git, oid_bytes: usize) -> Result<Content> {
         if !valid_oid(oid) {
             return Err(failure("Malformed object identity"));
         }
-        if *kind == "tree" || (*kind == "blob" && size <= 1024) {
+        if *kind == "blob" && size > 8 * 1024 * 1024 {
+            let prefix = git.runner.run_prefix(
+                &git.argv(&["cat-file".into(), "blob".into(), (*oid).into()]),
+                1024,
+            )?;
+            content.lfs_required |= lfs_pointer(&prefix);
+        } else if *kind == "tree" || *kind == "blob" {
             if size > 8 * 1024 * 1024 {
                 return Err(failure("Source tree exceeds bounded inspection size"));
             }
             objects.push(((*oid).to_owned(), (*kind).to_owned(), size));
         }
     }
-    let mut content = Content::default();
     let mut offset = 0;
     while offset < objects.len() {
         let start = offset;
@@ -80,11 +86,7 @@ pub(super) fn inspect(git: &Git, oid_bytes: usize) -> Result<Content> {
                 // must never be mistaken for the payload it names.
                 // git-lfs accepts noncanonical pointers after Unicode whitespace
                 // trimming. Missing those would claim payloads were replicated.
-                content.lfs_required |= std::str::from_utf8(body)
-                    .is_ok_and(|text| text.trim_start().starts_with("version "))
-                    && body
-                        .windows(b"oid sha256:".len())
-                        .any(|part| part == b"oid sha256:");
+                content.lfs_required |= lfs_pointer(&body[..body.len().min(1024)]);
             } else {
                 content.submodules_required |= gitlinks(body, oid_bytes)?;
             }
@@ -96,6 +98,15 @@ pub(super) fn inspect(git: &Git, oid_bytes: usize) -> Result<Content> {
     }
     content.inspected = true;
     Ok(content)
+}
+
+fn lfs_pointer(body: &[u8]) -> bool {
+    String::from_utf8_lossy(body)
+        .trim_start()
+        .starts_with("version ")
+        && body
+            .windows(b"oid sha256:".len())
+            .any(|part| part == b"oid sha256:")
 }
 
 fn gitlinks(mut tree: &[u8], oid_bytes: usize) -> Result<bool> {
