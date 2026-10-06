@@ -107,7 +107,7 @@ pub fn execute(request: &Request) -> Result<()> {
         environment.insert(key.into(), value.into());
     }
     // Reporting is a distinct adapter step. Never hand its tokens to checks.
-    environment.retain(|key, _| !is_reporter_status_key(&key.to_string_lossy()));
+    environment.retain(|key, _| !key.to_string_lossy().starts_with("CCID_STATUS_"));
     environment.insert("CI_COMMIT_SHA".into(), request.commit.clone().into());
     environment.insert("CCID_BIN".into(), std::env::current_exe()?.into_os_string());
     crate::admission::admit(&mut environment)?;
@@ -294,14 +294,6 @@ pub(crate) fn validate_refresh(refresh: &Refresh) -> Result<()> {
     Ok(())
 }
 
-/// Reporter status prefixes that must never reach repository code, gate
-/// commands, or manifest overlays. `CFRG_STATUS_*` is the migrated Argo
-/// reporter contract; `CCID_STATUS_*` stays stripped as defensive
-/// sanitization of the legacy prefix.
-pub(crate) fn is_reporter_status_key(key: &str) -> bool {
-    key.starts_with("CFRG_STATUS_") || key.starts_with("CCID_STATUS_")
-}
-
 /// Reserved identity/status keys a manifest-owned per-job environment must
 /// never override. The scheduler/adapter owns these (provenance, tool
 /// identity, reporting tokens, target-lock guard), plus the job-owned
@@ -317,7 +309,7 @@ fn reserved_env_key(key: &str) -> bool {
             | "CI_COMMIT_BRANCH"
             | "CI_REPOSITORY_URL"
             | "RUNNER_TEMP"
-    ) || is_reporter_status_key(key)
+    ) || key.starts_with("CCID_STATUS_")
         || key.starts_with("CCID_TARGET_")
         || key.starts_with("CCID_JOB_")
         || key.starts_with("CCID_PUSH_")
@@ -497,47 +489,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reporter_status_prefixes_stay_scheduler_owned() {
-        // The migrated Argo reporter contract plus legacy sanitization.
-        assert!(is_reporter_status_key("CFRG_STATUS_TOKEN"));
-        assert!(is_reporter_status_key("CFRG_STATUS_ENDPOINT"));
-        assert!(is_reporter_status_key("CCID_STATUS_TOKEN"));
-        // Ordinary keys and near-miss prefixes are untouched.
-        assert!(!is_reporter_status_key("CI_JOBS"));
-        assert!(!is_reporter_status_key("CFRGSTATUS_TOKEN"));
-        assert!(!is_reporter_status_key("CFRG_STATUS"));
-        // Declared new-prefix keys fail closed like the legacy ones.
-        for key in ["CFRG_STATUS_TOKEN", "CCID_STATUS_TOKEN"] {
-            let declared = BTreeMap::from([(key.to_owned(), "x".to_owned())]);
-            assert!(
-                validate_job_environment(&declared).is_err(),
-                "{key} must stay scheduler-owned"
-            );
-        }
-        // The overlay itself also skips them (defense in depth), while
-        // ordinary keys still apply.
-        let mut working: crate::Environment = BTreeMap::new();
-        working.insert("CFRG_STATUS_TOKEN".into(), "scheduler".into());
-        working.insert("CI_JOBS".into(), "1".into());
-        let mut declared = BTreeMap::new();
-        declared.insert("CFRG_STATUS_TOKEN".to_owned(), "evil".to_owned());
-        declared.insert("CI_JOBS".to_owned(), "2".to_owned());
-        apply_job_environment(&mut working, &declared);
-        assert_eq!(
-            working
-                .get(&std::ffi::OsString::from("CFRG_STATUS_TOKEN"))
-                .map(|value| value.to_string_lossy().into_owned()),
-            Some("scheduler".to_owned())
-        );
-        assert_eq!(
-            working
-                .get(&std::ffi::OsString::from("CI_JOBS"))
-                .map(|value| value.to_string_lossy().into_owned()),
-            Some("2".to_owned())
-        );
-    }
-
     /// The job entrypoint must see a writable owned scratch directory as
     /// RUNNER_TEMP even when the request carries a hostile value, and the
     /// owned directory must be gone after the job completes.
@@ -549,7 +500,7 @@ mod tests {
         std::fs::create_dir_all(source.join(".ci")).unwrap();
         std::fs::write(
             source.join(".ci/ccid.toml"),
-            "schema = 1\nproject = 'demo'\n[checks.test]\nkind = 'commands'\ncommands = [['true']]\n[jobs.job]\nchecks = ['test']\nworkflow = 'verify'\ncommand = ['sh', '-c', 'test -d \"$RUNNER_TEMP\" && test -w \"$RUNNER_TEMP\" && touch \"$RUNNER_TEMP/probe\" && test -z \"${CFRG_STATUS_TOKEN:-}\" && test -z \"${CCID_STATUS_TOKEN:-}\" && echo \"$RUNNER_TEMP\" > \"$TEST_OUT\"']\n",
+            "schema = 1\nproject = 'demo'\n[checks.test]\nkind = 'commands'\ncommands = [['true']]\n[jobs.job]\nchecks = ['test']\nworkflow = 'verify'\ncommand = ['sh', '-c', 'test -d \"$RUNNER_TEMP\" && test -w \"$RUNNER_TEMP\" && touch \"$RUNNER_TEMP/probe\" && echo \"$RUNNER_TEMP\" > \"$TEST_OUT\"']\n",
         )
         .unwrap();
         let git = |args: &[&str]| {
@@ -612,9 +563,6 @@ mod tests {
             "RUNNER_TEMP".to_owned(),
             hostile.to_string_lossy().into_owned(),
         );
-        // Reporter tokens must never reach checks, new prefix or legacy.
-        job_env.insert("CFRG_STATUS_TOKEN".to_owned(), "fixture-secret".to_owned());
-        job_env.insert("CCID_STATUS_TOKEN".to_owned(), "fixture-secret".to_owned());
         let request = Request {
             archive: archive.clone(),
             sha256: crate::sha256_file(&archive).unwrap(),

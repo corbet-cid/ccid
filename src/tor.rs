@@ -289,6 +289,79 @@ fn evidence_root(env: &Environment, component: &str, job: &str) -> Result<PathBu
     Ok(attempt.keep())
 }
 
+/// Short job-owned Tor scratch under an explicit parent, bypassing the
+/// inherited worker-nested `TMPDIR` (`ccid-job-…/nix-shell-…/ccid-job-…`).
+/// The nested shape pushes Chutney node dirs past the 108-byte `sun_path`
+/// limit (a node dir alone measured 116 chars, `control` 124,
+/// `control.authcookie` 135), so every Tor child (Chutney, Chrome) inherits
+/// this short root via both `TMPDIR` and `RUNNER_TEMP`. Lifetime stays
+/// `TempDir` RAII; evidence roots, `CARGO_HOME`/`RUSTUP_HOME` and the stable
+/// tool `HOME` are untouched.
+///
+/// The leaf carries explicit owner-only permissions: pinned `tempfile`
+/// creates tempdirs with default (umask-derived) modes, so without this the
+/// leaf would inherit group/other bits from a permissive worker umask and
+/// Arti's ownership/permission checks would refuse the state tree before
+/// bootstrap. Combined with the restrictive process umask the Chutney jobs
+/// install on entry, the leaf is exactly `0o700` on Unix.
+fn tor_scratch_in(parent: &Path) -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("ccid-tor-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder
+        .tempdir_in(parent)
+        .map_err(|error| failure(format!("Tor job cannot create scratch: {error}")))
+}
+
+/// General scratch root. The Snowflake browser job keeps this path unchanged.
+fn tor_scratch() -> Result<tempfile::TempDir> {
+    tor_scratch_in(Path::new("/tmp"))
+}
+
+/// Native-job scratch root. The Crow execution namespace mounts `/tmp`
+/// without the sticky bit, so Arti's ancestor permission check refuses any
+/// tree beneath it; the standard `/var/tmp` (sticky) passes that check while
+/// staying just as short for `sun_path`.
+fn native_tor_scratch() -> Result<tempfile::TempDir> {
+    tor_scratch_in(Path::new("/var/tmp"))
+}
+
+/// Group/other permission bits masked out for the Chutney job processes
+/// (`private-network`, `records`): with these masked, default-created
+/// directories become `0o700` and files `0o600`, keeping job-owned state
+/// (Arti directories, fixture temp paths, TLS keys) private to the job user.
+/// Snowflake keeps its retired green behavior and never installs this mask.
+#[cfg(unix)]
+fn tor_process_umask() -> rustix::fs::Mode {
+    use rustix::fs::Mode;
+    Mode::RGRP | Mode::WGRP | Mode::XGRP | Mode::ROTH | Mode::WOTH | Mode::XOTH
+}
+
+/// Install the restrictive [`tor_process_umask`] for this process. Safe
+/// `rustix` API, no `unsafe` (forbidden crate-wide). Idempotent: re-entry
+/// keeps the mask restricted. Called only from the Chutney job entries above;
+/// no RAII restoration, since the only caller chain is the short-lived native
+/// CLI child process (`main.rs` is the sole `tor::run` caller).
+#[cfg(unix)]
+fn restrict_tor_process_umask() {
+    rustix::process::umask(tor_process_umask());
+}
+
+fn apply_tor_scratch_env(base: &mut Environment, scratch: &tempfile::TempDir) {
+    base.insert(
+        OsString::from("TMPDIR"),
+        scratch.path().as_os_str().to_owned(),
+    );
+    base.insert(
+        OsString::from("RUNNER_TEMP"),
+        scratch.path().as_os_str().to_owned(),
+    );
+}
+
 fn current_unix_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -723,20 +796,23 @@ fn nightly_env(
 }
 
 fn private_network(repo: &Path, env: &Environment) -> Result<()> {
+    // Owner-private file-creation mask for this Chutney job's dedicated
+    // `ccid tor` child process (spawned per job via `ccid check`; see
+    // `main.rs`/`supervision.rs`). Precedes all scratch, evidence, and child
+    // creation below; every descendant inherits it. Snowflake keeps its
+    // retired green behavior and is excluded.
+    #[cfg(unix)]
+    restrict_tor_process_umask();
     let commit = hex_identity(&required(env, "CI_COMMIT_SHA")?, "CI_COMMIT_SHA")?;
     let evidence = evidence_root(env, "ctrn-tor", "private-network")?;
-    let scratch = tempfile::tempdir()
-        .map_err(|error| failure(format!("Tor job cannot create scratch: {error}")))?;
+    let scratch = native_tor_scratch()?;
     let global = global_deadline(env)?;
     let mut base = env.clone();
     base.insert(
         OsString::from("HOME"),
         OsString::from(stable_tool_home(env)?),
     );
-    base.insert(
-        OsString::from("RUNNER_TEMP"),
-        scratch.path().as_os_str().to_owned(),
-    );
+    apply_tor_scratch_env(&mut base, &scratch);
     let mut stages = Vec::new();
     let detail = private_network_inner(repo, &base, global, &scratch, &evidence, &mut stages);
     if detail.is_err() {
@@ -861,20 +937,20 @@ fn tor_library_env(base: &Environment) -> Result<Vec<(String, String)>> {
 }
 
 fn records(repo: &Path, env: &Environment) -> Result<()> {
+    // Same owner-private mask as `private_network`: the Records Chutney job
+    // runs in its own `ccid tor` child process. Snowflake is excluded.
+    #[cfg(unix)]
+    restrict_tor_process_umask();
     let commit = hex_identity(&required(env, "CI_COMMIT_SHA")?, "CI_COMMIT_SHA")?;
     let evidence = evidence_root(env, "cmsh-tor", "records")?;
-    let scratch = tempfile::tempdir()
-        .map_err(|error| failure(format!("Tor job cannot create scratch: {error}")))?;
+    let scratch = native_tor_scratch()?;
     let global = global_deadline(env)?;
     let mut base = env.clone();
     base.insert(
         OsString::from("HOME"),
         OsString::from(stable_tool_home(env)?),
     );
-    base.insert(
-        OsString::from("RUNNER_TEMP"),
-        scratch.path().as_os_str().to_owned(),
-    );
+    apply_tor_scratch_env(&mut base, &scratch);
     let mut stages = Vec::new();
     let detail = records_inner(repo, &base, global, &scratch, &evidence, &mut stages);
     if detail.is_err() {
@@ -1157,14 +1233,10 @@ fn stable_tool_home(base: &Environment) -> Result<String> {
 fn snowflake_browser(repo: &Path, env: &Environment) -> Result<()> {
     let commit = hex_identity(&required(env, "CI_COMMIT_SHA")?, "CI_COMMIT_SHA")?;
     let evidence = evidence_root(env, "ctrn-tor", "snowflake-browser")?;
-    let scratch = tempfile::tempdir()
-        .map_err(|error| failure(format!("Tor job cannot create scratch: {error}")))?;
+    let scratch = tor_scratch()?;
     let global = global_deadline(env)?;
     let mut base = env.clone();
-    base.insert(
-        OsString::from("RUNNER_TEMP"),
-        scratch.path().as_os_str().to_owned(),
-    );
+    apply_tor_scratch_env(&mut base, &scratch);
     let mut stages = Vec::new();
     let detail = snowflake_browser_inner(repo, &mut base, global, &scratch, &evidence, &mut stages);
     if detail.is_err() {
@@ -2117,5 +2189,208 @@ workflows = ["tor-jobs"]
             target_path.as_str(),
         )]))
         .unwrap_err();
+    }
+
+    #[test]
+    fn tor_short_scratch_bypasses_nested_worker_tmpdir() {
+        // Generic worker-nested TMPDIR shapes (long enough to push fixture
+        // socket paths past the 108-byte `sun_path` limit, NUL included).
+        let incoming_a = format!(
+            "/tmp/nested-run-aaaaaaaa/nested-shell-1111111111-2222222222/nested-run-bbbbbbbb/{}",
+            "q".repeat(100)
+        );
+        let incoming_b = format!(
+            "/tmp/nested-run-cccccccc/nested-shell-3333333333-4444444444/nested-run-dddddddd/{}",
+            "z".repeat(100)
+        );
+        assert!(incoming_a.len() > 150);
+        assert!(incoming_b.len() > 150);
+        let mut paths = Vec::new();
+        for incoming in [&incoming_a, &incoming_b] {
+            let mut base = environment(&[
+                ("TMPDIR", incoming.as_str()),
+                ("RUNNER_TEMP", incoming.as_str()),
+            ]);
+            let scratch = tor_scratch().unwrap();
+            apply_tor_scratch_env(&mut base, &scratch);
+            let path = scratch.path().to_string_lossy().into_owned();
+            assert!(
+                path.starts_with("/tmp/ccid-tor-"),
+                "unexpected scratch: {path}"
+            );
+            assert!(path.len() < 32, "scratch too long: {path}");
+            assert!(
+                !path.contains("nested-run"),
+                "scratch inherits nesting: {path}"
+            );
+            for key in ["TMPDIR", "RUNNER_TEMP"] {
+                assert_eq!(
+                    base.get(&OsString::from(key))
+                        .and_then(|value| value.to_str()),
+                    Some(path.as_str()),
+                    "outgoing {key} must point at the short scratch"
+                );
+            }
+            // Representative worst-case AF_UNIX consumers must fit sun_path
+            // (108 bytes including the NUL terminator).
+            for tail in [
+                "fixture-transport-qqqqqqqq/tor/nodes.1234567890/000a/control",
+                "fixture-transport-qqqqqqqq/tor/nodes.1234567890/000a/control.authcookie",
+                "browser-profile/SingletonSocket",
+            ] {
+                let socket = Path::new(&path).join(tail).to_string_lossy().into_owned();
+                assert!(
+                    socket.len() < 108,
+                    "socket path too long ({}): {socket}",
+                    socket.len()
+                );
+            }
+            // The helper never touches the huge incoming dir.
+            assert!(!Path::new(incoming).exists());
+            paths.push(path);
+            // RAII cleanup removes the short scratch on drop.
+            drop(scratch);
+            assert!(!Path::new(paths.last().unwrap()).exists());
+        }
+        assert_ne!(paths[0], paths[1], "scratches must be unique");
+    }
+
+    /// From a permissive starting umask, the Tor process setup yields
+    /// owner-private job dirs. umask is process-global, so the mutation runs
+    /// in an isolated child: this same test binary re-invoked with only the
+    /// ignored probe below selected. The parent never calls umask, hence its
+    /// mask (and every parallel test) is unaffected by construction.
+    #[cfg(unix)]
+    #[test]
+    fn tor_process_dirs_are_private_under_permissive_umask() {
+        // umask is process-global, so the mutation runs in an isolated child:
+        // this same test binary re-invoked with only the ignored probe below
+        // selected. The parent never calls umask, hence its mask (and every
+        // parallel test) is unaffected by construction. The fully qualified
+        // filter plus the one-test assertion below keep a zero-test pass from
+        // ever counting as success.
+        let filter = "tor::tests::tor_umask_probe_child";
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .arg(filter)
+            .args(["--exact", "--ignored"])
+            .env("CCID_TOR_UMASK_PROBE_CHILD", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success()
+                && stdout.contains("test result: ok. 1 passed")
+                && !stdout.contains("0 passed"),
+            "tor umask probe child failed (status: {}):\n\
+             --- stdout ---\n{}\n--- stderr ---\n{}",
+            output.status,
+            stdout,
+            stderr,
+        );
+    }
+
+    /// Subprocess probe for `tor_process_dirs_are_private_under_permissive_umask`.
+    /// Runs its assertions only when spawned by that parent (marker env set);
+    /// otherwise it is a no-op pass, so ordinary suite runs — including any
+    /// `--ignored`/`--include-ignored` invocation — stay umask-neutral. Uses
+    /// the existing test binary, not a new CLI feature.
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn tor_umask_probe_child() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("CCID_TOR_UMASK_PROBE_CHILD").is_none() {
+            return;
+        }
+        let mode_of = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        // Permissive starting point, as on shared CI workers: group/other bits
+        // flow through to default-created directories.
+        rustix::process::umask(rustix::fs::Mode::WOTH);
+        let canary = tempfile::Builder::new()
+            .prefix("ccid-umask-canary-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let canary_path = canary.path().to_string_lossy().into_owned();
+        assert_eq!(
+            mode_of(canary.path()),
+            0o775,
+            "permissive premise not established: {canary_path}"
+        );
+        // Production setup: restrictive mask first, then the Tor scratch.
+        restrict_tor_process_umask();
+        // Re-asserting the mask returns the previous one, proving the
+        // production call above took effect (no return-value plumbing needed).
+        assert_eq!(
+            rustix::process::umask(tor_process_umask()),
+            tor_process_umask()
+        );
+        let scratch = tor_scratch().unwrap();
+        let scratch_path = scratch.path().to_string_lossy().into_owned();
+        assert!(
+            scratch_path.starts_with("/tmp/ccid-tor-"),
+            "unexpected scratch: {scratch_path}"
+        );
+        assert!(scratch_path.len() < 32, "scratch too long: {scratch_path}");
+        assert_eq!(scratch.path().parent(), Some(Path::new("/tmp")));
+        assert_eq!(mode_of(scratch.path()), 0o700);
+        // Descendant fixture/probe tempdir plus a secret-like file, mirroring
+        // the Chutney node dirs and guard/key files Arti protects.
+        let descendant = tempfile::Builder::new()
+            .prefix("probe-")
+            .tempdir_in(scratch.path())
+            .unwrap();
+        assert_eq!(mode_of(descendant.path()), 0o700);
+        let secret = descendant.path().join("guards.json");
+        std::fs::write(&secret, b"{interrupted guard state").unwrap();
+        assert_eq!(mode_of(&secret), 0o600);
+        // Representative worst-case socket still fits sun_path with NUL room.
+        let socket = descendant
+            .path()
+            .join("nodes.1234567890/000a/control.authcookie")
+            .to_string_lossy()
+            .into_owned();
+        assert!(socket.len() < 108, "socket too long: {socket}");
+        // Native scratch shares the leaf mechanics under the trusted
+        // `/var/tmp` root; the Snowflake `/tmp` path above is unchanged.
+        let native = native_tor_scratch().unwrap();
+        let native_path = native.path().to_string_lossy().into_owned();
+        assert!(
+            native_path.starts_with("/var/tmp/ccid-tor-"),
+            "unexpected native scratch: {native_path}"
+        );
+        assert_eq!(native.path().parent(), Some(Path::new("/var/tmp")));
+        assert!(
+            native_path.len() < 32,
+            "native scratch too long: {native_path}"
+        );
+        assert_eq!(mode_of(native.path()), 0o700);
+        let native_secret = native.path().join("guards.json");
+        std::fs::write(&native_secret, b"{interrupted guard state").unwrap();
+        assert_eq!(mode_of(&native_secret), 0o600);
+        let native_socket = native
+            .path()
+            .join("nodes.1234567890/000a/control.authcookie")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            native_socket.len() < 108,
+            "native socket too long: {native_socket}"
+        );
+        // The pre-existing permissive dir is untouched by the setup.
+        assert_eq!(mode_of(canary.path()), 0o775);
+        // Unique owned paths with RAII cleanup (innermost first).
+        let second = tor_scratch().unwrap();
+        assert_ne!(scratch.path(), second.path());
+        let second_path = second.path().to_string_lossy().into_owned();
+        drop(descendant);
+        drop(second);
+        drop(scratch);
+        drop(native);
+        assert!(!Path::new(&scratch_path).exists());
+        assert!(!Path::new(&second_path).exists());
+        assert!(!Path::new(&native_path).exists());
+        drop(canary);
     }
 }

@@ -46,7 +46,7 @@ fn quality_cli_is_offline_stable_and_preserves_distinct_exit_codes() {
 }
 
 #[test]
-fn quality_cli_rejects_policy_typos() {
+fn quality_cli_rejects_policy_typos_and_invalid_collector_settings() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("snapshot.json");
     let policy = root.path().join("policy.json");
@@ -60,4 +60,12 @@ fn quality_cli_rejects_policy_typos() {
         .output()
         .unwrap();
     assert_eq!(result.status.code(), Some(2));
+    let result = Command::new(env!("CARGO_BIN_EXE_ccid"))
+        .args(["quality", "collect", "--forge", "forgejo", "--output"])
+        .arg(root.path().join("out.json"))
+        .env_remove("CQLT_TOKEN")
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(!root.path().join("out.json").exists());
 }

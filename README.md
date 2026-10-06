@@ -8,15 +8,13 @@ jobs or pretend that one platform proves another. The Rust executor does not
 publish releases. The optional [registry publisher resource](adapters/registry-publish.md)
 provides explicit, separately invoked uploads of already-verified archives.
 
-Repository placement, exact cloning, reconciliation, status reporting,
-contribution bridging, evidence collection and access mirroring live in
-[cfrg](https://git.corbet.ch/corbet-libs/cfrg): `cfrg validate`, `cfrg plan`,
-`cfrg decide`, `cfrg clone`, `cfrg sync`, `cfrg status`, `cfrg bridge`,
-`cfrg collect` and `cfrg access`.
+[`ccid forge`](docs/repository-policy.md) validates multi-forge placement, derives
+the primary forge from CI, clones exact commits through declared read fallbacks,
+and supplies a deterministic execution-failover decision to provider adapters.
 
-[`ccid quality`](docs/quality.md) evaluates saved organization and repository
-evidence through the separate, deterministic cqlt policy library.
-Collect that evidence with `cfrg collect`.
+[`ccid quality`](docs/quality.md) audits organization and repository presentation
+on GitHub and Forgejo through the separate, deterministic cqlt policy library.
+It collects read-only evidence and produces reproducible offline quality gates.
 `ccid quality prose` checks descriptions and documentation through cqlt's
 subordinate Vale backend, with a versioned writing policy and stable reports.
 
@@ -48,8 +46,7 @@ to manufacture a new green badge.
 ## Cached execution
 
 `ccid cached --check test,clippy` runs the selected checks through
-[moon](https://moonrepo.dev), executed by the
-[cmnp](https://git.corbet.ch/corbet-foss/cmnp) library: each check becomes one moon task whose command is
+[moon](https://moonrepo.dev): each check becomes one moon task whose command is
 the ordinary `ccid check` for that check. moon hashes the repository inputs plus a
 tool identity (this ccid revision, the linker request and the toolchain versions
 of each check) and skips checks whose exact inputs already passed. With
@@ -123,13 +120,15 @@ See [adapter rendering](docs/rendering.md) for the tool pin and staging contract
 This repository declares `verify` for its full checks and `compile` for a narrow
 Rust build, both using the same verified job runtime.
 
-Explicit replica reconciliation, native status reporting and contribution
-bridging live in [cfrg](https://git.corbet.ch/corbet-libs/cfrg):
-`cfrg sync` inspects explicitly selected replicas and reconciles them only
-with `--apply` (never force-pushes or deletes refs), `cfrg status` reports
-native commit statuses, and `cfrg bridge` imports exact commits from GitLab
-merge requests into a dedicated Forgejo fork without scheduling checks or
-executing contributed code.
+`ccid forge sync` inspects explicitly selected replicas and reconciles them only
+with `--apply`. It never force-pushes or deletes refs. See
+[forge reconciliation](docs/forge-sync.md) for completion semantics and external
+content limits.
+
+The separate, opt-in [`ccid-pr-bridge`](docs/pr-bridge.md) binary reads GitLab
+merge requests and imports exact commits into a dedicated Forgejo fork. It
+does not schedule checks or execute contributed code; the executor's charter
+is unchanged. Import requires disabled CI and explicit flags.
 
 ## Manifest
 

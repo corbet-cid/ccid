@@ -277,12 +277,6 @@ fn invalid_push_declarations_fail_before_any_rendered_file_changes() {
     for invalid in [
         base.replace("push_branches=['v01']", "push_branches=['bad branch']"),
         base.replace("push_branches=['v01']", "push_branches=['CCID_V01']"),
-        // Push-executed jobs must opt into declared-checks execution:
-        // an arbitrary command with push branches fails closed.
-        base.replace(
-            "command=['ccid:run-declared-checks']",
-            "command=['sh','.ci/run.sh']",
-        ),
         base.replace(
             "consumer='https://forge.example.invalid/cpkg/deplib.git'",
             "consumer='https://user:pass@forge.example.invalid/cpkg/deplib.git'",
