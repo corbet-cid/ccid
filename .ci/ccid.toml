@@ -26,6 +26,16 @@ commands = [["python3", ".ci/registry_publish_test.py"]]
 kind = "commands"
 commands = [["python3", ".ci/test_hosted_budget.py", "--lint"]]
 
+[checks.cache-acceptance]
+kind = "commands"
+commands = [["cargo", "test", "--release", "--locked", "--test", "cache_acceptance", "--", "--ignored", "--nocapture"]]
+
+[jobs.cache-acceptance]
+scheduler = "crow"
+checks = ["cache-acceptance"]
+workflow = "repository-jobs"
+command = ["bash", ".ci/run-job.sh"]
+
 [jobs.verify]
 scheduler = "crow"
 checks = ["test"]

@@ -24,12 +24,33 @@ pub fn run_cached(
     plan: bool,
     force: bool,
 ) -> Result<()> {
+    run_cached_with_environment(
+        repo,
+        manifest,
+        selectors,
+        plan,
+        force,
+        std::env::vars_os().collect(),
+    )
+}
+
+pub(crate) fn run_cached_with_environment(
+    repo: &Path,
+    manifest: &Path,
+    selectors: &[String],
+    plan: bool,
+    force: bool,
+    environment: Environment,
+) -> Result<()> {
+    crate::safe_relative(manifest)?;
     let root = repo.canonicalize()?;
     let (parsed, bytes) = load_manifest(&root, manifest)?;
     let selected = select_checks(&parsed, selectors)?;
     let mut checks = BTreeMap::new();
     for name in &selected {
         let check = &parsed.checks[name];
+        crate::checks::validate_cached_contract(check)
+            .map_err(|error| failure(format!("Cached check {name} is not shareable: {error}")))?;
         checks.insert(
             name.clone(),
             cmnp::executor::Check {
@@ -56,12 +77,13 @@ pub fn run_cached(
                 cache_env: check.cache_env.clone(),
                 cache_commit: check.cache_commit,
                 cache_inputs: check.cache_inputs.clone(),
+                cache: check.cache,
+                cache_pure: check.cache_pure,
             },
         );
     }
     cmnp::executor::validate_selection(&checks, &selected)?;
     let project = cmnp::executor::project_id(&parsed.project);
-    let environment: Environment = std::env::vars_os().collect();
     let remote = cmnp::executor::remote_cache(&environment)?;
     let manifest_arg = manifest
         .to_str()
@@ -79,7 +101,7 @@ pub fn run_cached(
     let path_ccid = runner.run(&argv(&["ccid", "source-revision"]), true)?;
     if path_ccid != SOURCE_REVISION {
         return Err(failure(format!(
-            "The ccid on PATH ({path_ccid}) must be this revision ({SOURCE_REVISION}); cached results are keyed on it"
+            "The ccid on PATH ({path_ccid}) must be this verified revision ({SOURCE_REVISION})"
         )));
     }
     cmnp::executor::execute(&cmnp::executor::Request {

@@ -184,7 +184,17 @@ pub(crate) fn scratch(env: &mut Environment) -> Result<tempfile::TempDir> {
 /// runs. The enclosing target lock protects both this path and Cargo's outputs.
 pub(crate) struct StableSource(PathBuf);
 impl StableSource {
+    /// Cached Cargo runs have generated executor state in their checkout.
+    /// Strip only the copies inside this guard's owned disposable source.
+    pub(crate) fn prepare_cached(source: &Path, target: &Path) -> Result<Self> {
+        Self::prepare_inner(source, target, true)
+    }
+
     pub(crate) fn prepare(source: &Path, target: &Path) -> Result<Self> {
+        Self::prepare_inner(source, target, false)
+    }
+
+    fn prepare_inner(source: &Path, target: &Path, cached: bool) -> Result<Self> {
         if target.starts_with(source) {
             return Err(failure(
                 "Stable archive source cannot contain its target cache",
@@ -220,13 +230,45 @@ impl StableSource {
         }
         fs::create_dir(&root)?;
         let owned = Self(root);
-        copy_source(source, owned.path())?;
+        copy_source(source, owned.path(), cached)?;
         event(json!({"event":"stable-source","path":owned.path()}));
         Ok(owned)
     }
 
     pub(crate) fn path(&self) -> &Path {
         &self.0
+    }
+
+    /// The target lock also owns this fixed scratch location. A changing
+    /// temporary path in compiler flags would invalidate Cargo fingerprints.
+    pub(crate) fn scratch(target: &Path, environment: &mut Environment) -> Result<Self> {
+        let root = target.join(".ccid/scratch-v1");
+        let marker = target.join(".ccid/scratch-v1.owner");
+        const OWNER: &[u8] = b"ccid-scratch-v1\n";
+        match fs::symlink_metadata(&marker) {
+            Ok(meta) if meta.is_file() && fs::read(&marker)? == OWNER => (),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if root.symlink_metadata().is_ok() {
+                    return Err(failure("Refusing to replace unowned stable scratch"));
+                }
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&marker)?
+                    .write_all(OWNER)?;
+            }
+            _ => return Err(failure("Invalid stable scratch ownership marker")),
+        }
+        match fs::symlink_metadata(&root) {
+            Ok(meta) if meta.is_dir() => fs::remove_dir_all(&root)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            _ => return Err(failure("Stable scratch must be an owned directory")),
+        }
+        fs::create_dir(&root)?;
+        for name in ["TMPDIR", "RUNNER_TEMP", "TEMP", "TMP"] {
+            set(environment, name, root.as_os_str());
+        }
+        Ok(Self(root))
     }
 }
 
@@ -245,15 +287,29 @@ impl Drop for StableSource {
     }
 }
 
-fn copy_source(source: &Path, destination: &Path) -> Result<()> {
+fn copy_source(source: &Path, destination: &Path, cached: bool) -> Result<()> {
     for child in fs::read_dir(source)? {
         let child = child?;
+        if cached
+            && [
+                ".git",
+                ".moon",
+                ".ccid",
+                "target",
+                "node_modules",
+                "moon.yml",
+            ]
+            .iter()
+            .any(|name| child.file_name() == *name)
+        {
+            continue;
+        }
         let from = child.path();
         let to = destination.join(child.file_name());
         let kind = child.file_type()?;
         if kind.is_dir() {
             fs::create_dir(&to)?;
-            copy_source(&from, &to)?;
+            copy_source(&from, &to, cached)?;
         } else if kind.is_file() {
             fs::copy(&from, &to)?;
         } else if kind.is_symlink() {
@@ -268,6 +324,39 @@ fn copy_source(source: &Path, destination: &Path) -> Result<()> {
         } else {
             return Err(failure("Unexpected special file in verified source"));
         }
+    }
+    Ok(())
+}
+
+/// Preserve Cargo's encoded-flags precedence and append deterministic source
+/// and scratch mappings as individual arguments (paths may contain spaces).
+pub(crate) fn remap_paths(environment: &mut Environment, root: &Path) -> Result<()> {
+    let root = root
+        .to_str()
+        .ok_or_else(|| failure("Source remapping requires UTF-8 paths"))?;
+    let mut mappings = vec![format!("--remap-path-prefix={root}=/workspace")];
+    if let Some(scratch) = value(environment, "RUNNER_TEMP") {
+        mappings.push(format!("--remap-path-prefix={scratch}=/scratch"));
+    }
+    for (plain, encoded) in [
+        ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"),
+        ("RUSTDOCFLAGS", "CARGO_ENCODED_RUSTDOCFLAGS"),
+    ] {
+        let mut flags: Vec<String> = match environment.get(std::ffi::OsStr::new(encoded)) {
+            Some(value) => value
+                .to_string_lossy()
+                .split('\u{1f}')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            None => value(environment, plain)
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
+        };
+        flags.extend(mappings.clone());
+        environment.insert(encoded.into(), flags.join("\u{1f}").into());
     }
     Ok(())
 }
@@ -507,6 +596,33 @@ impl Freshness {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remapping_preserves_encoded_flags_and_uses_stable_scratch() {
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir(target.path().join(".ccid")).unwrap();
+        let mut first = super::Environment::new();
+        first.insert("RUSTFLAGS".into(), "ignored".into());
+        first.insert(
+            "CARGO_ENCODED_RUSTFLAGS".into(),
+            "--cfg\u{1f}value=\"has spaces\"".into(),
+        );
+        first.insert("RUNNER_TEMP".into(), "/jobs/one".into());
+        let mut second = first.clone();
+        second.insert("RUNNER_TEMP".into(), "/jobs/two".into());
+        {
+            let _scratch = super::StableSource::scratch(target.path(), &mut first).unwrap();
+            super::remap_paths(&mut first, target.path()).unwrap();
+        }
+        {
+            let _scratch = super::StableSource::scratch(target.path(), &mut second).unwrap();
+            super::remap_paths(&mut second, target.path()).unwrap();
+        }
+        assert_eq!(first, second);
+        let flags = super::value(&first, "CARGO_ENCODED_RUSTFLAGS").unwrap();
+        assert!(flags.starts_with("--cfg\u{1f}value=\"has spaces\"\u{1f}--remap-path-prefix="));
+        assert!(!flags.contains("/jobs/"));
+        assert!(!flags.contains("ignored"));
+    }
     use super::*;
     #[cfg(unix)]
     #[test]

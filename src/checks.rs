@@ -281,3 +281,101 @@ pub(crate) fn validate_check(check: &Check) -> Result<()> {
     }
     Ok(())
 }
+
+/// Env names that name run metadata rather than content. They must never appear
+/// in a cached check's key contract: reusing a result across runs while keying
+/// on the producing run's identity is unsound, and silently stripping them would
+/// hide a semantic input. Rejected explicitly; such checks stay available through
+/// uncached `check`, which never calls this gate.
+pub(crate) const FORBIDDEN_CACHED_ENV: &[&str] = &[
+    "CI_COMMIT_SHA",
+    "CI_COMMIT_BRANCH",
+    "CI_JOB_ID",
+    "RUNNER_TEMP",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+];
+
+/// Central contract gate for the cached path only (`run_cached`). Uncached
+/// `run_checks` does not call this and is unaffected.
+pub(crate) fn validate_cached_contract(check: &Check) -> Result<()> {
+    if check.cache_commit {
+        return Err(failure(
+            "cache_commit must not be used for cached checks: commit-sensitive results are never shared",
+        ));
+    }
+    for name in &check.cache_env {
+        if FORBIDDEN_CACHED_ENV.contains(&name.as_str()) {
+            return Err(failure(format!(
+                "Cached checks must not bind run metadata in cache_env: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn cache_eligible(check: &Check) -> bool {
+    if check.cache == Some(false) || validate_cached_contract(check).is_err() {
+        return false;
+    }
+    match check.kind.as_str() {
+        "cargo" => true,
+        "javascript" => check.install != Some(false),
+        "nix" => check.cache_pure,
+        "commands" => {
+            check.cache_pure && check.cache_inputs.is_some() && !check.cache_tools.is_empty()
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cached_check() -> Check {
+        Check {
+            kind: "commands".into(),
+            commands: vec![vec!["true".into()]],
+            cache_env: vec!["CI_JOBS".into()],
+            ..Check::default()
+        }
+    }
+
+    #[test]
+    fn cached_contract_rejects_commit_sensitive_checks() {
+        let mut check = cached_check();
+        check.cache_commit = true;
+        assert!(validate_cached_contract(&check).is_err());
+        // Uncached validation is unaffected: the same check still plans.
+        assert!(validate_check(&check).is_ok());
+    }
+
+    #[test]
+    fn cached_contract_rejects_run_metadata_env() {
+        for name in FORBIDDEN_CACHED_ENV {
+            let mut check = cached_check();
+            check.cache_env = vec![(*name).to_owned()];
+            let before = check.cache_env.clone();
+            assert!(
+                validate_cached_contract(&check).is_err(),
+                "{name} must be rejected, not stripped"
+            );
+            // Rejection never mutates: nothing is silently stripped.
+            assert_eq!(check.cache_env, before);
+        }
+    }
+
+    #[test]
+    fn cached_contract_keeps_content_env_and_uncached_usable() {
+        let check = cached_check();
+        assert!(validate_cached_contract(&check).is_ok());
+        assert!(validate_check(&check).is_ok());
+        // A commit-sensitive check remains runnable outside the cached path.
+        let mut uncached = cached_check();
+        uncached.cache_commit = true;
+        uncached.cache_env = vec!["CI_COMMIT_SHA".into()];
+        assert!(validate_check(&uncached).is_ok());
+    }
+}

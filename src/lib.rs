@@ -145,6 +145,8 @@ pub struct Check {
     cache_env: Vec<String>,
     cache_commit: bool,
     cache_inputs: Option<Vec<String>>,
+    cache: Option<bool>,
+    cache_pure: bool,
 }
 /// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
 fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
@@ -267,10 +269,98 @@ fn run_checks_inner(
     } = context;
     let archive = verified_commit.is_some();
     let root = repo.canonicalize()?;
+    let manifest_path = manifest;
     let (manifest, bytes) = load_manifest(&root, manifest)?;
     let slug = &manifest.project;
     let selected = select_checks(&manifest, selectors)?;
     let mut environment = base_environment.unwrap_or_else(|| std::env::vars_os().collect());
+    if let Some(commit) = verified_commit {
+        set(&mut environment, "CI_COMMIT_SHA", commit);
+    }
+    if value(&environment, "CCID_CACHE_REPLAY_ONLY").as_deref() == Some("1") {
+        return Err(failure(
+            "Completed result unavailable from cache; refusing duplicate computation",
+        ));
+    }
+    let cache_child = value(&environment, "CCID_CACHE_CHILD").as_deref() == Some("1");
+    if cache_child {
+        // Moon adds task/workspace/run metadata after cmnp filters the parent
+        // environment. It is orchestration context, never a check input.
+        environment.retain(|key, _| !key.to_string_lossy().starts_with("MOON_"));
+    }
+    if !cache_child && value(&environment, "CCID_RESULT_CACHE").is_some() {
+        let requested = Instant::now()
+            .checked_add(Duration::from_secs(budget(&environment)?.timeout))
+            .ok_or_else(|| failure("Check deadline is out of range"))?;
+        let deadline = enclosing_deadline.map_or(requested, |limit| limit.min(requested));
+        let mut measurements: Vec<serde_json::Value> = Vec::new();
+        let mut bypassed = Vec::new();
+        // All entrypoints (archive, manual jobs, push and direct checks) converge
+        // here, before taking the Cargo target lock. Cache misses re-enter once.
+        for name in &selected {
+            let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
+            if remaining == 0 {
+                return Err(failure("Check deadline expired before cache transaction"));
+            }
+            set(&mut environment, "CI_TIMEOUT", remaining.to_string());
+            let check = &manifest.checks[name];
+            if checks::cache_eligible(check) {
+                cached::run_cached_with_environment(
+                    repo,
+                    manifest_path,
+                    std::slice::from_ref(name),
+                    plan,
+                    false,
+                    environment.clone(),
+                )?;
+                if !plan {
+                    let metrics: serde_json::Value =
+                        serde_json::from_slice(&fs::read(root.join(".ccid/cache-metrics.json"))?)?;
+                    measurements.extend(
+                        metrics["checks"]
+                            .as_array()
+                            .ok_or_else(|| failure("Missing check cache measurements"))?
+                            .iter()
+                            .cloned(),
+                    );
+                }
+            } else {
+                bypassed.push(name.clone());
+                event(
+                    json!({"event":"cache-bypass","check":name,"reason":"no complete pure-result contract"}),
+                );
+                let mut direct = environment.clone();
+                direct.remove(std::ffi::OsStr::new("CCID_RESULT_CACHE"));
+                run_checks_inner(
+                    repo,
+                    manifest_path,
+                    std::slice::from_ref(name),
+                    plan,
+                    CheckContext {
+                        verified_commit,
+                        base_environment: Some(direct),
+                        enclosing_deadline: Some(deadline),
+                        stable_archive,
+                    },
+                )?;
+            }
+        }
+        if !plan {
+            let hits = measurements
+                .iter()
+                .filter(|check| check["computed"] == 0)
+                .count();
+            let requests = measurements.len();
+            let summary = json!({"event":"cache-selection","checks":measurements,"bypassed":bypassed,"result":{"hits":hits,"requests":requests,"hit_rate":if requests == 0 { None } else { Some(hits as f64 / requests as f64) }},"compile":null,"nix_eval":null,"fetch":null});
+            fs::create_dir_all(root.join(".ccid"))?;
+            fs::write(
+                root.join(".ccid/cache-metrics.json"),
+                serde_json::to_vec_pretty(&summary)?,
+            )?;
+            event(summary);
+        }
+        return Ok(());
+    }
     if let Some(commit) = verified_commit {
         set(&mut environment, "CI_COMMIT_SHA", commit);
     }
@@ -332,7 +422,14 @@ fn run_checks_inner(
     // The verified archive has no mutable checkout or untracked inputs. Give it
     // a stable canonical path only while holding the actual Cargo target lock.
     // Resolver candidates retain their original path for post-check auditing.
-    let stable_source = if stable_archive {
+    let output_root = root.clone();
+    let stable_cargo = cache_child
+        && selected
+            .iter()
+            .all(|name| manifest.checks[name].kind == "cargo");
+    let stable_source = if stable_cargo {
+        Some(cache::StableSource::prepare_cached(&root, &target)?)
+    } else if stable_archive {
         Some(cache::StableSource::prepare(&root, &target)?)
     } else {
         None
@@ -340,8 +437,20 @@ fn run_checks_inner(
     let root = stable_source
         .as_ref()
         .map_or(root, |source| source.path().to_owned());
-    let _scratch = cache::scratch(&mut environment)?;
-    let freshness = if archive {
+    let _stable_scratch = if stable_cargo {
+        Some(cache::StableSource::scratch(&target, &mut environment)?)
+    } else {
+        None
+    };
+    let _scratch = if stable_cargo {
+        None
+    } else {
+        Some(cache::scratch(&mut environment)?)
+    };
+    if stable_cargo {
+        cache::remap_paths(&mut environment, &root)?;
+    }
+    let freshness = if archive || stable_cargo {
         Some(cache::Freshness::prepare(&root, &target, &identity)?)
     } else {
         // A local check may compile uncommitted inputs into this same target.
@@ -349,8 +458,8 @@ fn run_checks_inner(
         None
     };
     let mut runner = Runner::until(root, environment, deadline)?;
-    for name in selected {
-        let check = &manifest.checks[&name];
+    for name in &selected {
+        let check = &manifest.checks[name];
         let started = Instant::now();
         event(json!({"event":"check-start","check":name}));
         match check.kind.as_str() {
@@ -390,6 +499,22 @@ fn run_checks_inner(
     }
     if let Some(freshness) = freshness {
         freshness.complete()?;
+    }
+    if stable_cargo {
+        for name in &selected {
+            for output in &manifest.checks[name].cache_outputs {
+                safe_relative(Path::new(output))?;
+                let source = runner.root.join(output);
+                let destination = output_root.join(output);
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if !source.is_file() {
+                    return Err(failure("Stable Cargo cache outputs must be explicit files"));
+                }
+                fs::copy(source, destination)?;
+            }
+        }
     }
     Ok(())
 }
