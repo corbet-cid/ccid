@@ -1262,8 +1262,78 @@ const V01_INPUT_VARIABLES: [(&str, &str, &str); 3] = [
     ),
 ];
 
-/// Expected fixed tool names: receipt plus the three retained executables.
-const V01_TOOL_NAMES: [&str; 4] = ["python", "receipt", "tor", "tor-gencert"];
+/// Expected fixed tool names: receipt, the three retained executables,
+/// the six retained Rust toolchain executables, and the two Wasm stdlib
+/// files. All twelve are checked; committed paths are verified before use.
+const V01_TOOL_NAMES: [&str; 12] = [
+    "cargo",
+    "cargo-clippy",
+    "clippy-driver",
+    "python",
+    "receipt",
+    "rustc",
+    "rustdoc",
+    "rustfmt",
+    "tor",
+    "tor-gencert",
+    "wasm-libcore",
+    "wasm-libstd",
+];
+
+/// Retained Rust executables bound into the driver environment: parent
+/// directories of the six verified executables, deterministic order,
+/// deduplicated, ahead of the existing PATH.
+const V01_RUST_EXECUTABLES: [&str; 6] = [
+    "cargo",
+    "cargo-clippy",
+    "clippy-driver",
+    "rustc",
+    "rustdoc",
+    "rustfmt",
+];
+
+/// Retained 1.98.1 toolchain selection for the frozen driver: PATH entries
+/// from the verified executable parents plus exact compiler paths. The
+/// frozen driver's own version, wasm-std and unchanged-tools gates
+/// validate the selection; worker defaults, RUSTUP_HOME and installations
+/// stay untouched.
+fn v01_tool_env(
+    tools: &BTreeMap<String, String>,
+    base: &Environment,
+) -> Result<Vec<(String, String)>> {
+    let mut dirs = Vec::new();
+    for name in V01_RUST_EXECUTABLES {
+        let path = tools
+            .get(name)
+            .ok_or_else(|| failure(format!("Tor job live tools declare no {name}")))?;
+        let parent = Path::new(path)
+            .parent()
+            .ok_or_else(|| failure(format!("Tor job live tool has no parent directory: {name}")))?;
+        dirs.push(parent.to_string_lossy().into_owned());
+    }
+    dirs.sort();
+    dirs.dedup();
+    let path = match base
+        .get(&OsString::from("PATH"))
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+    {
+        Some(existing) => format!("{}:{existing}", dirs.join(":")),
+        None => dirs.join(":"),
+    };
+    let mut env = vec![("PATH".to_owned(), path)];
+    for (variable, tool) in [
+        ("RUSTC", "rustc"),
+        ("CARGO", "cargo"),
+        ("RUSTDOC", "rustdoc"),
+    ] {
+        let path = tools
+            .get(tool)
+            .ok_or_else(|| failure(format!("Tor job live tools declare no {tool}")))?;
+        env.push((variable.to_owned(), path.clone()));
+    }
+    Ok(env)
+}
 
 fn v01_inputs(
     manifest: &tor_inputs::Manifest,
@@ -1432,8 +1502,8 @@ fn v01_tor_live_inner(
         require_digest(&drivers.join(relative), &expected)?;
     }
     // Fixed ambient tools and receipt, verified in place, never copied: the
-    // Nix runtime closure stays valid only at these paths. The exact four
-    // names are enforced so no tool is silently missing or added.
+    // Nix runtime closure stays valid only at these paths. The exact
+    // twelve names are enforced so no tool is silently missing or added.
     let mut tool_names: Vec<&str> = manifest.live_tools.keys().map(String::as_str).collect();
     tool_names.sort();
     if tool_names != V01_TOOL_NAMES {
@@ -1513,6 +1583,10 @@ fn v01_tor_live_inner(
     // root archive (its workflow/root identity match); forward the
     // committed pin, never the current job commit.
     driver_env.push(("V01_ROOT_SOURCE_COMMIT".to_owned(), root_commit.clone()));
+    // Retained 1.98.1 toolchain selection: verified executable parents
+    // first on PATH plus exact compiler paths, so the frozen driver's own
+    // version gates pass without touching worker defaults or installations.
+    driver_env.extend(v01_tool_env(&tools, base)?);
     let (outcome, _) = run_stage(
         base,
         global,
@@ -2820,6 +2894,39 @@ workflows = ["v01-tor-live"]
 [live-tools.receipt]
 path = "/workspaces/component-releases/cmsg/20a55ac8159811bbac7c8370ae7f28fc075f2153/tor-tools/tools.json"
 sha256 = "b3a64bbc373b886dc164e859c1d26e7a4055a7d65b8c2556a0bd2cff4ac152e0"
+[live-tools.tor]
+path = "/workspaces/component-tools/cmsg/tor-0.4.9.12-20a55ac8159811bbac7c8370ae7f28fc075f2153/bin/tor"
+sha256 = "3b03c797db84b76bcde96f68997656cc42368b173c0da88b40d5acc2d666cc1b"
+[live-tools.tor-gencert]
+path = "/workspaces/component-tools/cmsg/tor-0.4.9.12-20a55ac8159811bbac7c8370ae7f28fc075f2153/bin/tor-gencert"
+sha256 = "68df7a29ae0bed669df63b4c8d8658240cb951618860623212fdbd8993923114"
+[live-tools.python]
+path = "/workspaces/component-tools/cmsg/python-20a55ac8159811bbac7c8370ae7f28fc075f2153/bin/python"
+sha256 = "f5cce9ecc914b0c2eee78056c1c816aa02ae4c73c0aaf958eb5e0bb9281f34ea"
+[live-tools.rustc]
+path = "/nix/store/vy0xilifxb02fwal0wihsrwc8s69rlyk-rustc-wrapper-1.98.1/bin/rustc"
+sha256 = "8f40f2f394f7ff470ccfac7da1f03661756216a77fdb3181bfb81bbf01e07cdb"
+[live-tools.cargo]
+path = "/nix/store/w20n3pmhhd1av9llykxa3gd21c9jsm8l-cargo-1.98.1/bin/cargo"
+sha256 = "88a18d3c29700de42bc2a2f5590e919e36557964cf4e1dd2f60f892376f6c102"
+[live-tools.rustdoc]
+path = "/nix/store/vy0xilifxb02fwal0wihsrwc8s69rlyk-rustc-wrapper-1.98.1/bin/rustdoc"
+sha256 = "999b2098594b2b8d91db71e11bfbb2c0bd8cf24acac792308ac08c267f813bcb"
+[live-tools.rustfmt]
+path = "/nix/store/jpcqlbhkwxwvq507mq0hkacpxbxcdwjj-rustfmt-1.98.1/bin/rustfmt"
+sha256 = "9fc2eff4ce7281f2a77c0164ab8e8b55fcef98f3c8ba96d4e4179ba8f3abc7fd"
+[live-tools.cargo-clippy]
+path = "/nix/store/n88pdyarvdpyw98fahxcb03733nsclhq-clippy-1.98.1/bin/cargo-clippy"
+sha256 = "4396915d16e54967584fb1730560ca5c92bbea823398a8749c1e05109ad8e39c"
+[live-tools.clippy-driver]
+path = "/nix/store/n88pdyarvdpyw98fahxcb03733nsclhq-clippy-1.98.1/bin/clippy-driver"
+sha256 = "0616995d944bbdd0b2bc9aee822d4a0cb07b05f8eabf01367a67fc94de05089f"
+[live-tools.wasm-libcore]
+path = "/nix/store/xvp6nfxayb07si2jaggqwvx3iykw89g2-rustc-1.98.1/lib/rustlib/wasm32-unknown-unknown/lib/libcore-e6b063672db74229.rlib"
+sha256 = "e917c01a724e0622601835f8a6f1c8bff102f5f40a61152ce95a099a4bc7ba61"
+[live-tools.wasm-libstd]
+path = "/nix/store/xvp6nfxayb07si2jaggqwvx3iykw89g2-rustc-1.98.1/lib/rustlib/wasm32-unknown-unknown/lib/libstd-0d5130a4ee2cc288.rlib"
+sha256 = "61ce675fface73dbbf431603767a3aa7f05bf9d6995d0555855fa5e4ead667e6"
 [live-drivers.harness]
 file = ".ci/v01-tor-live.py"
 sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"
@@ -2877,6 +2984,60 @@ sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"
             "digest_variable = \"V01_SOURCE_BUNDLE_SHA256\"",
         );
         assert!(v01_inputs(&shared_manifest(&swapped), &["v01-tor-live"]).is_err());
+    }
+
+    fn tool_map(manifest: &tor_inputs::Manifest) -> BTreeMap<String, String> {
+        manifest
+            .live_tools
+            .iter()
+            .map(|(name, entry)| (name.clone(), entry.path.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn v01_tool_env_binds_retained_toolchain_first() {
+        let manifest = shared_manifest(SAMPLE_LIVE_INPUTS);
+        let tools = tool_map(&manifest);
+        assert_eq!(tools.len(), 12);
+        let mut base = environment(&[("PATH", "/usr/bin:/bin")]);
+        let bound: BTreeMap<String, String> =
+            v01_tool_env(&tools, &base).unwrap().into_iter().collect();
+        let path = &bound["PATH"];
+        // Four unique retained bin dirs (rustc+rustdoc share one), ahead
+        // of the existing worker PATH, each exactly once.
+        let first: Vec<&str> = path.split(':').take(4).collect();
+        assert_eq!(
+            first,
+            [
+                "/nix/store/jpcqlbhkwxwvq507mq0hkacpxbxcdwjj-rustfmt-1.98.1/bin",
+                "/nix/store/n88pdyarvdpyw98fahxcb03733nsclhq-clippy-1.98.1/bin",
+                "/nix/store/vy0xilifxb02fwal0wihsrwc8s69rlyk-rustc-wrapper-1.98.1/bin",
+                "/nix/store/w20n3pmhhd1av9llykxa3gd21c9jsm8l-cargo-1.98.1/bin",
+            ]
+        );
+        assert!(path.ends_with(":/usr/bin:/bin"));
+        assert_eq!(
+            bound["RUSTC"],
+            "/nix/store/vy0xilifxb02fwal0wihsrwc8s69rlyk-rustc-wrapper-1.98.1/bin/rustc"
+        );
+        assert_eq!(
+            bound["CARGO"],
+            "/nix/store/w20n3pmhhd1av9llykxa3gd21c9jsm8l-cargo-1.98.1/bin/cargo"
+        );
+        assert_eq!(
+            bound["RUSTDOC"],
+            "/nix/store/vy0xilifxb02fwal0wihsrwc8s69rlyk-rustc-wrapper-1.98.1/bin/rustdoc"
+        );
+        // A missing required tool refuses instead of falling back.
+        let mut short = tools.clone();
+        short.remove("rustc");
+        assert!(v01_tool_env(&short, &base).is_err());
+        // Empty worker PATH still yields a usable binding.
+        base.remove(&OsString::from("PATH"));
+        let bare: BTreeMap<String, String> =
+            v01_tool_env(&tools, &base).unwrap().into_iter().collect();
+        assert!(!bare["PATH"].contains("::"));
+        assert!(!bare["PATH"].ends_with(':'));
     }
 
     #[test]
