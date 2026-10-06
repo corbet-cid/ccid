@@ -9,6 +9,7 @@ pub(super) struct Git {
 impl Git {
     pub fn new(root: &Path, timeout: Duration) -> Result<Self> {
         let mut environment: Environment = std::env::vars_os().collect();
+        environment.retain(|key, _| !key.to_string_lossy().starts_with("GIT_TRACE"));
         for key in [
             "GIT_DIR",
             "GIT_WORK_TREE",
@@ -19,6 +20,11 @@ impl Git {
             "GIT_NAMESPACE",
             "GIT_SHALLOW_FILE",
             "GIT_REPLACE_REF_BASE",
+            "GIT_CURL_VERBOSE",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG",
+            "GIT_EXEC_PATH",
+            "GIT_SSL_NO_VERIFY",
         ] {
             environment.remove(std::ffi::OsStr::new(key));
         }
@@ -26,11 +32,20 @@ impl Git {
             ("GIT_TERMINAL_PROMPT", "0"),
             ("GIT_LFS_SKIP_SMUDGE", "1"),
             ("GIT_NO_REPLACE_OBJECTS", "1"),
+            // Only explicit caller-supplied transport settings (GIT_CONFIG_COUNT,
+            // askpass and SSH) are trusted, never ambient user/system Git config.
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_SYSTEM", "/dev/null"),
+            ("GIT_ATTR_NOSYSTEM", "1"),
+            ("GIT_PROTOCOL_FROM_USER", "0"),
+            ("LC_ALL", "C"),
         ] {
             environment.insert(key.into(), value.into());
         }
         Ok(Self {
-            runner: Runner::new(root.into(), environment, timeout)?.with_stderr_events(),
+            runner: Runner::new(root.into(), environment, timeout)?
+                .with_stderr_events()
+                .without_child_stderr(),
         })
     }
 
@@ -41,6 +56,18 @@ impl Git {
             "core.hooksPath=/dev/null",
             "-c",
             "protocol.file.allow=never",
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "protocol.https.allow=always",
+            "-c",
+            "protocol.ssh.allow=always",
+            "-c",
+            "http.followRedirects=false",
+            "-c",
+            "http.sslVerify=true",
+            "-c",
+            "credential.helper=",
             "-c",
             "fetch.fsckObjects=true",
             "-c",
@@ -82,6 +109,9 @@ impl Git {
         let text = self.run_owned(&args)?;
         let mut result = BTreeMap::new();
         for line in text.lines() {
+            if result.len() >= 4096 || line.len() > 1100 {
+                return Err(failure("Git ref inventory exceeds reconciliation limits"));
+            }
             let (oid, name) = line
                 .split_once('\t')
                 .ok_or_else(|| failure("Malformed Git ref inventory"))?;

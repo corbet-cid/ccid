@@ -23,6 +23,7 @@ pub struct Runner {
     pub(crate) deadline: Instant,
     pub(crate) nix_inventory: Option<(String, Vec<String>)>,
     events_to_stderr: bool,
+    suppress_stderr: bool,
 }
 #[cfg(unix)]
 struct OwnedChild(Box<dyn ChildWrapper>);
@@ -51,11 +52,19 @@ impl Runner {
             deadline,
             nix_inventory: None,
             events_to_stderr: false,
+            suppress_stderr: false,
         })
     }
     /// Keep machine-readable stdout separate from process timing diagnostics.
     pub fn with_stderr_events(mut self) -> Self {
         self.events_to_stderr = true;
+        self
+    }
+
+    /// Remote diagnostics can contain credentials or attacker-controlled text.
+    /// Retain exit status and timing, without forwarding the untrusted stream.
+    pub fn without_child_stderr(mut self) -> Self {
+        self.suppress_stderr = true;
         self
     }
 
@@ -141,7 +150,11 @@ impl Runner {
                 Some(path) => Stdio::from(std::fs::File::open(path)?),
                 None => Stdio::null(),
             })
-            .stderr(Stdio::inherit());
+            .stderr(if self.suppress_stderr {
+                Stdio::null()
+            } else {
+                Stdio::inherit()
+            });
         command.stdout(if capture {
             Stdio::piped()
         } else {

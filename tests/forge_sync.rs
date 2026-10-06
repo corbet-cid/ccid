@@ -99,7 +99,7 @@ fn offline_replica_is_pending_while_other_replicas_can_catch_up_later() {
     assert_eq!(report["replicas"][0]["state"], "updated");
     assert_eq!(report["replicas"][1]["state"], "pending");
     assert_eq!(git(&f.replica, &["rev-parse", "refs/heads/main"]), first);
-    let restored = f.root.path().join("missing");
+    let restored = f.root.path().join("missing.git");
     fs::create_dir(&restored).unwrap();
     git(&restored, &["init", "--bare", "-q"]);
     let (output, report) = f.report(&[
@@ -234,4 +234,189 @@ fn bounded_runner_preserves_binary_batch_input_and_null_stdin_default() {
     );
     assert_eq!(fs::read(&input).unwrap(), bytes);
     assert_eq!(runner.run(&["cat".into()], true).unwrap(), "");
+}
+
+#[test]
+fn noncanonical_lfs_pointers_never_claim_payload_replication() {
+    for prefix in ["\n\t ", "\u{a0}\u{2003}"] {
+        let f = Fixture::new();
+        f.commit("first");
+        fs::write(
+            f.source.join("large"),
+            format!(
+                "{prefix}version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 12345\n",
+                "a".repeat(64)
+            ),
+        )
+        .unwrap();
+        git(&f.source, &["add", "large"]);
+        git(&f.source, &["commit", "-qm", "noncanonical pointer"]);
+        let (output, report) = f.report(&["--all-refs", "--to", "replica", "--apply"]);
+        assert!(!output.status.success());
+        assert_eq!(report["content"]["lfs_required"], true);
+        assert!(git(&f.replica, &["for-each-ref"]).is_empty());
+    }
+}
+
+#[test]
+fn remote_diagnostics_and_trace_configuration_cannot_leak_into_reports_or_logs() {
+    let f = Fixture::new();
+    f.commit("first");
+    let hook = f.replica.join("hooks/pre-receive");
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho fixture-credential-secret >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let trace = f.root.path().join("trace");
+    let output = f
+        .command(&["--all-refs", "--to", "replica", "--apply"])
+        .env("GIT_TRACE", &trace)
+        .env("GIT_TRACE_CURL", &trace)
+        .env("GIT_TRACE_PACKET", &trace)
+        .env("GIT_CURL_VERBOSE", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!trace.exists());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-credential-secret"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-credential-secret"));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["replicas"][0]["reason"], "push-not-confirmed");
+}
+
+#[test]
+fn ambient_git_configuration_cannot_redirect_sync() {
+    let f = Fixture::new();
+    let first = f.commit("first");
+    let config = f.root.path().join("ambient-config");
+    fs::write(
+        &config,
+        "[url \"ext::false\"]\n insteadOf = https://source.example/team/source.git\n",
+    )
+    .unwrap();
+    let output = f
+        .command(&["--all-refs", "--to", "replica", "--apply"])
+        .env("GIT_CONFIG_GLOBAL", config)
+        .env(
+            "GIT_CONFIG_PARAMETERS",
+            "'url.ext::false.insteadOf=https://source.example/team/source.git'",
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(git(&f.replica, &["rev-parse", "refs/heads/main"]), first);
+}
+
+#[test]
+fn excessive_ref_inventory_fails_closed_before_replica_writes() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let f = Fixture::new();
+    let first = f.commit("first");
+    let mut child = Command::new("git")
+        .current_dir(&f.source)
+        .args(["update-ref", "--stdin"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for index in 0..4096 {
+        writeln!(input, "create refs/heads/branch-{index} {first}").unwrap();
+    }
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    let (output, report) = f.report(&["--all-refs", "--to", "replica", "--apply"]);
+    assert!(!output.status.success());
+    assert_eq!(report["complete"], false);
+    assert!(git(&f.replica, &["for-each-ref"]).is_empty());
+}
+
+#[test]
+fn secondary_http_redirect_cannot_route_requests_to_a_different_location() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    let first = f.commit("first");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut requests = Vec::new();
+        while Instant::now() < deadline {
+            if let Ok((mut stream, _)) = listener.accept() {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut buffer = [0; 4096];
+                let size = stream.read(&mut buffer).unwrap();
+                requests.push(String::from_utf8_lossy(&buffer[..size]).into_owned());
+                write!(stream, "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/primary\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        requests
+    });
+    let output = f
+        .command(&["--all-refs", "--to", "replica", "--apply"])
+        .env(
+            "GIT_CONFIG_KEY_1",
+            format!("url.http://127.0.0.1:{port}/.insteadOf"),
+        )
+        .env("GIT_CONFIG_COUNT", "5")
+        .env("GIT_CONFIG_KEY_4", "protocol.http.allow")
+        .env("GIT_CONFIG_VALUE_4", "always")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(requests[0].starts_with("GET /replica.git/info/refs"));
+    assert_eq!(git(&f.source, &["rev-parse", "refs/heads/main"]), first);
+    assert!(git(&f.replica, &["for-each-ref"]).is_empty());
+}
+
+#[test]
+fn policy_url_and_repository_path_injection_is_refused_before_transport() {
+    let f = Fixture::new();
+    let first = f.commit("first");
+    let policy: serde_json::Value = serde_json::from_slice(&fs::read(&f.policy).unwrap()).unwrap();
+    for path in [
+        "team/../escape",
+        "team/%2e%2e",
+        "team/repo;touch",
+        "team/$(touch)",
+        "team/repo\n",
+    ] {
+        let mut hostile = policy.clone();
+        hostile["repositories"]["widget"]["locations"]["replica"] = path.into();
+        fs::write(&f.policy, serde_json::to_vec(&hostile).unwrap()).unwrap();
+        assert!(!f
+            .run(&["--all-refs", "--to", "replica", "--apply"])
+            .status
+            .success());
+    }
+    for url in [
+        "https://secret@replica.example",
+        "https://replica.example?target=source",
+        "https://replica.example/%2e%2e",
+        "ext::sh -c true",
+    ] {
+        let mut hostile = policy.clone();
+        hostile["forges"]["replica"]["url"] = url.into();
+        fs::write(&f.policy, serde_json::to_vec(&hostile).unwrap()).unwrap();
+        assert!(!f
+            .run(&["--all-refs", "--to", "replica", "--apply"])
+            .status
+            .success());
+    }
+    assert_eq!(git(&f.source, &["rev-parse", "refs/heads/main"]), first);
+    assert!(git(&f.replica, &["for-each-ref"]).is_empty());
 }

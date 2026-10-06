@@ -34,8 +34,8 @@ pub struct Fixture {
 impl Fixture {
     pub fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source");
-        let replica = root.path().join("replica");
+        let source = root.path().join("source.git");
+        let replica = root.path().join("replica.git");
         fs::create_dir(&source).unwrap();
         fs::create_dir(&replica).unwrap();
         git(&source, &["init", "-qb", "main"]);
@@ -96,13 +96,19 @@ impl Fixture {
     }
 
     pub fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    pub fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ccid"));
         command
             .args(["forge", "sync", "--policy"])
             .arg(&self.policy)
             .args(["--repository", "widget", "--timeout", "15"])
             .args(args)
-            .env("GIT_CONFIG_COUNT", "3")
+            .env("GIT_CONFIG_COUNT", "4")
+            .env("GIT_CONFIG_KEY_3", "protocol.git.allow")
+            .env("GIT_CONFIG_VALUE_3", "always")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1");
         for (index, name) in ["source", "replica", "offline"].iter().enumerate() {
@@ -116,7 +122,7 @@ impl Fixture {
                     format!("https://{name}.example/team/"),
                 );
         }
-        command.output().unwrap()
+        command
     }
 
     pub fn report(&self, args: &[&str]) -> (Output, Value) {

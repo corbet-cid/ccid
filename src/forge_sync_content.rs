@@ -78,7 +78,10 @@ pub(super) fn inspect(git: &Git, oid_bytes: usize) -> Result<Content> {
             if kind == "blob" {
                 // Accept historical version URLs too; an unverified pointer
                 // must never be mistaken for the payload it names.
-                content.lfs_required |= body.starts_with(b"version ")
+                // git-lfs accepts noncanonical pointers after Unicode whitespace
+                // trimming. Missing those would claim payloads were replicated.
+                content.lfs_required |= std::str::from_utf8(body)
+                    .is_ok_and(|text| text.trim_start().starts_with("version "))
                     && body
                         .windows(b"oid sha256:".len())
                         .any(|part| part == b"oid sha256:");

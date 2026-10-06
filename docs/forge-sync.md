@@ -60,3 +60,17 @@ Git authentication failures, server protections and ambiguous transport failures
 are reported as incomplete rather than guessed to mean a missing repository.
 Provider-specific pacing, account holds and scheduling belong in the caller; the
 command makes no forge API requests and never creates or changes credentials.
+
+Transport uses the `.git` clone endpoint and refuses HTTP redirects. A secondary
+cannot redirect a push to another location. User/system Git configuration and
+trace settings are ignored; supply intentional transport rewrites through
+`GIT_CONFIG_COUNT` and authentication through askpass or explicit SSH settings.
+These caller-supplied settings, executable search paths and policy files are
+trusted inputs. Remote stderr is discarded; reports expose fixed failure reasons
+and process timing, without copying server diagnostics into logs.
+
+Inventories are limited to 4096 refs and 1100 bytes per inventory line. Command
+output is capped at 16 MiB and content inspection batches at 12 MiB. Oversized
+or unreadable inputs fail closed. The caller must also bound memory, process
+count and scratch storage; a deadline alone does not bound packfile size. The
+NixOS reconciliation module supplies those resource controls and disables cores.

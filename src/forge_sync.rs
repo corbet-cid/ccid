@@ -97,7 +97,9 @@ pub fn reconcile(
             ));
         }
     }
-    let url = |forge: &str| format!("{}/{}", policy.forges[forge].url, repo.locations[forge]);
+    // Use the clone endpoint directly; following redirects could move a push
+    // outside the declared secondary (including back to the primary).
+    let url = |forge: &str| format!("{}/{}.git", policy.forges[forge].url, repo.locations[forge]);
     let source_url = url(&plan.primary_forge);
     let directory = tempfile::Builder::new().prefix("ccid-sync-").tempdir()?;
     let git = Git::new(directory.path(), timeout)?;
