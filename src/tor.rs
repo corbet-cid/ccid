@@ -1437,11 +1437,11 @@ fn v01_tor_live_inner(
     // instruments. Committed here, never taken from caller-supplied env.
     let diag = manifest
         .diag
-        .get("watch-lib")
-        .ok_or_else(|| failure("Tor job live manifest declares no diag watch-lib pin"))?;
-    if diag.file != "src/tor_records.rs" {
+        .get("discovery-lib")
+        .ok_or_else(|| failure("Tor job live manifest declares no diag discovery-lib pin"))?;
+    if diag.file != "src/tor_discovery.rs" {
         return Err(failure(
-            "Tor job diag watch-lib must pin src/tor_records.rs",
+            "Tor job diag discovery-lib must pin src/tor_discovery.rs",
         ));
     }
     let manifest_inputs = v01_inputs(&manifest, &["v01-tor-live"])?;
@@ -3036,10 +3036,10 @@ sha256 = "e917c01a724e0622601835f8a6f1c8bff102f5f40a61152ce95a099a4bc7ba61"
 [live-tools.wasm-libstd]
 path = "/nix/store/xvp6nfxayb07si2jaggqwvx3iykw89g2-rustc-1.98.1/lib/rustlib/wasm32-unknown-unknown/lib/libstd-0d5130a4ee2cc288.rlib"
 sha256 = "61ce675fface73dbbf431603767a3aa7f05bf9d6995d0555855fa5e4ead667e6"
-[diag.watch-lib]
-file = "src/tor_records.rs"
-sha256 = "437f7324c7882ae1b14dc4735d685992afd65a82bb180a15e1deee9bff085895"
-diagnostic_sha256 = "56d6de3757ac3aa976d96be74156148dd4e0ddc27adda1a332bb7633fdc4e4a2"
+[diag.discovery-lib]
+file = "src/tor_discovery.rs"
+sha256 = "fc6c8db74254e6246bb6da69228e4afe2c17ff42575133bb3ab1b530d2c30041"
+diagnostic_sha256 = "f67ec53ed7f19e9bf7293eca631a24687b14fc2558109269edcbd901fade91d7"
 [live-drivers.harness]
 file = ".ci/v01-tor-live.py"
 sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"

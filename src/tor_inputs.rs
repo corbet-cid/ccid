@@ -313,10 +313,10 @@ sha256 = "6ad575e38543b9668379894ca8752361aa4b76bc28b66cf69a7c6b66fa4a9e22"
 [live-drivers.helpers]
 file = ".ci/v01-records.py"
 sha256 = "64796854b4d018d455b06d3ac67db5cc78a3058440c758a1161fb52d7f7e7e0a"
-[diag.watch-lib]
-file = "src/tor_records.rs"
-sha256 = "437f7324c7882ae1b14dc4735d685992afd65a82bb180a15e1deee9bff085895"
-diagnostic_sha256 = "56d6de3757ac3aa976d96be74156148dd4e0ddc27adda1a332bb7633fdc4e4a2"
+[diag.discovery-lib]
+file = "src/tor_discovery.rs"
+sha256 = "fc6c8db74254e6246bb6da69228e4afe2c17ff42575133bb3ab1b530d2c30041"
+diagnostic_sha256 = "f67ec53ed7f19e9bf7293eca631a24687b14fc2558109269edcbd901fade91d7"
 "#;
 
     fn manifest(text: &str) -> Manifest {
@@ -334,8 +334,8 @@ diagnostic_sha256 = "56d6de3757ac3aa976d96be74156148dd4e0ddc27adda1a332bb7633fdc
         assert_eq!(parsed.live_drivers.len(), 3);
         assert_eq!(parsed.diag.len(), 1);
         assert_eq!(
-            parsed.diag["watch-lib"].sha256,
-            "437f7324c7882ae1b14dc4735d685992afd65a82bb180a15e1deee9bff085895"
+            parsed.diag["discovery-lib"].sha256,
+            "fc6c8db74254e6246bb6da69228e4afe2c17ff42575133bb3ab1b530d2c30041"
         );
         assert!(parsed.live_inputs["v01-source-bundle"]
             .digest_variable

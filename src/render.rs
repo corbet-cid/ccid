@@ -858,10 +858,10 @@ workflows = ["v01-tor-live"]
 [live-tools.receipt]
 path = "/workspaces/component-releases/cmsg/20a55ac8159811bbac7c8370ae7f28fc075f2153/tor-tools/tools.json"
 sha256 = "b3a64bbc373b886dc164e859c1d26e7a4055a7d65b8c2556a0bd2cff4ac152e0"
-[diag.watch-lib]
-file = "src/tor_records.rs"
-sha256 = "437f7324c7882ae1b14dc4735d685992afd65a82bb180a15e1deee9bff085895"
-diagnostic_sha256 = "56d6de3757ac3aa976d96be74156148dd4e0ddc27adda1a332bb7633fdc4e4a2"
+[diag.discovery-lib]
+file = "src/tor_discovery.rs"
+sha256 = "fc6c8db74254e6246bb6da69228e4afe2c17ff42575133bb3ab1b530d2c30041"
+diagnostic_sha256 = "f67ec53ed7f19e9bf7293eca631a24687b14fc2558109269edcbd901fade91d7"
 [live-drivers.harness]
 file = ".ci/v01-tor-live.py"
 sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"

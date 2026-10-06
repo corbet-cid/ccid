@@ -1,10 +1,10 @@
 //! Hidden compiler-wrapper diagnostic for one frozen library build.
 //!
-//! Cargo invokes this binary as `RUSTC_WRAPPER` (selected by the
+//! Cargo invokes this binary as `RUSTC_WORKSPACE_WRAPPER` (selected by the
 //! `CCID_RUSTC_DIAG` environment marker) with the real compiler path as
 //! the first argument followed by rustc arguments. Only the exact cmsh
 //! library unit is instrumented: crate name `cmsh`, manifest beneath the
-//! job-owned frozen-source root, and `src/tor_records.rs` matching its
+//! job-owned frozen-source root, and `src/tor_discovery.rs` matching its
 //! committed digest. Every other invocation passes through to the real
 //! compiler (or a composed outer wrapper) untouched.
 //!
@@ -31,14 +31,14 @@ use std::{
 pub const MODE_ENV: &str = "CCID_RUSTC_DIAG";
 /// Job-owned frozen-source root; the compiled manifest must sit beneath it.
 pub(crate) const ROOT_ENV: &str = "CCID_DIAG_ROOT";
-/// Committed SHA-256 of the exact frozen `src/tor_records.rs`.
+/// Committed SHA-256 of the exact frozen `src/tor_discovery.rs`.
 pub(crate) const ORIGINAL_ENV: &str = "CCID_DIAG_ORIGINAL_SHA256";
 /// Receipt JSON path inside job-owned evidence.
 pub(crate) const RECEIPT_ENV: &str = "CCID_DIAG_RECEIPT";
 /// Crate selected for instrumentation. Nothing else is ever touched.
 pub(crate) const TARGET_CRATE: &str = "cmsh";
 /// Instrumented file relative to the crate manifest directory.
-pub(crate) const TARGET_FILE: &str = "src/tor_records.rs";
+pub(crate) const TARGET_FILE: &str = "src/tor_discovery.rs";
 /// Lock sibling bounding concurrent transforms of one source file.
 pub(crate) const LOCK_SUFFIX: &str = ".ccid-diag.lock";
 
@@ -52,524 +52,30 @@ struct Site {
 }
 
 fn sites() -> Vec<Site> {
-    // Whole-function entries generated mechanically from the frozen
-    // source: each anchor is one complete original function, each
-    // replacement wraps it in an identifying async block with the
-    // stage diagnostics baked in. Exact-once matching fails closed
-    // on any upstream change.
     vec![
         Site {
-            name: "handle_call function",
-            anchor: r#"    pub async fn handle_call(&self, bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
-        let received = self.discovery.authenticate(bytes.clone()).await?;
-        self.discovery.observe_sender(&received)?;
-        if cdht::rpc::peers::find_query(received.operation()).is_ok() {
-            return self.discovery.answer_find(bytes).await;
-        }
-        if let Ok((_, request)) = inspection(received.operation()) {
-            if received.operation().signer() != received.sender() {
-                return Err(Error::BadSignature);
-            }
-            let peers = self.discovery.closer(&request.key.0)?;
-            let accepted = self.store.is_some() && peers.len() < self.limits.consensus_width.get();
-            let found = self
-                .store
-                .as_ref()
-                .map(|store| store.inspect(&request.key, &request.subkeys))
-                .transpose()?
-                .flatten();
-            let (descriptor, seqs) = match found {
-                Some((descriptor, seqs)) => (request.want_descriptor.then_some(descriptor), seqs),
-                None => (None, Vec::new()),
-            };
-            let response = InspectionResponse {
-                accepted,
-                seqs,
-                peers,
-                descriptor,
-            };
-            return self
-                .discovery
-                .reply_record(
-                    &Answer::inspection(received.operation(), &response)?,
-                    received.sender(),
-                )
-                .await;
-        }
-        let (_, request) = query(received.operation())?;
-        if !matches!(request, Query::Watch { .. })
-            && received.operation().signer() != received.sender()
-        {
-            return Err(Error::BadSignature);
-        }
-        let key = match &request {
-            Query::Get { key, .. } | Query::Set { key, .. } | Query::Watch { key, .. } => key,
-        };
-        let peers = self.discovery.closer(&key.0)?;
-        let accepted = self.store.is_some() && peers.len() < self.limits.consensus_width.get();
-        let response = match request {
-            Query::Get {
-                key,
-                subkey,
-                want_descriptor,
-            } => {
-                let (descriptor, value) = if let Some(store) = &self.store {
-                    let descriptor = store.descriptor(&key).await?;
-                    let value = if descriptor.is_some() {
-                        store.get(&key, subkey).await?
-                    } else {
-                        None
-                    };
-                    (descriptor.filter(|_| want_descriptor), value.map(Box::new))
-                } else {
-                    (None, None)
-                };
-                Response::Get {
-                    accepted,
-                    descriptor,
-                    value,
-                    peers,
-                }
-            }
-            Query::Set { .. } => {
-                let mut need_descriptor = false;
-                let mut value = None;
-                if accepted {
-                    match self
-                        .store
-                        .as_ref()
-                        .ok_or(Error::Unavailable)?
-                        .accept_value(&received)
-                    {
-                        Ok(SetOutcome::Accepted) => {}
-                        Ok(SetOutcome::Newer(current)) => value = Some(Box::new(current)),
-                        Err(Error::UnknownRecord) => need_descriptor = true,
-                        Err(error) => return Err(error),
-                    }
-                }
-                Response::Set {
-                    accepted,
-                    need_descriptor,
-                    value,
-                    peers,
-                }
-            }
-            Query::Watch { watch_id, .. } => {
-                let mut id = watch_id;
-                let mut duration_us = 0;
-                if accepted {
-                    match self
-                        .store
-                        .as_ref()
-                        .ok_or(Error::Unavailable)?
-                        .accept_watch(&received, self.discovery.now_us()?)
-                    {
-                        Ok(lease) => {
-                            id = lease.id;
-                            duration_us = lease.duration_us;
-                        }
-                        Err(Error::UnknownRecord) => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                Response::Watch {
-                    accepted,
-                    duration_us,
-                    watch_id: id,
-                    peers,
-                }
-            }
-        };
-        self.discovery
-            .reply_record(
-                &Answer::new(received.operation(), &response)?,
-                received.sender(),
-            )
-            .await
-    }"#,
-            replacement: r#"    pub async fn handle_call(&self, bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
-        async move {
-            let received = self.discovery.authenticate(bytes.clone()).await
-            .inspect_err(|error| {
-                eprintln!("ccid-diag tor-watch-server authenticate: {error:?}");
-            })?;
-            self.discovery.observe_sender(&received)
-            .inspect_err(|error| {
-                eprintln!("ccid-diag tor-watch-server observe-sender: {error:?}");
-            })?;
-            if cdht::rpc::peers::find_query(received.operation()).is_ok() {
-                return self.discovery.answer_find(bytes).await;
-            }
-            if let Ok((_, request)) = inspection(received.operation()) {
-                if received.operation().signer() != received.sender() {
-                    return Err(Error::BadSignature);
-                }
-                let peers = self.discovery.closer(&request.key.0)?;
-                let accepted = self.store.is_some() && peers.len() < self.limits.consensus_width.get();
-                let found = self
-                    .store
-                    .as_ref()
-                    .map(|store| store.inspect(&request.key, &request.subkeys))
-                    .transpose()?
-                    .flatten();
-                let (descriptor, seqs) = match found {
-                    Some((descriptor, seqs)) => (request.want_descriptor.then_some(descriptor), seqs),
-                    None => (None, Vec::new()),
-                };
-                let response = InspectionResponse {
-                    accepted,
-                    seqs,
-                    peers,
-                    descriptor,
-                };
-                return self
-                    .discovery
-                    .reply_record(
-                        &Answer::inspection(received.operation(), &response)?,
-                        received.sender(),
-                    )
-                    .await;
-            }
-            let (_, request) = query(received.operation())
-            .inspect_err(|error| {
-                eprintln!("ccid-diag tor-watch-server decode: {error:?}");
-            })?;
-            if !matches!(request, Query::Watch { .. })
-                && received.operation().signer() != received.sender()
-            {
-                return Err(Error::BadSignature);
-            }
-            let key = match &request {
-                Query::Get { key, .. } | Query::Set { key, .. } | Query::Watch { key, .. } => key,
-            };
-            let peers = self.discovery.closer(&key.0)?;
-            let accepted = self.store.is_some() && peers.len() < self.limits.consensus_width.get();
-            let response = match request {
-                Query::Get {
-                    key,
-                    subkey,
-                    want_descriptor,
-                } => {
-                    let (descriptor, value) = if let Some(store) = &self.store {
-                        let descriptor = store.descriptor(&key).await?;
-                        let value = if descriptor.is_some() {
-                            store.get(&key, subkey).await?
-                        } else {
-                            None
-                        };
-                        (descriptor.filter(|_| want_descriptor), value.map(Box::new))
-                    } else {
-                        (None, None)
-                    };
-                    Response::Get {
-                        accepted,
-                        descriptor,
-                        value,
-                        peers,
-                    }
-                }
-                Query::Set { .. } => {
-                    let mut need_descriptor = false;
-                    let mut value = None;
-                    if accepted {
-                        match self
-                            .store
-                            .as_ref()
-                            .ok_or(Error::Unavailable)?
-                            .accept_value(&received)
-                        {
-                            Ok(SetOutcome::Accepted) => {}
-                            Ok(SetOutcome::Newer(current)) => value = Some(Box::new(current)),
-                            Err(Error::UnknownRecord) => need_descriptor = true,
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    Response::Set {
-                        accepted,
-                        need_descriptor,
-                        value,
-                        peers,
-                    }
-                }
-                Query::Watch { watch_id, .. } => {
-                    let mut id = watch_id;
-                    let mut duration_us = 0;
-                    if accepted {
-                        match self
-                            .store
-                            .as_ref()
-                            .ok_or(Error::Unavailable)?
-                            .accept_watch(&received, self.discovery.now_us()?)
-                        {
-                            Ok(lease) => {
-                                id = lease.id;
-                                duration_us = lease.duration_us;
-                            }
-                            Err(Error::UnknownRecord) => {}
-                            Err(error) => {
-                                eprintln!("ccid-diag tor-watch-server accept: {error:?}");
-                                return Err(error);
-                            }
-                        }
-                    }
-                    Response::Watch {
-                        accepted,
-                        duration_us,
-                        watch_id: id,
-                        peers,
-                    }
-                }
-            };
-            self.discovery
-                .reply_record(
-                    &Answer::new(received.operation(), &response)?,
-                    received.sender(),
-                )
-                .await
-        }
-        .await
-        .inspect_err(|error| {
-            eprintln!("ccid-diag tor-watch-server failed: {error:?}");
-        })
-    }"#,
+            name: "discovery RPC success",
+            anchor: r#"                    Ok(peers) => {
+                        search.finish(&id, true)?;"#,
+            replacement: r#"                    Ok(peers) => {
+                        eprintln!("ccid-diag discovery-rpc-ok: elapsed_ms={}", self.clock.now().saturating_sub(start));
+                        search.finish(&id, true)?;"#,
         },
         Site {
-            name: "watch_request function",
-            anchor: r#"    async fn watch_request(
-        &self,
-        node: &NodeId,
-        watch: &ClientWatch,
-        id: u64,
-        count: u32,
-    ) -> Result<(u64, u64), Error> {
-        let key = watch.descriptor.key();
-        let question = self.discovery.with_sender(Question::new(&Query::Watch {
-            key,
-            subkeys: watch.subkeys.clone(),
-            duration_us: 0,
-            count,
-            watch_id: id,
-        })?)?;
-        let start = self.discovery.now_ms();
-        let answer = self
-            .discovery
-            .call_watch(node, &key, &question, &self.watcher)
-            .await?;
-        let response = question.answer(
-            answer.operation(),
-            Some(&watch.descriptor),
-            self.discovery.verifier(),
-        )?;
-        self.observe_response(&response)?;
-        let (duration_us, watch_id) = match response {
-            Response::Watch {
-                accepted: true,
-                duration_us,
-                watch_id,
-                ..
-            } => (duration_us, watch_id),
-            Response::Watch {
-                accepted: false, ..
-            } => return Err(Error::WatchRefused),
-            _ => return Err(Error::Encoding),
-        };
-        let now = self.discovery.now_ms();
-        if now < start {
-            return Err(Error::Unavailable);
-        }
-        if count == 0 {
-            return if duration_us == 0 {
-                Ok((watch_id, now))
-            } else {
-                Err(Error::Encoding)
-            };
-        }
-        let expires = start
-            .checked_add((now - start) / 2)
-            .and_then(|mid| mid.checked_add(duration_us / 1000))
-            .ok_or(Error::Encoding)?;
-        if watch_id == 0 || expires <= now {
-            return Err(Error::UnknownWatch);
-        }
-        Ok((watch_id, expires))
-    }"#,
-            replacement: r#"    async fn watch_request(
-        &self,
-        node: &NodeId,
-        watch: &ClientWatch,
-        id: u64,
-        count: u32,
-    ) -> Result<(u64, u64), Error> {
-        async move {
-            let key = watch.descriptor.key();
-            let question = self.discovery.with_sender(Question::new(&Query::Watch {
-                key,
-                subkeys: watch.subkeys.clone(),
-                duration_us: 0,
-                count,
-                watch_id: id,
-            })?)?;
-            let start = self.discovery.now_ms();
-            let answer = self
-                .discovery
-                .call_watch(node, &key, &question, &self.watcher)
-                .await
-                .inspect_err(|error| {
-                    eprintln!("ccid-diag tor-watch call-watch: {error:?}");
-                })?;
-            let response = question.answer(
-                answer.operation(),
-                Some(&watch.descriptor),
-                self.discovery.verifier(),
-            )
-            .inspect_err(|error| {
-                eprintln!("ccid-diag tor-watch answer: {error:?}");
-            })?;
-            self.observe_response(&response)
-            .inspect_err(|error| {
-                eprintln!("ccid-diag tor-watch observe: {error:?}");
-            })?;
-            let (duration_us, watch_id) = match response {
-                Response::Watch {
-                    accepted: true,
-                    duration_us,
-                    watch_id,
-                    ..
-                } => (duration_us, watch_id),
-                Response::Watch {
-                    accepted: false, ..
-                } => return Err(Error::WatchRefused),
-                _ => return Err(Error::Encoding),
-            };
-            let now = self.discovery.now_ms();
-            if now < start {
-                return Err(Error::Unavailable);
-            }
-            if count == 0 {
-                return if duration_us == 0 {
-                    Ok((watch_id, now))
-                } else {
-                    Err(Error::Encoding)
-                };
-            }
-            let expires = start
-                .checked_add((now - start) / 2)
-                .and_then(|mid| mid.checked_add(duration_us / 1000))
-                .ok_or(Error::Encoding)?;
-            if watch_id == 0 || expires <= now {
-                eprintln!("ccid-diag tor-watch expiry");
-                return Err(Error::UnknownWatch);
-            }
-            Ok((watch_id, expires))
-        }
-        .await
-        .inspect_err(|error| {
-            eprintln!("ccid-diag tor-watch-request failed: {error:?}");
-        })
-    }"#,
+            name: "discovery RPC failure",
+            anchor: r#"                    Err(_) => {
+                        search.finish(&id, false)?;"#,
+            replacement: r#"                    Err(error) => {
+                        eprintln!("ccid-diag discovery-rpc-error: {error:?}; elapsed_ms={}", self.clock.now().saturating_sub(start));
+                        search.finish(&id, false)?;"#,
         },
         Site {
-            name: "watch function",
-            anchor: r#"    async fn watch(&self, node: &NodeId, key: &RecordKey) -> Result<WatchId, Error> {
-        {
-            let watches = self.watches.lock().map_err(|_| Error::Unavailable)?;
-            if watches.len() >= self.limits.watches.get() {
-                return Err(Error::Unavailable);
-            }
-            if watches
-                .iter()
-                .any(|((n, _), w)| n == node && w.descriptor.key() == *key)
-            {
-                return Err(Error::Conflict);
-            }
-        }
-        let descriptor = Network::descriptor(self, node, key)
-            .await?
-            .ok_or(Error::UnknownRecord)?;
-        let schema = descriptor.validate_for(key, self.discovery.verifier())?;
-        let watch = ClientWatch {
-            descriptor,
-            subkeys: SubkeyRanges::from_iter(0..schema.subkey_count() as u32),
-            changed: SubkeyRanges::new(),
-            expires_ms: 0,
-            count: u32::MAX,
-            lost: false,
-        };
-        let (id, expires_ms) = self.watch_request(node, &watch, 0, watch.count).await?;
-        let mut accepted = watch.clone();
-        accepted.expires_ms = expires_ms;
-        let retained = {
-            let mut watches = self.watches.lock().map_err(|_| Error::Unavailable)?;
-            if watches.len() >= self.limits.watches.get() || watches.contains_key(&(*node, id)) {
-                false
-            } else {
-                watches.insert((*node, id), accepted);
-                true
-            }
-        };
-        if !retained {
-            let _ = self.watch_request(node, &watch, id, 0).await;
-            return Err(Error::Unavailable);
-        }
-        Ok(WatchId(id))
-    }"#,
-            replacement: r#"    async fn watch(&self, node: &NodeId, key: &RecordKey) -> Result<WatchId, Error> {
-        async move {
-            {
-                let watches = self.watches.lock().map_err(|_| Error::Unavailable)?;
-                if watches.len() >= self.limits.watches.get() {
-                    eprintln!("ccid-diag tor-watch local-limit");
-                    return Err(Error::Unavailable);
-                }
-                if watches
-                    .iter()
-                    .any(|((n, _), w)| n == node && w.descriptor.key() == *key)
-                {
-                    eprintln!("ccid-diag tor-watch local-conflict");
-                    return Err(Error::Conflict);
-                }
-            }
-            let descriptor = Network::descriptor(self, node, key)
-                .await
-                .inspect_err(|error| {
-                    eprintln!("ccid-diag tor-watch descriptor: {error:?}");
-                })?
-                .ok_or_else(|| {
-                    eprintln!("ccid-diag tor-watch descriptor-missing");
-                    Error::UnknownRecord
-                })?;
-            let schema = descriptor.validate_for(key, self.discovery.verifier())?;
-            let watch = ClientWatch {
-                descriptor,
-                subkeys: SubkeyRanges::from_iter(0..schema.subkey_count() as u32),
-                changed: SubkeyRanges::new(),
-                expires_ms: 0,
-                count: u32::MAX,
-                lost: false,
-            };
-            let (id, expires_ms) = self.watch_request(node, &watch, 0, watch.count).await?;
-            let mut accepted = watch.clone();
-            accepted.expires_ms = expires_ms;
-            let retained = {
-                let mut watches = self.watches.lock().map_err(|_| Error::Unavailable)?;
-                if watches.len() >= self.limits.watches.get() || watches.contains_key(&(*node, id)) {
-                    false
-                } else {
-                    watches.insert((*node, id), accepted);
-                    true
-                }
-            };
-            if !retained {
-                let _ = self.watch_request(node, &watch, id, 0).await;
-                return Err(Error::Unavailable);
-            }
-            Ok(WatchId(id))
-        }
-        .await
-        .inspect_err(|error| {
-            eprintln!("ccid-diag tor-watch failed: {error:?}");
-        })
-    }"#,
+            name: "discovery outcome",
+            anchor: r#"        Ok(TorDiscoveryReport {
+            peers: search.storage_peers(),"#,
+            replacement: r#"        eprintln!("ccid-diag discovery-result: peers={} expired={} exhausted={} limited={} elapsed_ms={}", search.storage_peers().len(), expired, search.exhausted(), search.limited(), self.clock.now().saturating_sub(start));
+        Ok(TorDiscoveryReport {
+            peers: search.storage_peers(),"#,
         },
     ]
 }
@@ -1031,25 +537,11 @@ mod tests {
     const ANCHORED: &str =
         "head\n        let received = self.discovery.authenticate(bytes.clone()).await?;\ntail\n";
 
-    /// Every diagnostic stage the review requires is present exactly once
-    /// across the table: three whole-function tags plus the narrowing
-    /// stage tags baked into the wrapped bodies.
-    const EXPECTED_TAGS: [&str; 15] = [
-        "ccid-diag tor-watch-server failed",
-        "ccid-diag tor-watch-request failed",
-        "ccid-diag tor-watch failed",
-        "ccid-diag tor-watch descriptor",
-        "ccid-diag tor-watch descriptor-missing",
-        "ccid-diag tor-watch local-limit",
-        "ccid-diag tor-watch local-conflict",
-        "ccid-diag tor-watch call-watch",
-        "ccid-diag tor-watch answer",
-        "ccid-diag tor-watch observe",
-        "ccid-diag tor-watch expiry",
-        "ccid-diag tor-watch-server authenticate",
-        "ccid-diag tor-watch-server observe-sender",
-        "ccid-diag tor-watch-server decode",
-        "ccid-diag tor-watch-server accept",
+    /// Each bounded discovery diagnostic appears exactly once.
+    const EXPECTED_TAGS: [&str; 3] = [
+        "ccid-diag discovery-rpc-ok",
+        "ccid-diag discovery-rpc-error",
+        "ccid-diag discovery-result",
     ];
 
     #[test]
@@ -1060,807 +552,614 @@ mod tests {
     }
 
     /// Exact frozen library source used for transform verification.
-    /// Candidate `src/tor_records.rs` (FSL product tree, frozen bundle input).
-    const FROZEN_LIB: &str = r#"//! Original record RPCs over Tor's authenticated dynamic routing owner. Bootstrap
-//! construction has no store; member storage keeps original signed values intact.
-use crate::tor_discovery::{TorDiscovery, TorNodeIdentity, TorWatcher};
+    /// Candidate `src/tor_discovery.rs` (FSL product tree, frozen bundle input).
+    const FROZEN_LIB: &str = r#"//! Original Veilid discovery over actual Tor complete-message calls. No fixed
+//! population, unsigned key/onion map, operator record store or direct sockets.
 use cdht::{
-    Backend, Capacity, Change, Descriptor, Error, LocalBackend, Network, NodeId, RecordKey,
-    SetOutcome, SignedValue, Verifier, WatchId,
-    rpc::inspect::{Inspection, InspectionResponse, inspection},
-    rpc::{Answer, Query, Question, Response, Statement, SubkeyRanges, query, value_changed},
-    watches::WatchLimits,
+    Error, NodeId, Verifier,
+    discovery::Discovery,
+    rpc::{
+        Answer, Question, SignedOperation, Statement, UnverifiedPeerInfoBytes,
+        envelope::{AuthenticatedOperation, Envelope, TimeWindow},
+        peers::{DHTV, FindAnswer, VerifiedExtensionPeer, find_node, find_query, find_response},
+    },
 };
-use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use futures::{
+    StreamExt,
+    future::{Either, select},
+    stream::FuturesUnordered,
+};
 use std::{
     collections::BTreeMap,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
 };
 
-/// Explicit original responsibility width and bounded client-watch resources.
+/// Keys supplies a node-purpose signing owner. Implementations authorize, then
+/// use their synchronous borrowed signer callback; no borrowed key crosses I/O.
+pub trait TorNodeIdentity: crate::MaybeSend + crate::MaybeSync {
+    /// This community-local node's public VLD0 coordinate.
+    fn node_id(&self) -> NodeId;
+    /// Sign precisely this original question for one authenticated destination.
+    fn question<'a>(
+        &'a self,
+        question: &'a Question,
+        destination: &'a NodeId,
+    ) -> crate::BoxFuture<'a, Result<SignedOperation, Error>>;
+    /// Sign this original FindNode answer for the authenticated requester.
+    fn answer<'a>(
+        &'a self,
+        answer: &'a FindAnswer,
+        destination: &'a NodeId,
+    ) -> crate::BoxFuture<'a, Result<SignedOperation, Error>>;
+    /// Sign an original record answer for the authenticated requester node.
+    fn record_answer<'a>(
+        &'a self,
+        answer: &'a Answer,
+        destination: &'a NodeId,
+    ) -> crate::BoxFuture<'a, Result<SignedOperation, Error>>;
+    /// Sign an original ValueChanged statement for the authenticated watch target.
+    fn statement<'a>(
+        &'a self,
+        statement: &'a Statement,
+        destination: &'a NodeId,
+    ) -> crate::BoxFuture<'a, Result<SignedOperation, Error>>;
+    /// Seal an already signed original operation with this node's original ENV0
+    /// signature and DH, independently of the inner watcher/record signer.
+    fn seal<'a>(
+        &'a self,
+        operation: &'a SignedOperation,
+        destination: &'a NodeId,
+        timestamp_us: u64,
+    ) -> crate::BoxFuture<'a, Result<Vec<u8>, Error>>;
+    /// Decrypt an authenticated envelope through the retained scoped node owner.
+    fn open<'a>(
+        &'a self,
+        envelope: &'a Envelope,
+    ) -> crate::BoxFuture<'a, Result<AuthenticatedOperation, Error>>;
+}
+/// Original anonymous or schema-member watch signer, independent of node identity.
+/// Keys authorizes the exact record question and lends its signer synchronously.
+pub trait TorWatcher: crate::MaybeSend + crate::MaybeSync {
+    /// Public original watcher identity for this record capability.
+    fn public_key(&self, key: &cdht::RecordKey) -> Result<NodeId, Error>;
+    /// Sign only this record's original WatchValueQ for one authenticated node.
+    fn question<'a>(
+        &'a self,
+        key: &'a cdht::RecordKey,
+        question: &'a Question,
+        destination: &'a NodeId,
+    ) -> crate::BoxFuture<'a, Result<SignedOperation, Error>>;
+}
+/// Actual runtime wall clock for original ENV0 timestamp authentication. The Tor
+/// monotonic Clock remains the separate source for operation deadlines.
+pub trait TorEnvelopeTime: crate::MaybeSend + crate::MaybeSync {
+    /// Current Unix time in microseconds. Failure refuses envelope acceptance.
+    fn now_us(&self) -> Result<u64, Error>;
+}
+/// Resource limits for discovery only; no record expiry or replication policy.
 #[derive(Clone, Copy)]
-pub struct TorRecordLimits {
-    /// Original network.dht.consensus_width (maintained native default is ten).
-    pub consensus_width: NonZeroUsize,
-    /// Maximum retained per-node client leases, including lost leases to reconcile.
-    pub watches: NonZeroUsize,
+pub struct TorDiscoveryLimits {
+    /// Maximum retained authenticated routing identities.
+    pub peers: NonZeroUsize,
+    /// Concurrent discovery RPCs. Native core's configured fanout is the reference.
+    pub lanes: NonZeroUsize,
+    /// Overall lookup deadline, in monotonic milliseconds.
+    pub timeout_ms: u64,
+}
+/// Explicit construction inputs for one bounded routing owner.
+pub struct TorDiscoveryConfig<I, V> {
+    /// Complete-message port on the actual running Tor node.
+    pub messages: Arc<ctrn::messages::Messages>,
+    /// Scoped node signing owner.
+    pub identity: I,
+    /// Maintained strict VLD0 verifier.
+    pub verifier: V,
+    /// Original signed advertisement for the actual listener.
+    pub own: UnverifiedPeerInfoBytes,
+    /// Operator bootstrap hints, independently signed by each advertised node.
+    pub bootstrap: Vec<UnverifiedPeerInfoBytes>,
+    /// The same node's monotonic runtime clock.
+    pub clock: Arc<dyn ctrn::Clock>,
+    /// Caller-selected work bounds.
+    pub limits: TorDiscoveryLimits,
+    /// Actual runtime wall clock; request payloads never set acceptance time.
+    pub envelope_time: Arc<dyn TorEnvelopeTime>,
+    /// Explicit original envelope freshness limits.
+    pub envelope_window: TimeWindow,
 }
 #[derive(Clone)]
-struct ClientWatch {
-    descriptor: Descriptor,
-    subkeys: SubkeyRanges,
-    changed: SubkeyRanges,
-    expires_ms: u64,
-    count: u32,
-    lost: bool,
+struct Peer {
+    info: Arc<VerifiedExtensionPeer>,
+    endpoint: ctrn::Address,
+    responsive: bool,
 }
-struct ListenerLease<'a>(&'a Mutex<BTreeMap<(NodeId, u64), ClientWatch>>);
-impl Drop for ListenerLease<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut watches) = self.0.lock() {
-            for watch in watches.values_mut() {
-                watch.lost = true;
-            }
+fn peer(info: VerifiedExtensionPeer) -> Result<Peer, Error> {
+    let ad = info.advertisement();
+    let mut endpoint = None;
+    for dial in &ad.dial_info {
+        let checked = ctrn::OnionEndpoint::from_node_info(
+            dial.protocol,
+            &ad.outbound_protocols,
+            &ad.address_types,
+            &dial.detail,
+        )
+        .map_err(|_| Error::Encoding)?;
+        if endpoint.is_none() {
+            endpoint = Some(checked.address());
         }
     }
+    Ok(Peer {
+        endpoint: endpoint.ok_or(Error::Encoding)?,
+        info: Arc::new(info),
+        responsive: false,
+    })
 }
-enum Finished {
-    Request(Result<(), Error>),
-    Maintenance(Result<(), Error>),
+/// Results expose partial knowledge; no discovery result establishes DHT absence.
+pub struct TorDiscoveryReport {
+    /// Responsive, independently authenticated storage peers, closest first.
+    pub peers: Vec<Arc<VerifiedExtensionPeer>>,
+    /// Every discovered query completed before the deadline and resource bound.
+    pub exhausted: bool,
+    /// The lookup hit its explicit resource limit.
+    pub limited: bool,
 }
-enum Signal {
-    Incoming(Result<ctrn::Received, ctrn::Error>),
-    Tick,
-    Finished(Finished),
+/// Bounded signed routing state for one community's actual Tor runtime. A
+/// bootstrap can use this alone: the type has no DHT record storage capability.
+pub struct TorDiscovery<I, V> {
+    messages: Arc<ctrn::messages::Messages>,
+    identity: I,
+    verifier: V,
+    own: Peer,
+    clock: Arc<dyn ctrn::Clock>,
+    limits: TorDiscoveryLimits,
+    routes: Mutex<BTreeMap<NodeId, Peer>>,
+    envelope_time: Arc<dyn TorEnvelopeTime>,
+    envelope_window: TimeWindow,
 }
-/// One actual node's record transport, member storage and original watch leases.
-/// The runtime must drive `handle_call`, `handle_statement`, and `maintain` from
-/// its retained actual listener/clock, and call `transport_lost` on listener loss.
-pub struct TorRecords<I, V: Verifier, W> {
-    discovery: Arc<TorDiscovery<I, V>>,
-    store: Option<LocalBackend<V>>,
-    watcher: W,
-    limits: TorRecordLimits,
-    watches: Mutex<BTreeMap<(NodeId, u64), ClientWatch>>,
-}
-impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> TorRecords<I, V, W> {
-    /// Construct without operator storage when `storage` is None. An advertised
-    /// DHTV capability must agree with an actual member store, never a ready flag.
+impl<I: TorNodeIdentity, V: Verifier> TorDiscovery<I, V> {
+    /// Bind signed self-advertisement to an ACTUAL live listener and matching
+    /// scoped node identity. Bootstrap entries are original independently signed
+    /// PeerInfo, not caller-supplied coordinates or a complete device roster.
     pub fn new(
-        discovery: Arc<TorDiscovery<I, V>>,
-        watcher: W,
-        storage: Option<(Capacity, WatchLimits)>,
-        limits: TorRecordLimits,
-    ) -> Result<Self, Error>
-    where
-        V: Clone,
-    {
-        if limits.consensus_width.get() > 20 || discovery.stores_records() != storage.is_some() {
-            return Err(Error::Encoding);
-        }
-        let store = storage
-            .map(|(capacity, watches)| {
-                LocalBackend::with_authenticated_watches(
-                    discovery.verifier().clone(),
-                    capacity,
-                    watches,
-                )
-            })
-            .transpose()?;
-        Ok(Self {
-            discovery,
-            store,
-            watcher,
+        config: TorDiscoveryConfig<I, V>,
+        listener: &ctrn::messages::MessageListener,
+    ) -> Result<Self, Error> {
+        let TorDiscoveryConfig {
+            messages,
+            identity,
+            verifier,
+            own,
+            bootstrap,
+            clock,
             limits,
-            watches: Mutex::new(BTreeMap::new()),
-        })
-    }
-    /// Original routing owner; discovery does not imply record availability.
-    pub fn discovery(&self) -> &Arc<TorDiscovery<I, V>> {
-        &self.discovery
-    }
-    /// Actual storage inventory. A bootstrap has no member record store at all.
-    pub fn storage_usage(&self) -> Option<(usize, usize, usize)> {
-        self.store.as_ref().map(LocalBackend::usage)
-    }
-
-    /// Drive a dedicated actual record-service listener and its one-second timer.
-    /// Requests have bounded concurrency; one maintenance operation can progress
-    /// beside them, so renewal I/O never blocks inbound replies. Invalid requests
-    /// are refused individually and reported only as coarse errors. The callback
-    /// must return promptly and receives no keys, peer identities or payloads.
-    ///
-    /// The caller retains this future for the service lifetime. Listener failure,
-    /// return or cancellation marks every client watch lost. This listener is for
-    /// original record RPCs; a generic application listener is a distinct port.
-    pub async fn run(
-        &self,
-        listener: ctrn::messages::MessageListener,
-        concurrency: NonZeroUsize,
-        mut on_error: impl FnMut(Error),
-    ) -> Result<(), Error>
-    where
-        V: crate::MaybeSend + crate::MaybeSync,
-    {
-        let _lease = ListenerLease(&self.watches);
-        // MessageListener::next may already own an accepted partial connection.
-        // Unfold retains that in-flight future across timer/completion selection;
-        // dropping a temporary StreamExt::next cannot discard that connection.
-        let arrivals = futures::stream::unfold(listener, |mut listener| async move {
-            let result = listener.next().await;
-            Some((result, listener))
-        });
-        futures::pin_mut!(arrivals);
-        let mut operations: FuturesUnordered<crate::BoxFuture<'_, Finished>> =
-            FuturesUnordered::new();
-        let mut requests = 0;
-        let mut maintaining = false;
-        let mut next_tick = self.discovery.now_ms();
-        loop {
-            let accept = requests < concurrency.get();
-            let signal = {
-                let incoming = async {
-                    if accept {
-                        arrivals
-                            .next()
-                            .await
-                            .expect("listener unfold always yields")
-                    } else {
-                        futures::future::pending().await
-                    }
-                }
-                .fuse();
-                let completed = async {
-                    match operations.next().await {
-                        Some(result) => result,
-                        None => futures::future::pending().await,
-                    }
-                }
-                .fuse();
-                let tick = self.discovery.sleep_until(next_tick).fuse();
-                futures::pin_mut!(incoming, completed, tick);
-                futures::select_biased! {
-                    () = tick => Signal::Tick,
-                    result = completed => Signal::Finished(result),
-                    result = incoming => Signal::Incoming(result),
-                }
-            };
-            match signal {
-                Signal::Tick => {
-                    next_tick = self
-                        .discovery
-                        .now_ms()
-                        .checked_add(1_000)
-                        .ok_or(Error::Unavailable)?;
-                    if !maintaining {
-                        maintaining = true;
-                        operations.push(Box::pin(async {
-                            Finished::Maintenance(self.maintain().await)
-                        }));
-                    }
-                }
-                Signal::Incoming(Err(_)) => return Err(Error::Unavailable),
-                Signal::Incoming(Ok(message)) => {
-                    requests += 1;
-                    operations.push(Box::pin(async move {
-                        Finished::Request(match message {
-                            ctrn::Received::Call { payload, reply } => {
-                                match self.handle_call(payload).await {
-                                    Ok(answer) => {
-                                        reply.send(&answer).await.map_err(|_| Error::Unavailable)
-                                    }
-                                    Err(error) => Err(error),
-                                }
-                            }
-                            ctrn::Received::Message(payload) => {
-                                self.handle_statement(payload).await
-                            }
-                        })
-                    }));
-                }
-                Signal::Finished(result) => {
-                    let result = match result {
-                        Finished::Request(result) => {
-                            requests -= 1;
-                            result
-                        }
-                        Finished::Maintenance(result) => {
-                            maintaining = false;
-                            result
-                        }
-                    };
-                    if let Err(error) = result {
-                        on_error(error);
-                    }
-                }
-            }
-        }
-    }
-
-    async fn request(
-        &self,
-        node: &NodeId,
-        request: Query,
-        descriptor: Option<&Descriptor>,
-    ) -> Result<Response, Error> {
-        let question = self.discovery.with_sender(Question::new(&request)?)?;
-        let answer = self.discovery.call_record(node, &question).await?;
-        let response =
-            question.answer(answer.operation(), descriptor, self.discovery.verifier())?;
-        self.observe_response(&response)?;
-        Ok(response)
-    }
-    fn observe_response(&self, response: &Response) -> Result<(), Error> {
-        let peers = match response {
-            Response::Get { peers, .. }
-            | Response::Set { peers, .. }
-            | Response::Watch { peers, .. } => peers,
-        };
-        self.discovery.observe_hints(peers)
-    }
-    /// Inspect original remote sequence hints without downloading value contents.
-    /// A sequence hint is never proof of a record value, membership or freshness.
-    pub async fn inspect(
-        &self,
-        node: &NodeId,
-        request: &Inspection,
-        descriptor: Option<&Descriptor>,
-    ) -> Result<InspectionResponse, Error> {
-        let question = self.discovery.with_sender(request.question()?)?;
-        let answer = self.discovery.call_record(node, &question).await?;
-        let response = question.inspection_answer(
-            answer.operation(),
-            descriptor,
-            self.discovery.verifier(),
-        )?;
-        self.discovery.observe_hints(&response.peers)?;
-        Ok(response)
-    }
-    /// Handle an original call and return bytes for the actual one-use reply port.
-    /// Caller errors must close/refuse that call; they never become successful ACKs.
-    pub async fn handle_call(&self, bytes: Vec<u8>) -> Result<Vec<u8>, Error> {
-        let received = self.discovery.authenticate(bytes.clone()).await?;
-        self.discovery.observe_sender(&received)?;
-        if cdht::rpc::peers::find_query(received.operation()).is_ok() {
-            return self.discovery.answer_find(bytes).await;
-        }
-        if let Ok((_, request)) = inspection(received.operation()) {
-            if received.operation().signer() != received.sender() {
-                return Err(Error::BadSignature);
-            }
-            let peers = self.discovery.closer(&request.key.0)?;
-            let accepted = self.store.is_some() && peers.len() < self.limits.consensus_width.get();
-            let found = self
-                .store
-                .as_ref()
-                .map(|store| store.inspect(&request.key, &request.subkeys))
-                .transpose()?
-                .flatten();
-            let (descriptor, seqs) = match found {
-                Some((descriptor, seqs)) => (request.want_descriptor.then_some(descriptor), seqs),
-                None => (None, Vec::new()),
-            };
-            let response = InspectionResponse {
-                accepted,
-                seqs,
-                peers,
-                descriptor,
-            };
-            return self
-                .discovery
-                .reply_record(
-                    &Answer::inspection(received.operation(), &response)?,
-                    received.sender(),
-                )
-                .await;
-        }
-        let (_, request) = query(received.operation())?;
-        if !matches!(request, Query::Watch { .. })
-            && received.operation().signer() != received.sender()
+            envelope_time,
+            envelope_window,
+        } = config;
+        if limits.timeout_ms == 0
+            || limits.lanes.get() > limits.peers.get()
+            || bootstrap.len() > limits.peers.get()
         {
-            return Err(Error::BadSignature);
-        }
-        let key = match &request {
-            Query::Get { key, .. } | Query::Set { key, .. } | Query::Watch { key, .. } => key,
-        };
-        let peers = self.discovery.closer(&key.0)?;
-        let accepted = self.store.is_some() && peers.len() < self.limits.consensus_width.get();
-        let response = match request {
-            Query::Get {
-                key,
-                subkey,
-                want_descriptor,
-            } => {
-                let (descriptor, value) = if let Some(store) = &self.store {
-                    let descriptor = store.descriptor(&key).await?;
-                    let value = if descriptor.is_some() {
-                        store.get(&key, subkey).await?
-                    } else {
-                        None
-                    };
-                    (descriptor.filter(|_| want_descriptor), value.map(Box::new))
-                } else {
-                    (None, None)
-                };
-                Response::Get {
-                    accepted,
-                    descriptor,
-                    value,
-                    peers,
-                }
-            }
-            Query::Set { .. } => {
-                let mut need_descriptor = false;
-                let mut value = None;
-                if accepted {
-                    match self
-                        .store
-                        .as_ref()
-                        .ok_or(Error::Unavailable)?
-                        .accept_value(&received)
-                    {
-                        Ok(SetOutcome::Accepted) => {}
-                        Ok(SetOutcome::Newer(current)) => value = Some(Box::new(current)),
-                        Err(Error::UnknownRecord) => need_descriptor = true,
-                        Err(error) => return Err(error),
-                    }
-                }
-                Response::Set {
-                    accepted,
-                    need_descriptor,
-                    value,
-                    peers,
-                }
-            }
-            Query::Watch { watch_id, .. } => {
-                let mut id = watch_id;
-                let mut duration_us = 0;
-                if accepted {
-                    match self
-                        .store
-                        .as_ref()
-                        .ok_or(Error::Unavailable)?
-                        .accept_watch(&received, self.discovery.now_us()?)
-                    {
-                        Ok(lease) => {
-                            id = lease.id;
-                            duration_us = lease.duration_us;
-                        }
-                        Err(Error::UnknownRecord) => {}
-                        Err(error) => return Err(error),
-                    }
-                }
-                Response::Watch {
-                    accepted,
-                    duration_us,
-                    watch_id: id,
-                    peers,
-                }
-            }
-        };
-        self.discovery
-            .reply_record(
-                &Answer::new(received.operation(), &response)?,
-                received.sender(),
-            )
-            .await
-    }
-    /// Authenticate a real node notification against its exact active lease.
-    /// Included values are verified, but readers still inspect the affected subkeys.
-    pub async fn handle_statement(&self, bytes: Vec<u8>) -> Result<(), Error> {
-        let received = self.discovery.authenticate(bytes).await?;
-        if received.operation().signer() != received.sender() {
-            return Err(Error::BadSignature);
-        }
-        let (_, hint) = value_changed(received.operation())?;
-        let mut watches = self.watches.lock().map_err(|_| Error::Unavailable)?;
-        let watch = watches
-            .get_mut(&(*received.sender(), hint.watch_id))
-            .ok_or(Error::UnknownWatch)?;
-        if watch.lost
-            || self.discovery.now_ms() >= watch.expires_ms
-            || hint.key != watch.descriptor.key()
-        {
-            watch.lost = true;
-            return Err(Error::UnknownWatch);
-        }
-        let schema = watch
-            .descriptor
-            .validate_for(&hint.key, self.discovery.verifier())?;
-        if hint
-            .subkeys
-            .last()
-            .is_some_and(|subkey| subkey as usize >= schema.subkey_count())
-            || hint.count > watch.count
-        {
-            watch.lost = true;
             return Err(Error::Encoding);
         }
-        if let Some(value) = &hint.value {
-            let subkey = hint.subkeys.first().ok_or(Error::Encoding)?;
-            value.validate(
-                &hint.key,
-                &watch.descriptor.owner,
-                &schema,
-                subkey,
-                self.discovery.verifier(),
-            )?;
+        let own = peer(own.verify_extension(&verifier)?)?;
+        if own.info.node_id() != &identity.node_id()
+            || own.endpoint.bytes() != listener.address().bytes()
+        {
+            return Err(Error::WrongRecord);
         }
-        if hint.count == watch.count {
+        let this = Self {
+            messages,
+            identity,
+            verifier,
+            own,
+            clock,
+            limits,
+            routes: Mutex::new(BTreeMap::new()),
+            envelope_time,
+            envelope_window,
+        };
+        for info in bootstrap {
+            this.observe(peer(info.verify_extension(&this.verifier)?)?)?;
+        }
+        Ok(this)
+    }
+    fn observe(&self, peer: Peer) -> Result<(), Error> {
+        let id = *peer.info.node_id();
+        if id == self.identity.node_id() {
             return Ok(());
-        } // Original duplicate-count suppression.
-        watch.count = hint.count;
-        watch.changed |= &hint.subkeys;
-        watch.lost |= hint.count == 0 || hint.subkeys.is_empty();
+        }
+        let mut routes = self.routes.lock().map_err(|_| Error::Unavailable)?;
+        if let Some(previous) = routes.get(&id) {
+            let old = previous.info.advertisement().timestamp_us;
+            let new = peer.info.advertisement().timestamp_us;
+            if new < old {
+                return Ok(());
+            }
+            if new == old {
+                return if previous.info.advertisement() == peer.info.advertisement() {
+                    Ok(())
+                } else {
+                    Err(Error::Conflict)
+                };
+            }
+        } else if routes.len() == self.limits.peers.get() {
+            return Err(Error::Unavailable);
+        }
+        routes.insert(id, peer);
         Ok(())
     }
-    /// Actual listener/lifecycle loss invalidates every retained client lease.
-    pub fn transport_lost(&self) {
-        if let Ok(mut watches) = self.watches.lock() {
-            for watch in watches.values_mut() {
-                watch.lost = true;
-            }
-        }
-    }
-    async fn watch_request(
+    async fn call_find(
         &self,
-        node: &NodeId,
-        watch: &ClientWatch,
-        id: u64,
-        count: u32,
-    ) -> Result<(u64, u64), Error> {
-        let key = watch.descriptor.key();
-        let question = self.discovery.with_sender(Question::new(&Query::Watch {
-            key,
-            subkeys: watch.subkeys.clone(),
-            duration_us: 0,
-            count,
-            watch_id: id,
-        })?)?;
-        let start = self.discovery.now_ms();
-        let answer = self
-            .discovery
-            .call_watch(node, &key, &question, &self.watcher)
-            .await?;
-        let response = question.answer(
-            answer.operation(),
-            Some(&watch.descriptor),
-            self.discovery.verifier(),
-        )?;
-        self.observe_response(&response)?;
-        let (duration_us, watch_id) = match response {
-            Response::Watch {
-                accepted: true,
-                duration_us,
-                watch_id,
-                ..
-            } => (duration_us, watch_id),
-            Response::Watch {
-                accepted: false, ..
-            } => return Err(Error::WatchRefused),
-            _ => return Err(Error::Encoding),
-        };
-        let now = self.discovery.now_ms();
-        if now < start {
-            return Err(Error::Unavailable);
+        to: Arc<VerifiedExtensionPeer>,
+        target: NodeId,
+    ) -> Result<Vec<Peer>, Error> {
+        let question = find_node(&target, &[DHTV])?.with_sender(self.own.info.original())?;
+        let signed = self.identity.question(&question, to.node_id()).await?;
+        if signed.operation() != question.as_bytes() || signed.signer() != &self.identity.node_id()
+        {
+            return Err(Error::Encoding);
         }
-        if count == 0 {
-            return if duration_us == 0 {
-                Ok((watch_id, now))
-            } else {
-                Err(Error::Encoding)
-            };
-        }
-        let expires = start
-            .checked_add((now - start) / 2)
-            .and_then(|mid| mid.checked_add(duration_us / 1000))
-            .ok_or(Error::Encoding)?;
-        if watch_id == 0 || expires <= now {
-            return Err(Error::UnknownWatch);
-        }
-        Ok((watch_id, expires))
+        let received = self.exchange(&to, &question, &signed).await?;
+        find_response(&signed, received.operation(), &self.verifier)?
+            .into_iter()
+            .map(peer)
+            .collect()
     }
-    /// Drive original pending notifications and the upstream 30-second renewal
-    /// window from the actual runtime timer. Failures remain observable lease loss.
-    pub async fn maintain(&self) -> Result<(), Error> {
-        let mut failure = None;
-        if let Some(store) = &self.store {
-            let notifications = store.notifications(self.discovery.now_us()?)?;
-            for notification in notifications {
-                let result = match Statement::value_changed(&notification.hint) {
-                    Ok(statement) => {
-                        self.discovery
-                            .send_statement(&statement, &notification.target)
-                            .await
-                    }
-                    Err(error) => Err(error),
-                };
-                // Taking a batch consumes its count budget. A failed destination
-                // must not silently discard notifications for other destinations
-                // or prevent this node's own expiring watches from being renewed.
-                if let Err(error) = result {
-                    failure.get_or_insert(error);
-                }
-            }
+    async fn exchange(
+        &self,
+        to: &VerifiedExtensionPeer,
+        question: &Question,
+        signed: &SignedOperation,
+    ) -> Result<AuthenticatedOperation, Error> {
+        let checked = peer(to.original().verify_extension(&self.verifier)?)?;
+        if signed.operation() != question.as_bytes() {
+            return Err(Error::Encoding);
         }
-        let now = self.discovery.now_ms();
-        let renew: Vec<_> = self
-            .watches
+        // Verify the signed result, including exact destination, before transmission.
+        let signed = SignedOperation::verify(
+            signed.as_bytes().to_vec(),
+            to.node_id(),
+            signed.signer(),
+            &self.verifier,
+        )?;
+        let now = self.envelope_time.now_us()?;
+        let outgoing = self.identity.seal(&signed, to.node_id(), now).await?;
+        let outgoing = Envelope::verify(
+            outgoing,
+            to.node_id(),
+            now,
+            self.envelope_window,
+            &self.verifier,
+        )?;
+        if outgoing.sender() != &self.identity.node_id() {
+            return Err(Error::BadSignature);
+        }
+        let answer = self
+            .messages
+            .app_call(&checked.endpoint, outgoing.as_bytes())
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        let answer = Envelope::verify(
+            answer,
+            &self.identity.node_id(),
+            self.envelope_time.now_us()?,
+            self.envelope_window,
+            &self.verifier,
+        )?;
+        if answer.sender() != to.node_id() {
+            return Err(Error::BadSignature);
+        }
+        let received = self.identity.open(&answer).await?;
+        if received.sender() != to.node_id() || received.operation().signer() != to.node_id() {
+            return Err(Error::BadSignature);
+        }
+        Ok(received)
+    }
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.clock.now()
+    }
+    pub(crate) fn now_us(&self) -> Result<u64, Error> {
+        self.envelope_time.now_us()
+    }
+    pub(crate) fn verifier(&self) -> &V {
+        &self.verifier
+    }
+    pub(crate) fn node_id(&self) -> NodeId {
+        self.identity.node_id()
+    }
+    pub(crate) fn sleep_until(&self, deadline_ms: u64) -> crate::BoxFuture<'_, ()> {
+        self.clock.sleep_until(deadline_ms)
+    }
+    pub(crate) fn stores_records(&self) -> bool {
+        self.own.info.advertisement().capabilities.contains(&DHTV)
+    }
+    pub(crate) fn mark_responsive(&self, node: &NodeId, responsive: bool) -> Result<(), Error> {
+        if let Some(peer) = self
+            .routes
             .lock()
             .map_err(|_| Error::Unavailable)?
-            .iter()
-            .filter(|(_, w)| !w.lost && now.saturating_add(30_000) >= w.expires_ms)
-            .map(|(key, w)| (*key, w.clone()))
+            .get_mut(node)
+        {
+            peer.responsive = responsive;
+        }
+        Ok(())
+    }
+    pub(crate) fn route(&self, node: &NodeId) -> Result<Arc<VerifiedExtensionPeer>, Error> {
+        self.routes
+            .lock()
+            .map_err(|_| Error::Unavailable)?
+            .get(node)
+            .map(|p| p.info.clone())
+            .ok_or(Error::Unavailable)
+    }
+    pub(crate) fn observe_hints(&self, hints: &[UnverifiedPeerInfoBytes]) -> Result<(), Error> {
+        for hint in hints {
+            self.observe(peer(hint.verify_extension(&self.verifier)?)?)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn storage_hints(&self, target: &NodeId) -> Result<Vec<NodeId>, Error> {
+        let mut nodes: Vec<_> = self
+            .routes
+            .lock()
+            .map_err(|_| Error::Unavailable)?
+            .values()
+            .filter(|peer| peer.info.advertisement().capabilities.contains(&DHTV))
+            .map(|peer| *peer.info.node_id())
             .collect();
-        for ((node, id), previous) in renew {
-            let result = if now >= previous.expires_ms {
-                Err(Error::UnknownWatch)
-            } else {
-                self.watch_request(&node, &previous, id, previous.count)
-                    .await
-            };
-            if let Some(watch) = self
-                .watches
-                .lock()
-                .map_err(|_| Error::Unavailable)?
-                .get_mut(&(node, id))
-            {
+        nodes.sort_unstable_by_key(|node| std::array::from_fn::<_, 32, _>(|i| node[i] ^ target[i]));
+        nodes.truncate(cdht::MAX_FANOUT_NODES);
+        Ok(nodes)
+    }
+    pub(crate) fn closer(&self, target: &NodeId) -> Result<Vec<UnverifiedPeerInfoBytes>, Error> {
+        let own_distance = std::array::from_fn::<_, 32, _>(|i| self.node_id()[i] ^ target[i]);
+        let mut peers: Vec<_> = self
+            .routes
+            .lock()
+            .map_err(|_| Error::Unavailable)?
+            .values()
+            .filter(|p| p.responsive && p.info.advertisement().capabilities.contains(&DHTV))
+            .map(|p| p.info.clone())
+            .collect();
+        peers.sort_by_key(|p| std::array::from_fn::<_, 32, _>(|i| p.node_id()[i] ^ target[i]));
+        peers
+            .into_iter()
+            .filter(|p| {
+                std::array::from_fn::<_, 32, _>(|i| p.node_id()[i] ^ target[i]) < own_distance
+            })
+            .take(20)
+            .map(|p| UnverifiedPeerInfoBytes::from_bytes(p.original().as_bytes().to_vec()))
+            .collect()
+    }
+    pub(crate) async fn call_record(
+        &self,
+        to: &NodeId,
+        question: &Question,
+    ) -> Result<AuthenticatedOperation, Error> {
+        let route = self.route(to)?;
+        let signed = self.identity.question(question, to).await?;
+        if signed.signer() != &self.node_id() {
+            return Err(Error::BadSignature);
+        }
+        let result = self.exchange(&route, question, &signed).await;
+        self.mark_responsive(to, result.is_ok())?;
+        result
+    }
+    pub(crate) fn with_sender(&self, question: Question) -> Result<Question, Error> {
+        question.with_sender(self.own.info.original())
+    }
+    pub(crate) async fn authenticate(
+        &self,
+        bytes: Vec<u8>,
+    ) -> Result<AuthenticatedOperation, Error> {
+        let envelope = Envelope::verify(
+            bytes,
+            &self.node_id(),
+            self.now_us()?,
+            self.envelope_window,
+            &self.verifier,
+        )?;
+        let received = self.identity.open(&envelope).await?;
+        if received.sender() != envelope.sender() {
+            return Err(Error::BadSignature);
+        }
+        Ok(received)
+    }
+    pub(crate) fn observe_sender(&self, received: &AuthenticatedOperation) -> Result<(), Error> {
+        let sender = peer(received.sender_peer(&self.verifier)?)?;
+        self.observe(sender)?;
+        self.mark_responsive(received.sender(), true)
+    }
+    pub(crate) async fn call_watch<W: TorWatcher>(
+        &self,
+        to: &NodeId,
+        key: &cdht::RecordKey,
+        question: &Question,
+        watcher: &W,
+    ) -> Result<AuthenticatedOperation, Error> {
+        let route = self.route(to)?;
+        let signed = watcher.question(key, question, to).await?;
+        if signed.signer() != &watcher.public_key(key)? {
+            return Err(Error::BadSignature);
+        }
+        let result = self.exchange(&route, question, &signed).await;
+        self.mark_responsive(to, result.is_ok())?;
+        result
+    }
+    pub(crate) async fn reply_record(
+        &self,
+        answer: &Answer,
+        target: &NodeId,
+    ) -> Result<Vec<u8>, Error> {
+        let signed = self.identity.record_answer(answer, target).await?;
+        if signed.operation() != answer.as_bytes() {
+            return Err(Error::Encoding);
+        }
+        let checked = SignedOperation::verify(
+            signed.as_bytes().to_vec(),
+            target,
+            &self.node_id(),
+            &self.verifier,
+        )?;
+        self.identity.seal(&checked, target, self.now_us()?).await
+    }
+    pub(crate) async fn send_statement(
+        &self,
+        statement: &Statement,
+        target: &NodeId,
+    ) -> Result<(), Error> {
+        let route = self.route(target)?;
+        let route = peer(route.original().verify_extension(&self.verifier)?)?;
+        let signed = self.identity.statement(statement, target).await?;
+        if signed.operation() != statement.as_bytes() {
+            return Err(Error::Encoding);
+        }
+        let checked = SignedOperation::verify(
+            signed.as_bytes().to_vec(),
+            target,
+            &self.node_id(),
+            &self.verifier,
+        )?;
+        let bytes = self.identity.seal(&checked, target, self.now_us()?).await?;
+        self.messages
+            .app_message(&route.endpoint, &bytes)
+            .await
+            .map_err(|_| Error::Unavailable)
+    }
+    /// Query dynamic original peer hints over Tor, unique and XOR-ordered, with
+    /// bounded concurrent lanes and an actual runtime deadline. A timed-out lookup
+    /// returns only its authenticated partial results, never a false empty vault.
+    pub async fn discover(&self, target: NodeId) -> Result<TorDiscoveryReport, Error> {
+        let start = self.clock.now();
+        let deadline = start
+            .checked_add(self.limits.timeout_ms)
+            .ok_or(Error::Unavailable)?;
+        let mut search = Discovery::new(target, self.identity.node_id(), self.limits.peers);
+        for entry in self.routes.lock().map_err(|_| Error::Unavailable)?.values() {
+            search.insert(entry.info.clone())?;
+        }
+        let work = async {
+            let mut pending = FuturesUnordered::new();
+            loop {
+                while pending.len() < self.limits.lanes.get() {
+                    let Some(peer) = search.next_peer() else {
+                        break;
+                    };
+                    pending.push(async move {
+                        let id = *peer.node_id();
+                        (id, self.call_find(peer, target).await)
+                    });
+                }
+                let Some((id, result)) = pending.next().await else {
+                    break;
+                };
                 match result {
-                    Ok((same, expires)) if same == id => watch.expires_ms = expires,
-                    _ => {
-                        watch.lost = true;
-                        failure.get_or_insert(Error::UnknownWatch);
+                    Ok(peers) => {
+                        search.finish(&id, true)?;
+                        self.mark_responsive(&id, true)?;
+                        for next in peers {
+                            let info = next.info.clone();
+                            self.observe(next)?;
+                            if search.insert(info).is_err() {
+                                return Ok::<(), Error>(());
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        search.finish(&id, false)?;
+                        self.mark_responsive(&id, false)?;
                     }
                 }
+                if self.clock.now() < start {
+                    return Err(Error::Unavailable);
+                }
             }
-        }
-        failure.map_or(Ok(()), Err)
-    }
-}
-impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecords<I, V, W> {
-    fn now_ms(&self) -> u64 {
-        self.discovery.now_ms()
-    }
-    fn hints(&self, key: &RecordKey) -> Result<Vec<NodeId>, Error> {
-        self.discovery.storage_hints(&key.0)
-    }
-    async fn closest(&self, key: &RecordKey) -> Result<Vec<NodeId>, Error> {
-        let report = self.discovery.discover(key.0).await?;
-        if report.peers.is_empty() {
-            return Err(Error::Unavailable);
-        }
-        Ok(report.peers.iter().map(|p| *p.node_id()).collect())
-    }
-    async fn descriptor(
-        &self,
-        node: &NodeId,
-        key: &RecordKey,
-    ) -> Result<Option<Descriptor>, Error> {
-        match self
-            .request(
-                node,
-                Query::Get {
-                    key: *key,
-                    subkey: 0,
-                    want_descriptor: true,
-                },
-                None,
-            )
-            .await?
-        {
-            Response::Get { descriptor, .. } => Ok(descriptor),
-            _ => Err(Error::Encoding),
-        }
-    }
-    async fn get(
-        &self,
-        node: &NodeId,
-        key: &RecordKey,
-        subkey: u32,
-    ) -> Result<Option<SignedValue>, Error> {
-        match self
-            .request(
-                node,
-                Query::Get {
-                    key: *key,
-                    subkey,
-                    want_descriptor: true,
-                },
-                None,
-            )
-            .await?
-        {
-            Response::Get { value, .. } => Ok(value.map(|v| *v)),
-            _ => Err(Error::Encoding),
-        }
-    }
-    async fn set(
-        &self,
-        node: &NodeId,
-        descriptor: &Descriptor,
-        subkey: u32,
-        value: &SignedValue,
-    ) -> Result<SetOutcome, Error> {
-        match self
-            .request(
-                node,
-                Query::Set {
-                    key: descriptor.key(),
-                    subkey,
-                    value: Box::new(value.clone()),
-                    descriptor: Some(descriptor.clone()),
-                },
-                Some(descriptor),
-            )
-            .await?
-        {
-            Response::Set {
-                accepted: true,
-                need_descriptor: false,
-                value,
-                ..
-            } => Ok(value.map_or(SetOutcome::Accepted, |v| SetOutcome::Newer(*v))),
-            Response::Set { .. } => Err(Error::Unavailable),
-            _ => Err(Error::Encoding),
-        }
-    }
-    async fn watch(&self, node: &NodeId, key: &RecordKey) -> Result<WatchId, Error> {
-        {
-            let watches = self.watches.lock().map_err(|_| Error::Unavailable)?;
-            if watches.len() >= self.limits.watches.get() {
-                return Err(Error::Unavailable);
-            }
-            if watches
-                .iter()
-                .any(|((n, _), w)| n == node && w.descriptor.key() == *key)
-            {
-                return Err(Error::Conflict);
-            }
-        }
-        let descriptor = Network::descriptor(self, node, key)
-            .await?
-            .ok_or(Error::UnknownRecord)?;
-        let schema = descriptor.validate_for(key, self.discovery.verifier())?;
-        let watch = ClientWatch {
-            descriptor,
-            subkeys: SubkeyRanges::from_iter(0..schema.subkey_count() as u32),
-            changed: SubkeyRanges::new(),
-            expires_ms: 0,
-            count: u32::MAX,
-            lost: false,
+            Ok(())
         };
-        let (id, expires_ms) = self.watch_request(node, &watch, 0, watch.count).await?;
-        let mut accepted = watch.clone();
-        accepted.expires_ms = expires_ms;
-        let retained = {
-            let mut watches = self.watches.lock().map_err(|_| Error::Unavailable)?;
-            if watches.len() >= self.limits.watches.get() || watches.contains_key(&(*node, id)) {
+        let expired = match select(Box::pin(work), self.clock.sleep_until(deadline)).await {
+            Either::Left((result, _)) => {
+                result?;
                 false
-            } else {
-                watches.insert((*node, id), accepted);
+            }
+            Either::Right((_, work)) => {
+                drop(work);
                 true
             }
         };
-        if !retained {
-            let _ = self.watch_request(node, &watch, id, 0).await;
-            return Err(Error::Unavailable);
-        }
-        Ok(WatchId(id))
+        Ok(TorDiscoveryReport {
+            peers: search.storage_peers(),
+            exhausted: !expired && search.exhausted(),
+            limited: search.limited(),
+        })
     }
-    async fn cancel_watch(&self, node: &NodeId, id: WatchId) -> Result<(), Error> {
-        let previous = self
-            .watches
-            .lock()
-            .map_err(|_| Error::Unavailable)?
-            .remove(&(*node, id.0));
-        if let Some(previous) = previous {
-            self.watch_request(node, &previous, id.0, 0).await?;
-        }
-        Ok(())
-    }
-    async fn changes(&self, node: &NodeId, id: WatchId) -> Result<Vec<Change>, Error> {
-        let previous = self
-            .watches
-            .lock()
-            .map_err(|_| Error::Unavailable)?
-            .get(&(*node, id.0))
-            .cloned()
-            .ok_or(Error::UnknownWatch)?;
-        if previous.lost || self.discovery.now_ms() >= previous.expires_ms {
-            return Err(Error::UnknownWatch);
-        }
-        let key = previous.descriptor.key();
-        let mut changes = Vec::new();
-        for subkey in &previous.changed {
-            let value = Network::get(self, node, &key, subkey)
-                .await?
-                .ok_or(Error::Unavailable)?;
-            changes.push(Change {
-                key,
-                subkey,
-                seq: value.seq,
-            });
-        }
-        if let Some(watch) = self
-            .watches
-            .lock()
-            .map_err(|_| Error::Unavailable)?
-            .get_mut(&(*node, id.0))
-            && watch.count == previous.count
+    /// Handle a bootstrap/routing FindNode request. Only the actual request signer
+    /// may introduce its self-signed endpoint. Returned peers remain original bytes.
+    /// The caller sends this result through the received one-use Tor reply port.
+    pub async fn answer_find(&self, request: Vec<u8>) -> Result<Vec<u8>, Error> {
+        let envelope = Envelope::verify(
+            request,
+            &self.identity.node_id(),
+            self.envelope_time.now_us()?,
+            self.envelope_window,
+            &self.verifier,
+        )?;
+        let received = self.identity.open(&envelope).await?;
+        if received.sender() != envelope.sender()
+            || received.operation().signer() != received.sender()
         {
-            watch.changed = &watch.changed - &previous.changed;
+            return Err(Error::BadSignature);
         }
-        Ok(changes)
-    }
-}
-
-/// Shared network port for Records' original replication engine. Cloning shares
-/// this node's transport owner, never another node's storage or watcher identity.
-pub struct TorRecordNetwork<I, V: Verifier, W>(Arc<TorRecords<I, V, W>>);
-impl<I, V: Verifier, W> Clone for TorRecordNetwork<I, V, W> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> TorRecords<I, V, W> {
-    /// Borrow this actual runtime through the original transport-independent port.
-    pub fn network(self: &Arc<Self>) -> TorRecordNetwork<I, V, W> {
-        TorRecordNetwork(self.clone())
-    }
-}
-impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecordNetwork<I, V, W> {
-    fn now_ms(&self) -> u64 {
-        Network::now_ms(&*self.0)
-    }
-    fn hints(&self, key: &RecordKey) -> Result<Vec<NodeId>, Error> {
-        self.0.hints(key)
-    }
-    async fn closest(&self, key: &RecordKey) -> Result<Vec<NodeId>, Error> {
-        self.0.closest(key).await
-    }
-    async fn descriptor(
-        &self,
-        node: &NodeId,
-        key: &RecordKey,
-    ) -> Result<Option<Descriptor>, Error> {
-        Network::descriptor(&*self.0, node, key).await
-    }
-    async fn get(
-        &self,
-        node: &NodeId,
-        key: &RecordKey,
-        subkey: u32,
-    ) -> Result<Option<SignedValue>, Error> {
-        self.0.get(node, key, subkey).await
-    }
-    async fn set(
-        &self,
-        node: &NodeId,
-        descriptor: &Descriptor,
-        subkey: u32,
-        value: &SignedValue,
-    ) -> Result<SetOutcome, Error> {
-        self.0.set(node, descriptor, subkey, value).await
-    }
-    async fn watch(&self, node: &NodeId, key: &RecordKey) -> Result<WatchId, Error> {
-        self.0.watch(node, key).await
-    }
-    async fn cancel_watch(&self, node: &NodeId, id: WatchId) -> Result<(), Error> {
-        self.0.cancel_watch(node, id).await
-    }
-    async fn changes(&self, node: &NodeId, id: WatchId) -> Result<Vec<Change>, Error> {
-        self.0.changes(node, id).await
+        let request = received.operation();
+        let sender = peer(received.sender_peer(&self.verifier)?)?;
+        let (_, target, caps) = find_query(request)?;
+        self.observe(sender)?;
+        self.mark_responsive(received.sender(), true)?;
+        let mut peers: Vec<_> = self
+            .routes
+            .lock()
+            .map_err(|_| Error::Unavailable)?
+            .values()
+            .map(|p| p.info.clone())
+            .chain(std::iter::once(self.own.info.clone()))
+            .filter(|p| {
+                caps.iter()
+                    .all(|cap| p.advertisement().capabilities.contains(cap))
+            })
+            .collect();
+        peers.sort_unstable_by_key(|p| {
+            std::array::from_fn::<_, 32, _>(|i| p.node_id()[i] ^ target[i])
+        });
+        peers.truncate(20);
+        let original = peers
+            .iter()
+            .map(|p| UnverifiedPeerInfoBytes::from_bytes(p.original().as_bytes().to_vec()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let answer = FindAnswer::new(request, &original)?;
+        let signed = self.identity.answer(&answer, request.signer()).await?;
+        if signed.operation() != answer.as_bytes() {
+            return Err(Error::Encoding);
+        }
+        let checked = SignedOperation::verify(
+            signed.as_bytes().to_vec(),
+            request.signer(),
+            &self.identity.node_id(),
+            &self.verifier,
+        )?;
+        self.identity
+            .seal(&checked, envelope.sender(), self.envelope_time.now_us()?)
+            .await
     }
 }
 "#;
+
     const FROZEN_ORIGINAL_SHA256: &str =
-        "437f7324c7882ae1b14dc4735d685992afd65a82bb180a15e1deee9bff085895";
+        "fc6c8db74254e6246bb6da69228e4afe2c17ff42575133bb3ab1b530d2c30041";
     /// Deterministic diagnostic digest of `transform(FROZEN_LIB)`, derived
     /// mechanically and pinned here and in the consumer manifest. Any table
     /// change must update both under review.
     const EXPECTED_DIAGNOSTIC_SHA256: &str =
-        "56d6de3757ac3aa976d96be74156148dd4e0ddc27adda1a332bb7633fdc4e4a2";
+        "f67ec53ed7f19e9bf7293eca631a24687b14fc2558109269edcbd901fade91d7";
 
     #[test]
     fn transform_applies_to_real_frozen_file() {
@@ -1904,7 +1203,7 @@ impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecordNetwor
         let manifest = root.path().join("work").join("cmsh");
         fs::create_dir_all(manifest.join("src")).unwrap();
         let lib = manifest.join("src/lib.rs");
-        let target = manifest.join("src/tor_records.rs");
+        let target = manifest.join("src/tor_discovery.rs");
         fs::write(&lib, b"crate cmsh;").unwrap();
         fs::write(&target, b"original bytes").unwrap();
         (manifest, lib, target)
@@ -1968,7 +1267,7 @@ impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecordNetwor
         let (manifest, lib, _) = unit_layout(&root);
         let outside = root.path().join("outside.rs");
         fs::write(&outside, b"escape").unwrap();
-        let link = manifest.join("src/tor_records.rs");
+        let link = manifest.join("src/tor_discovery.rs");
         fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         assert!(
@@ -1986,7 +1285,7 @@ impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecordNetwor
     #[test]
     fn restore_source_rewrites_and_verifies_bytes() {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("tor_records.rs");
+        let source = directory.path().join("tor_discovery.rs");
         fs::write(&source, b"diagnostic bytes").unwrap();
         let expected = sha256_hex(b"original bytes");
         assert!(restore_source(&source, b"original bytes", &expected).unwrap());
@@ -2011,7 +1310,7 @@ impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecordNetwor
 
     fn guarded_fixture() -> (tempfile::TempDir, PathBuf, Vec<u8>, String, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("tor_records.rs");
+        let source = directory.path().join("tor_discovery.rs");
         let original = b"canonical bytes".to_vec();
         fs::write(&source, &original).unwrap();
         let expected = sha256_hex(&original);
@@ -2106,7 +1405,7 @@ impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecordNetwor
     #[cfg(unix)]
     fn missing_lock_holder_refuses_second_transform() {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("tor_records.rs");
+        let source = directory.path().join("tor_discovery.rs");
         fs::write(&source, b"marker").unwrap();
         let _first = acquire_lock(&source).unwrap();
         assert!(acquire_lock(&source).is_err());
