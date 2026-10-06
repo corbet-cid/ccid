@@ -11,12 +11,24 @@ mod quality;
 #[derive(Parser)]
 #[command(about = "Shared checks and repository jobs for Crow or Argo", version)]
 struct Cli {
+    #[arg(long, global = true, env = "CCID_SUBMISSION_CONFIG")]
+    submission_config: Option<PathBuf>,
     #[command(subcommand)]
     action: Action,
 }
 
 #[derive(Subcommand)]
 enum Action {
+    /// Submit exact committed source and inspect Crow runs.
+    CrowCi {
+        #[command(subcommand)]
+        action: ccid::submission::Action,
+    },
+    /// Submit repository-owned jobs to Crow or Argo.
+    CiJob {
+        #[command(subcommand)]
+        action: ccid::submission::JobAction,
+    },
     /// Execute one exact archived job supplied by a scheduler adapter.
     ExecuteJob {
         #[arg(long)]
@@ -165,8 +177,26 @@ fn main() -> ExitCode {
             }
         };
     }
-    let cli = Cli::parse();
+    let mut arguments: Vec<_> = std::env::args_os().collect();
+    // Compatibility entry points may be symlinks to this same Rust executable.
+    if let Some(name) = arguments
+        .first()
+        .and_then(|p| std::path::Path::new(p).file_name())
+        .and_then(|p| p.to_str())
+        .map(str::to_owned)
+    {
+        if matches!(name.as_str(), "crow-ci" | "ci-job") {
+            arguments.insert(1, name.into());
+        }
+    }
+    let cli = Cli::parse_from(arguments);
     let outcome = match cli.action {
+        Action::CrowCi { action } => {
+            ccid::submission::run(action, cli.submission_config.as_deref())
+        }
+        Action::CiJob { action } => {
+            ccid::submission::run_job(action, cli.submission_config.as_deref())
+        }
         Action::ExecuteJob {
             request,
             expect_commit,

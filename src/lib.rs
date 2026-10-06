@@ -15,6 +15,7 @@ use std::{
 pub const SOURCE_REVISION: &str = env!("CCID_SOURCE_REVISION");
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub mod submission;
 pub type Environment = BTreeMap<OsString, OsString>;
 
 mod admission;
