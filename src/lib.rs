@@ -400,6 +400,10 @@ fn run_checks_inner(
         return Err(failure("CI_LINKER must be system or mold"));
     }
     let identity = cache::repository_identity(&root, &environment, archive)?;
+    // Caller-declared compiler environment remains semantic. Only our own
+    // storage routing may move to Cargo's CLI, outside rustc/sccache env keys.
+    let caller_target = value(&environment, "CARGO_TARGET_DIR").is_some()
+        || value(&environment, "CARGO_BUILD_TARGET_DIR").is_some();
     let target = cache::target_directory(&root, &identity, &environment)?;
     event(
         json!({"event":"plan", "project":slug,"checks":selected,"budget":resources,"linker_request":linker,"repository":identity,"target_directory":target,"source_commit":value(&environment,"CI_COMMIT_SHA"),"manifest_sha256":format!("{:x}",Sha256::digest(&bytes)),"tool_revision":SOURCE_REVISION}),
@@ -471,9 +475,6 @@ fn run_checks_inner(
     } else {
         Some(cache::scratch(&mut environment)?)
     };
-    if stable_cargo {
-        cache::remap_paths(&mut environment, &root)?;
-    }
     let freshness = if archive || stable_cargo {
         Some(cache::Freshness::prepare(&root, &target, &identity)?)
     } else {
@@ -520,10 +521,27 @@ fn run_checks_inner(
         match check.kind.as_str() {
             "cargo" => {
                 let (cargo, rustc) = cargo_prefix(check, &runner)?;
-                let commands = cargo_commands(check, &cargo, &resources.test_threads.to_string())?;
+                let mut commands =
+                    cargo_commands(check, &cargo, &resources.test_threads.to_string())?;
+                let mut cargo_environment = runner.environment.clone();
+                if !caller_target {
+                    cargo_environment.remove(std::ffi::OsStr::new("CARGO_TARGET_DIR"));
+                    // Every compilation action has --locked, before any rustc
+                    // argument delimiter. cargo fmt has no target-dir option.
+                    for command in &mut commands {
+                        if let Some(index) = command.iter().position(|arg| arg == "--locked") {
+                            command.splice(
+                                index..index,
+                                ["--target-dir".into(), target.to_string_lossy().into_owned()],
+                            );
+                        }
+                    }
+                }
+                let cargo_runner =
+                    Runner::until(runner.root.clone(), cargo_environment, runner.deadline)?;
                 runner.run(&rustc, false)?;
                 for command in commands {
-                    runner.run(&command, false)?;
+                    cargo_runner.run(&command, false)?;
                 }
             }
             "nix" => nix_check(check, &mut runner)?,

@@ -241,7 +241,17 @@ impl StableSource {
 
     /// The target lock also owns this fixed scratch location. A changing
     /// temporary path in compiler flags would invalidate Cargo fingerprints.
+    /// Checked programs create Unix sockets below TMPDIR and `sun_path` holds
+    /// fewer than 108 bytes, so the root stays short on Unix instead of living
+    /// inside the long, digest-named target cache.
     pub(crate) fn scratch(target: &Path, environment: &mut Environment) -> Result<Self> {
+        #[cfg(unix)]
+        if let Some(owned) = Self::short_scratch(target) {
+            for name in ["TMPDIR", "RUNNER_TEMP", "TEMP", "TMP"] {
+                set(environment, name, owned.path().as_os_str());
+            }
+            return Ok(owned);
+        }
         let root = target.join(".ccid/scratch-v1");
         let marker = target.join(".ccid/scratch-v1.owner");
         const OWNER: &[u8] = b"ccid-scratch-v1\n";
@@ -269,6 +279,28 @@ impl StableSource {
             set(environment, name, root.as_os_str());
         }
         Ok(Self(root))
+    }
+
+    /// Deterministic short scratch directory for one target cache. Only a
+    /// missing path or a real directory owned by this user is replaced; any
+    /// other state, or an unwritable /tmp, selects the target-local location.
+    #[cfg(unix)]
+    fn short_scratch(target: &Path) -> Option<Self> {
+        use std::os::unix::{
+            ffi::OsStrExt,
+            fs::{DirBuilderExt, MetadataExt},
+        };
+        let digest = format!("{:x}", Sha256::digest(target.as_os_str().as_bytes()));
+        let root = Path::new("/tmp").join(format!("ccid-{}", &digest[..16]));
+        match fs::symlink_metadata(&root) {
+            Ok(meta) if meta.is_dir() && meta.uid() == rustix::process::geteuid().as_raw() => {
+                fs::remove_dir_all(&root).ok()?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            _ => return None,
+        }
+        fs::DirBuilder::new().mode(0o700).create(&root).ok()?;
+        Some(Self(root))
     }
 }
 
@@ -324,39 +356,6 @@ fn copy_source(source: &Path, destination: &Path, cached: bool) -> Result<()> {
         } else {
             return Err(failure("Unexpected special file in verified source"));
         }
-    }
-    Ok(())
-}
-
-/// Preserve Cargo's encoded-flags precedence and append deterministic source
-/// and scratch mappings as individual arguments (paths may contain spaces).
-pub(crate) fn remap_paths(environment: &mut Environment, root: &Path) -> Result<()> {
-    let root = root
-        .to_str()
-        .ok_or_else(|| failure("Source remapping requires UTF-8 paths"))?;
-    let mut mappings = vec![format!("--remap-path-prefix={root}=/workspace")];
-    if let Some(scratch) = value(environment, "RUNNER_TEMP") {
-        mappings.push(format!("--remap-path-prefix={scratch}=/scratch"));
-    }
-    for (plain, encoded) in [
-        ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"),
-        ("RUSTDOCFLAGS", "CARGO_ENCODED_RUSTDOCFLAGS"),
-    ] {
-        let mut flags: Vec<String> = match environment.get(std::ffi::OsStr::new(encoded)) {
-            Some(value) => value
-                .to_string_lossy()
-                .split('\u{1f}')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect(),
-            None => value(environment, plain)
-                .unwrap_or_default()
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect(),
-        };
-        flags.extend(mappings.clone());
-        environment.insert(encoded.into(), flags.join("\u{1f}").into());
     }
     Ok(())
 }
@@ -596,32 +595,32 @@ impl Freshness {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     #[test]
-    fn remapping_preserves_encoded_flags_and_uses_stable_scratch() {
-        let target = tempfile::tempdir().unwrap();
-        std::fs::create_dir(target.path().join(".ccid")).unwrap();
+    fn stable_scratch_is_short_deterministic_and_disposable() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("targets").join("x".repeat(96));
+        std::fs::create_dir_all(target.join(".ccid")).unwrap();
         let mut first = super::Environment::new();
-        first.insert("RUSTFLAGS".into(), "ignored".into());
-        first.insert(
-            "CARGO_ENCODED_RUSTFLAGS".into(),
-            "--cfg\u{1f}value=\"has spaces\"".into(),
-        );
         first.insert("RUNNER_TEMP".into(), "/jobs/one".into());
         let mut second = first.clone();
         second.insert("RUNNER_TEMP".into(), "/jobs/two".into());
-        {
-            let _scratch = super::StableSource::scratch(target.path(), &mut first).unwrap();
-            super::remap_paths(&mut first, target.path()).unwrap();
-        }
-        {
-            let _scratch = super::StableSource::scratch(target.path(), &mut second).unwrap();
-            super::remap_paths(&mut second, target.path()).unwrap();
-        }
+        let path = {
+            let scratch = super::StableSource::scratch(&target, &mut first).unwrap();
+            assert!(scratch.path().is_dir());
+            assert!(scratch.path().as_os_str().len() < 32);
+            for name in ["TMPDIR", "RUNNER_TEMP", "TEMP", "TMP"] {
+                assert_eq!(
+                    super::value(&first, name).as_deref(),
+                    scratch.path().to_str()
+                );
+            }
+            scratch.path().to_owned()
+        };
+        assert!(!path.exists());
+        let _scratch = super::StableSource::scratch(&target, &mut second).unwrap();
+        assert_eq!(super::value(&second, "TMPDIR").as_deref(), path.to_str());
         assert_eq!(first, second);
-        let flags = super::value(&first, "CARGO_ENCODED_RUSTFLAGS").unwrap();
-        assert!(flags.starts_with("--cfg\u{1f}value=\"has spaces\"\u{1f}--remap-path-prefix="));
-        assert!(!flags.contains("/jobs/"));
-        assert!(!flags.contains("ignored"));
     }
     use super::*;
     #[cfg(unix)]
