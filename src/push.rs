@@ -2684,11 +2684,15 @@ mod tests {
         }
     }
 
+    /// Shared ancestry-probe shape for the fake policy: kept behind an
+    /// alias because the inline form trips `type_complexity`.
+    type AncestryFn = Arc<dyn Fn(&str, &str, &str, &str) -> bool + Send + Sync>;
+
     #[derive(Clone)]
     struct FakePolicy {
         runtime_identity: String,
         live_head: Option<String>,
-        ancestry: Arc<dyn Fn(&str, &str, &str, &str) -> bool + Send + Sync>,
+        ancestry: AncestryFn,
     }
 
     impl CoalescePolicy for FakePolicy {
@@ -3113,7 +3117,7 @@ mod tests {
             drop(_lock);
             Ok(output_for(body(spec.trigger.clone(), "pass", &[])))
         };
-        let outcome = run_push_with(&spec, &build, &policy, 0, 5).unwrap();
+        let outcome = run_push_with(&spec, build, &policy, 0, 5).unwrap();
         let frozen = match outcome {
             PushOutcome::Built { generation } => generation,
             PushOutcome::Attached { .. } => panic!("first run must build"),
@@ -3140,10 +3144,10 @@ mod tests {
             *calls.lock().unwrap() += 1;
             Ok(output_for(body(spec.trigger.clone(), "fail", &[])))
         };
-        assert!(run_push_with(&spec, &build, &policy, 0, 2).is_err());
+        assert!(run_push_with(&spec, build, &policy, 0, 2).is_err());
         assert_eq!(*calls.lock().unwrap(), 1);
         // Identical retrigger propagates the recorded failure, no rebuild.
-        assert!(run_push_with(&spec, &build, &policy, 0, 2).is_err());
+        assert!(run_push_with(&spec, build, &policy, 0, 2).is_err());
         assert_eq!(*calls.lock().unwrap(), 1, "no blind rerun of known failure");
         // A different trigger does not inherit the failure: it builds anew.
         let other = PushSpec {
@@ -3156,7 +3160,7 @@ mod tests {
         };
         // Live still names "a" here; the newer trigger cannot attach to the
         // failed head, so it builds its own head.
-        run_push_with(&other, &rebuild_other, &policy, 0, 2).unwrap();
+        run_push_with(&other, rebuild_other, &policy, 0, 2).unwrap();
         assert_eq!(*calls.lock().unwrap(), 2);
         // A crashed (missing) current receipt never counts: remove exactly
         // the recorded receipt, rebuild once.
@@ -3174,12 +3178,12 @@ mod tests {
             *calls.lock().unwrap() += 1;
             Ok(output_for(body(spec.trigger.clone(), "pass", &[])))
         };
-        run_push_with(&spec, &rebuild, &policy_b, 0, 2).unwrap();
+        run_push_with(&spec, rebuild, &policy_b, 0, 2).unwrap();
         assert_eq!(*calls.lock().unwrap(), 3);
         // A corrupt current receipt never attaches either: it forces a rebuild.
         let current = load_state(&dir).unwrap().receipt_generation;
         std::fs::write(receipt_path(&dir, current), "not json").unwrap();
-        run_push_with(&spec, &rebuild, &policy_b, 0, 2).unwrap();
+        run_push_with(&spec, rebuild, &policy_b, 0, 2).unwrap();
         assert_eq!(*calls.lock().unwrap(), 4);
     }
 
@@ -3197,7 +3201,7 @@ mod tests {
         std::fs::write(dir.join("state.json"), "{broken").unwrap();
         let policy = fake_policy_live(&"a".repeat(40));
         let build = |_: u64| Ok(output_for(body(spec.trigger.clone(), "pass", &[])));
-        assert!(run_push_with(&spec, &build, &policy, 0, 1).is_err());
+        assert!(run_push_with(&spec, build, &policy, 0, 1).is_err());
     }
 
     #[test]
@@ -3230,7 +3234,7 @@ mod tests {
             "released lock must hold again"
         );
         let build = |_: u64| Ok(output_for(body(spec.trigger.clone(), "pass", &[])));
-        run_push_with(&spec, &build, &policy, 0, 2).unwrap();
+        run_push_with(&spec, build, &policy, 0, 2).unwrap();
     }
 
     #[test]
@@ -3295,7 +3299,7 @@ mod tests {
             let build = |_: u64| -> Result<BuildOutput> {
                 panic!("waiter must attach, never build while the exec lock is held")
             };
-            run_push_with(&spec, &build, &policy, 0, 20)
+            run_push_with(&spec, build, &policy, 0, 20)
         });
         // The initial examination probes once; several more polls on the
         // unchanged receipt must not re-probe.
@@ -3473,7 +3477,7 @@ mod tests {
             *calls.lock().unwrap() += 1;
             Ok(output_for(body(spec.trigger.clone(), "pass", &[])))
         };
-        run_push_with(&spec, &build, &policy, 0, 2).unwrap();
+        run_push_with(&spec, build, &policy, 0, 2).unwrap();
         assert_eq!(*calls.lock().unwrap(), 1, "tool mismatch must build");
         assert!(
             !*probed.lock().unwrap(),
@@ -3498,7 +3502,7 @@ mod tests {
             *calls.lock().unwrap() += 1;
             Ok(output_for(body(spec.trigger.clone(), "pass", &[])))
         };
-        run_push_with(&spec, &build, &changed_runtime, 0, 2).unwrap();
+        run_push_with(&spec, build, &changed_runtime, 0, 2).unwrap();
         assert_eq!(*calls.lock().unwrap(), 1, "runtime change must rebuild");
     }
 
@@ -3544,7 +3548,7 @@ mod tests {
             Ok(output_for(body(spec.trigger.clone(), "pass", &[])))
         };
         // Exact stale retrigger rebuilds.
-        run_push_with(&spec, &build, &policy, 0, 2).unwrap();
+        run_push_with(&spec, build, &policy, 0, 2).unwrap();
         assert_eq!(*calls.lock().unwrap(), 1);
         // Ancestor of the stale head rebuilds too, despite proven ancestry.
         let ancestor = PushSpec {
@@ -3561,7 +3565,7 @@ mod tests {
             *calls.lock().unwrap() += 1;
             Ok(output_for(body(ancestor.trigger.clone(), "pass", &[])))
         };
-        run_push_with(&ancestor, &build_ancestor, &policy, 0, 2).unwrap();
+        run_push_with(&ancestor, build_ancestor, &policy, 0, 2).unwrap();
         assert_eq!(*calls.lock().unwrap(), 2, "stale ancestor must rebuild");
     }
 
@@ -3594,7 +3598,7 @@ mod tests {
         };
         let build = |_: u64| Ok(output_for(body(wrong_repo.trigger.clone(), "pass", &[])));
         assert!(validate_spec(&wrong_repo).is_ok());
-        run_push_with(&wrong_repo, &build, &policy, 0, 2).unwrap();
+        run_push_with(&wrong_repo, build, &policy, 0, 2).unwrap();
         assert!(
             !*probed.lock().unwrap(),
             "wrong source must not probe ancestry"
@@ -3613,7 +3617,7 @@ mod tests {
         };
         let build = |_: u64| Ok(output_for(body(wrong_branch.trigger.clone(), "pass", &[])));
         let policy = fake_policy_live(&"c".repeat(40));
-        run_push_with(&wrong_branch, &build, &policy, 0, 2).unwrap();
+        run_push_with(&wrong_branch, build, &policy, 0, 2).unwrap();
     }
 
     #[test]
@@ -3632,11 +3636,11 @@ mod tests {
             *calls.lock().unwrap() += 1;
             Ok(output_for(body(spec.trigger.clone(), "pass", &[])))
         };
-        run_push_with(&spec, &build, &stale_policy, 0, 2).unwrap();
+        run_push_with(&spec, build, &stale_policy, 0, 2).unwrap();
         assert_eq!(*calls.lock().unwrap(), 1, "stale consumer must rebuild");
         let fresh_policy = fake_policy_live(&"c".repeat(40));
         let build = |_: u64| -> Result<BuildOutput> { panic!("must attach") };
-        match run_push_with(&spec, &build, &fresh_policy, 0, 2).unwrap() {
+        match run_push_with(&spec, build, &fresh_policy, 0, 2).unwrap() {
             PushOutcome::Attached { generation } => assert_eq!(generation, 7),
             PushOutcome::Built { .. } => panic!("must attach, not build"),
         }
@@ -3647,14 +3651,14 @@ mod tests {
         let (_guard, spec) = setup(consumer_trigger(&"a".repeat(40)));
         let policy_a = fake_policy_live(&"a".repeat(40));
         let build = |_: u64| Ok(output_for(body(spec.trigger.clone(), "pass", &[])));
-        run_push_with(&spec, &build, &policy_a, 0, 1).unwrap();
+        run_push_with(&spec, build, &policy_a, 0, 1).unwrap();
         let other = PushSpec {
             trigger: consumer_trigger(&"b".repeat(40)),
             ..spec.clone()
         };
         let policy_b = fake_policy_live(&"b".repeat(40));
         let build_other = |_: u64| Ok(output_for(body(other.trigger.clone(), "pass", &[])));
-        run_push_with(&other, &build_other, &policy_b, 0, 1).unwrap();
+        run_push_with(&other, build_other, &policy_b, 0, 1).unwrap();
         let dir = namespace_dir(
             &spec.cache_root,
             &spec.consumer_url,
@@ -3677,7 +3681,7 @@ mod tests {
             ..spec.clone()
         };
         let started = Instant::now();
-        assert!(run_push_with(&tight, &build, &policy_a, 10, 30).is_err());
+        assert!(run_push_with(&tight, build, &policy_a, 10, 30).is_err());
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "overall deadline bounds debounce"
@@ -3927,7 +3931,7 @@ mod tests {
         store_test_receipt(&spec, &receipt);
         let policy = fake_policy_live(&"c".repeat(40));
         let build = |_: u64| -> Result<BuildOutput> { panic!("covered trigger must not build") };
-        match run_push_with(&spec, &build, &policy, 0, 1).unwrap() {
+        match run_push_with(&spec, build, &policy, 0, 1).unwrap() {
             PushOutcome::Attached { generation } => assert_eq!(generation, 7),
             PushOutcome::Built { .. } => panic!("must attach, not build"),
         }
@@ -3937,7 +3941,7 @@ mod tests {
         let build = |_: u64| -> Result<BuildOutput> {
             panic!("failed receipt must propagate, not rebuild")
         };
-        assert!(run_push_with(&spec, &build, &policy, 0, 1).is_err());
+        assert!(run_push_with(&spec, build, &policy, 0, 1).is_err());
     }
 }
 
