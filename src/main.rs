@@ -439,12 +439,9 @@ fn main() -> ExitCode {
             ) {
                 Ok(outcome) => {
                     eprintln!("ccid: push {outcome:?}");
-                    ExitCode::SUCCESS
+                    Ok(())
                 }
-                Err(error) => {
-                    eprintln!("ccid: {error}");
-                    ExitCode::from(2)
-                }
+                Err(error) => Err(error),
             }
         }
     };

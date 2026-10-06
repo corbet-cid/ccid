@@ -400,7 +400,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
                 PathBuf::from(filename),
                 substitute(
                     include_str!("render/push.yaml"),
-                    &config,
+                    config,
                     &[
                         ("CCID_PUSH_BRANCH", branch.as_str()),
                         ("CCID_PUSH_JOB", name.as_str()),
@@ -428,7 +428,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             PathBuf::from(filename),
             substitute(
                 include_str!("render/consumer.yaml"),
-                &config,
+                config,
                 &[
                     ("CCID_DEP_BRANCH", entry.branch.as_str()),
                     ("CCID_CONSUMER_URL", entry.consumer.as_str()),
@@ -533,7 +533,7 @@ fn substitute(template: &str, config: &Config, pairs: &[(&str, &str)]) -> String
         .replace("CCID_SECRET_BINARY", &config.tool_secret_binary)
         .replace("CCID_SECRET_SHA", &config.tool_secret_binary_sha256);
     for (key, value) in pairs {
-        rendered = rendered.replace(*key, *value);
+        rendered = rendered.replace(*key, value);
     }
     rendered
 }
