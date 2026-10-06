@@ -24,9 +24,11 @@ mod cached;
 mod checks;
 mod dependency;
 pub mod jobs;
+pub mod push;
 pub mod render;
 mod runner;
 mod source;
+pub mod tor;
 
 use budget::positive;
 pub use budget::{budget, Budget};
@@ -106,6 +108,15 @@ struct Manifest {
     jobs: BTreeMap<String, jobs::Job>,
     #[serde(default)]
     render: Option<render::Config>,
+    /// Dependency push fan-out declarations, keyed by local name. Each entry
+    /// renders a push adapter in THIS repository that runs the consumer's
+    /// repository-owned job with this event commit pinned as expected.
+    #[serde(default)]
+    push_consumer: BTreeMap<String, render::PushConsumer>,
+    /// Canonical forge URL of this repository, used to bake self push
+    /// adapters. Optional; push adapter rendering requires it.
+    #[serde(default)]
+    repository: Option<String>,
 }
 #[derive(Debug, Deserialize, serde::Serialize, Default)]
 #[serde(default, deny_unknown_fields)]

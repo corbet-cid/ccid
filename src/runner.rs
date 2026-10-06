@@ -24,6 +24,7 @@ pub struct Runner {
     pub(crate) nix_inventory: Option<(String, Vec<String>)>,
     events_to_stderr: bool,
     suppress_stderr: bool,
+    suppress_stdout: bool,
 }
 #[cfg(unix)]
 struct OwnedChild(Box<dyn ChildWrapper>);
@@ -53,6 +54,7 @@ impl Runner {
             nix_inventory: None,
             events_to_stderr: false,
             suppress_stderr: false,
+            suppress_stdout: false,
         })
     }
     /// Keep machine-readable stdout separate from process timing diagnostics.
@@ -65,6 +67,14 @@ impl Runner {
     /// Retain exit status and timing, without forwarding the untrusted stream.
     pub fn without_child_stderr(mut self) -> Self {
         self.suppress_stderr = true;
+        self
+    }
+
+    /// Never forward a subprocess's stdout (untrusted upstream logs or large
+    /// evidence dumps); exit status and timing are retained. An explicit
+    /// capture still takes precedence for trusted version probes.
+    pub fn without_child_stdout(mut self) -> Self {
+        self.suppress_stdout = true;
         self
     }
 
@@ -158,6 +168,8 @@ impl Runner {
             });
         command.stdout(if capture {
             Stdio::piped()
+        } else if self.suppress_stdout {
+            Stdio::null()
         } else {
             Stdio::inherit()
         });
@@ -248,5 +260,49 @@ impl Runner {
             return Ok(bytes);
         }
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suppressed_streams_discard_output_but_keep_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let runner = Runner::new(
+            directory.path().into(),
+            Environment::new(),
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .without_child_stdout()
+        .without_child_stderr();
+        runner
+            .run(&["echo".to_owned(), "upstream-noise".to_owned()], false)
+            .unwrap();
+        runner.run(&["false".to_owned()], false).unwrap_err();
+    }
+
+    #[test]
+    fn explicit_capture_takes_precedence_over_suppression() {
+        // Suppression without capture is unobservable by construction (the
+        // stream goes to /dev/null), so this locks the documented precedence:
+        // trusted probes still receive their output when capture is requested.
+        let directory = tempfile::tempdir().unwrap();
+        let runner = Runner::new(
+            directory.path().into(),
+            Environment::new(),
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .without_child_stdout()
+        .without_child_stderr();
+        assert_eq!(
+            runner
+                .run(&["echo".to_owned(), "probe-line".to_owned()], true)
+                .unwrap(),
+            "probe-line"
+        );
     }
 }
