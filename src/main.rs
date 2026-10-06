@@ -6,7 +6,6 @@ use std::{path::PathBuf, process::ExitCode, sync::atomic::Ordering};
 #[cfg(unix)]
 mod supervision;
 
-mod forge_cli;
 mod quality;
 
 #[derive(Parser)]
@@ -48,11 +47,6 @@ enum Action {
         job: String,
         #[arg(long, value_enum)]
         scheduler: Option<ccid::jobs::Scheduler>,
-    },
-    /// Repository placement, exact cloning and execution failover policy.
-    Forge {
-        #[command(subcommand)]
-        action: forge_cli::Action,
     },
     /// Deterministic organization and repository quality checks across forges.
     Quality {
@@ -182,15 +176,6 @@ fn main() -> ExitCode {
             println!("{}", serde_json::to_string(&plan)?);
             Ok(())
         }),
-        Action::Forge { action } => {
-            if let Err(error) =
-                ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
-            {
-                eprintln!("ccid: cannot install cancellation handler: {error}");
-                return ExitCode::from(2);
-            }
-            forge_cli::run(action)
-        }
         Action::Quality { action } => {
             if let Err(error) =
                 ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
@@ -274,9 +259,10 @@ fn main() -> ExitCode {
             plan,
             force,
         } => {
-            if let Err(error) =
-                ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
-            {
+            if let Err(error) = ctrlc::set_handler(|| {
+                ccid::INTERRUPTED.store(true, Ordering::SeqCst);
+                cmnp::INTERRUPTED.store(true, Ordering::SeqCst);
+            }) {
                 eprintln!("ccid: cannot install cancellation handler: {error}");
                 return ExitCode::from(2);
             }
