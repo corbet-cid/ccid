@@ -2005,7 +2005,8 @@ impl<I: TorNodeIdentity, V: Verifier, W: TorWatcher> Network for TorRecordNetwor
         )
         .unwrap();
         let text = fs::read_to_string(&receipt).unwrap();
-        assert!(text.contains("\"restored\": true"));
+        let receipt: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(receipt["restored"].as_bool(), Some(true));
     }
 
     fn guarded_fixture() -> (tempfile::TempDir, PathBuf, Vec<u8>, String, PathBuf) {
