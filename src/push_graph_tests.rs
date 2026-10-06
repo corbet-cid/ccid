@@ -459,6 +459,7 @@ fn job_environment_rejects_reserved_identity_keys() {
         "CI_REPOSITORY_URL",
         "RUNNER_TEMP",
         "CCID_STATUS_TOKEN",
+        "CFRG_STATUS_TOKEN",
         "CCID_TARGET_LOCK_HELD",
     ] {
         assert!(
