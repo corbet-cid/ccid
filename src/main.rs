@@ -59,6 +59,11 @@ enum Action {
         #[command(subcommand)]
         action: quality::Action,
     },
+    /// Tor milestone orchestration: private network, Records, Snowflake browser.
+    Tor {
+        #[command(subcommand)]
+        action: ccid::tor::Action,
+    },
     SourceRevision,
     VerifySource {
         #[arg(long)]
@@ -117,6 +122,36 @@ enum Action {
         #[arg(long)]
         plan: bool,
         #[arg(long, hide = true, conflicts_with = "plan")]
+        parent_watch: bool,
+    },
+    /// Execute a push-opted-in job through shared newest-head coalescing.
+    /// All push pipelines for one consumer share one admitted build per
+    /// burst; triggers attach with proof instead of rebuilding.
+    PushRun {
+        #[arg(long)]
+        consumer_url: String,
+        #[arg(long)]
+        consumer_branch: String,
+        #[arg(long)]
+        job: String,
+        /// self for consumer pushes, dep for dependency pushes.
+        #[arg(long, default_value = "self")]
+        trigger_kind: String,
+        /// Event commit (provenance; coverage proven against the receipt).
+        #[arg(long)]
+        trigger_sha: String,
+        /// Dependency package name; required for dep triggers.
+        #[arg(long, default_value = "")]
+        trigger_name: String,
+        /// Event branch (provenance only).
+        #[arg(long, default_value = "")]
+        trigger_branch: String,
+        /// Canonical event repository URL (provenance; required for dep,
+        /// defaults to the consumer for self).
+        #[arg(long, default_value = "")]
+        trigger_repo: String,
+        /// Supervision hook, set only by the supervisor's re-execution.
+        #[arg(long, hide = true)]
         parent_watch: bool,
     },
 }
@@ -205,6 +240,39 @@ fn main() -> ExitCode {
                     ExitCode::from(2)
                 }
             };
+        }
+        Action::Tor { action } => {
+            if let Err(error) =
+                ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
+            {
+                eprintln!("ccid: cannot install cancellation handler: {error}");
+                return ExitCode::from(2);
+            }
+            #[cfg(unix)]
+            {
+                let parent_watch = action.parent_watch();
+                if parent_watch {
+                    if let Err(error) = supervision::watch_parent() {
+                        eprintln!("ccid: cannot watch enclosing process: {error}");
+                        return ExitCode::from(2);
+                    }
+                } else {
+                    return match supervision::execute() {
+                        Ok(status) => ExitCode::from(status.code().unwrap_or(2) as u8),
+                        Err(error) => {
+                            eprintln!("ccid: cannot supervise Tor job: {error}");
+                            ExitCode::from(2)
+                        }
+                    };
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = action.parent_watch();
+                eprintln!("ccid tor: Tor milestone orchestration requires Unix");
+                return ExitCode::from(2);
+            }
+            ccid::tor::run(&action)
         }
         Action::SourceRevision => {
             println!("{}", ccid::SOURCE_REVISION);
@@ -315,6 +383,83 @@ fn main() -> ExitCode {
                 }
             }
             ccid::resolve_cargo(&repo, &output_dir, &checks, generate_lockfile, plan)
+        }
+        Action::PushRun {
+            consumer_url,
+            consumer_branch,
+            job,
+            trigger_kind,
+            trigger_sha,
+            trigger_name,
+            trigger_branch,
+            trigger_repo,
+            parent_watch,
+        } => {
+            if let Err(error) =
+                ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
+            {
+                eprintln!("ccid: cannot install cancellation handler: {error}");
+                return ExitCode::from(2);
+            }
+            // Long-running coalesced command: own cancellation and
+            // parent-death cleanup exactly like execute-job, so a dead Crow
+            // shell cannot orphan gate commands holding the shared locks.
+            #[cfg(unix)]
+            if parent_watch {
+                if let Err(error) = supervision::watch_parent() {
+                    eprintln!("ccid: cannot watch enclosing process: {error}");
+                    return ExitCode::from(2);
+                }
+            } else {
+                return match supervision::execute() {
+                    Ok(status) => ExitCode::from(status.code().unwrap_or(2) as u8),
+                    Err(error) => {
+                        eprintln!("ccid: cannot supervise push: {error}");
+                        return ExitCode::from(2);
+                    }
+                };
+            }
+            #[cfg(not(unix))]
+            if parent_watch {
+                eprintln!("ccid: parent liveness supervision requires Unix");
+                return ExitCode::from(2);
+            }
+            let environment: ccid::Environment = std::env::vars_os().collect();
+            let timeout = match ccid::budget(&environment) {
+                Ok(budget) => budget.timeout,
+                Err(error) => {
+                    eprintln!("ccid: {error}");
+                    return ExitCode::from(2);
+                }
+            };
+            let cache_root = std::env::var_os("CI_CACHE_ROOT")
+                .or_else(|| std::env::var_os("CARGO_HOME"))
+                .map(PathBuf::from);
+            let Some(cache_root) = cache_root else {
+                eprintln!("ccid: push coalescing requires CI_CACHE_ROOT or CARGO_HOME");
+                return ExitCode::from(2);
+            };
+            match ccid::push::push_run(
+                consumer_url,
+                consumer_branch,
+                job,
+                trigger_kind,
+                trigger_sha,
+                trigger_name,
+                trigger_branch,
+                trigger_repo,
+                cache_root,
+                timeout,
+            ) {
+                Ok(outcome) => {
+                    eprintln!("ccid: push {outcome:?}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("ccid: {error}");
+                    ExitCode::from(2)
+                }
+            }
         }
     };
     match outcome {
