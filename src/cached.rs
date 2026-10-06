@@ -49,8 +49,6 @@ pub(crate) fn run_cached_with_environment(
     let mut checks = BTreeMap::new();
     for name in &selected {
         let check = &parsed.checks[name];
-        crate::checks::validate_cached_contract(check)
-            .map_err(|error| failure(format!("Cached check {name} is not shareable: {error}")))?;
         checks.insert(
             name.clone(),
             cmnp::executor::Check {
@@ -82,7 +80,6 @@ pub(crate) fn run_cached_with_environment(
             },
         );
     }
-    cmnp::executor::validate_selection(&checks, &selected)?;
     let project = cmnp::executor::project_id(&parsed.project);
     let remote = cmnp::executor::remote_cache(&environment)?;
     let manifest_arg = manifest

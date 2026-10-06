@@ -9,6 +9,75 @@ use std::{
 use tempfile::TempDir;
 
 #[test]
+fn cached_is_optional_and_never_hides_product_failures() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let binary = std::path::PathBuf::from(env!("CARGO_BIN_EXE_ccid"));
+    let mut paths = vec![binary.parent().unwrap().to_path_buf()];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let path = std::env::join_paths(paths).unwrap();
+    // Exercise a complete pure contract without storage, and a legacy contract
+    // with storage. Neither case requires moon or fabricates a cache hit.
+    for (storage, pure, success) in [
+        (false, true, true),
+        (true, false, true),
+        (false, false, false),
+    ] {
+        let contract = if pure {
+            "cache_pure=true\ncache_inputs=['ccid.toml']\ncache_tools=[['git','--version']]\n"
+        } else {
+            ""
+        };
+        let action = if success {
+            "commands=[['git','config','--file','marker','check.ran','yes']]"
+        } else {
+            "commands=[['false']]"
+        };
+        fs::write(root.join("ccid.toml"), format!("schema=1\nproject='fallback'\n[checks.test]\nkind='commands'\n{contract}{action}\n")).unwrap();
+        let mut cmd = Command::new(&binary);
+        cmd.args(["cached", "--repo"])
+            .arg(root)
+            .args(["--manifest", "ccid.toml", "--check", "test"])
+            .env("PATH", &path)
+            .env(
+                "CI_REPOSITORY_URL",
+                "https://example.invalid/checks/fallback",
+            )
+            .env("CI_CACHE_ROOT", root.join("targets"))
+            .env("CARGO_TARGET_DIR", root.join("targets"))
+            .env("CI_TIMEOUT", "30")
+            .env_remove("CCID_RESULT_CACHE")
+            .env_remove("CCID_CACHE_CHILD")
+            .env_remove("CCID_CACHE_REPLAY_ONLY");
+        if storage {
+            cmd.env("CCID_RESULT_CACHE", root);
+        }
+        let output = cmd.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("cache-bypass"));
+        if success {
+            assert!(fs::read_to_string(root.join(".ccid/results/test.jsonl"))
+                .unwrap()
+                .contains("check-success"));
+            assert!(fs::read_to_string(root.join("marker"))
+                .unwrap()
+                .contains("ran = yes"));
+            let metrics: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join(".ccid/cache-metrics.json")).unwrap())
+                    .unwrap();
+            assert_eq!(metrics["result"]["requests"], 0);
+            assert_eq!(metrics["bypassed"].as_array().unwrap().len(), 1);
+        }
+    }
+}
+
+#[test]
 fn source_revision_is_embedded_without_a_repository() {
     let output = Command::new(env!("CARGO_BIN_EXE_ccid"))
         .arg("source-revision")
