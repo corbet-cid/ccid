@@ -125,6 +125,9 @@ pub struct Store {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PrimarySource {
+    /// Declared placement file, read by cfrg once instead of HTTP lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_file: Option<String>,
     pub pointer_base: String,
     pub identities: BTreeMap<String, String>,
     #[serde(default = "default_lookup_timeout")]
@@ -518,6 +521,14 @@ pub fn validate_runner_config(config: &RunnerConfig) -> Result<()> {
 /// bare-origin pointer base, exact bare-origin identity keys with opaque
 /// identity values, bounded timeout).
 fn validate_primary_source(source: &PrimarySource) -> Result<()> {
+    if let Some(path) = &source.placement_file {
+        if !Path::new(path).is_absolute()
+            || path.contains(['\0', '\n', '\r'])
+            || path.split('/').any(|part| part == "..")
+        {
+            return Err(failure("Placement file must be an absolute path"));
+        }
+    }
     if !valid_bare_origin(&source.pointer_base, false) {
         return Err(failure("Primary source must be a bare origin"));
     }
@@ -2072,6 +2083,7 @@ mod primary_source_tests {
 
     fn source() -> PrimarySource {
         PrimarySource {
+            placement_file: Some("/etc/runner/placement.json".into()),
             pointer_base: "https://pointer.example".into(),
             identities: BTreeMap::from([("https://forge.example".into(), "forgejo".into())]),
             timeout_secs: 10,
@@ -2084,6 +2096,8 @@ mod primary_source_tests {
         config.primary_source = Some(source());
         assert!(validate_runner_config(&config).is_ok());
         for mutate in [
+            |s: &mut PrimarySource| s.placement_file = Some("relative.json".into()),
+            |s: &mut PrimarySource| s.placement_file = Some("/etc/../private".into()),
             |s: &mut PrimarySource| s.pointer_base = "https://pointer.example/prefix".into(),
             |s: &mut PrimarySource| s.identities.clear(),
             |s: &mut PrimarySource| {
@@ -2121,6 +2135,10 @@ mod primary_source_tests {
         assert_eq!(
             value["primary_source"]["identities"]["https://forge.example"],
             "forgejo"
+        );
+        assert_eq!(
+            value["primary_source"]["placement_file"],
+            "/etc/runner/placement.json"
         );
         // Absent feed serializes to nothing (backcompat).
         let mut bare = test_config();
