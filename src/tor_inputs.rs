@@ -251,6 +251,30 @@ sha256 = "68df7a29ae0bed669df63b4c8d8658240cb951618860623212fdbd8993923114"
 [live-tools.python]
 path = "/workspaces/component-tools/cmsg/python-20a55ac8159811bbac7c8370ae7f28fc075f2153/bin/python"
 sha256 = "f5cce9ecc914b0c2eee78056c1c816aa02ae4c73c0aaf958eb5e0bb9281f34ea"
+[live-tools.rustc]
+path = "/nix/store/vy0xilifxb02fwal0wihsrwc8s69rlyk-rustc-wrapper-1.98.1/bin/rustc"
+sha256 = "8f40f2f394f7ff470ccfac7da1f03661756216a77fdb3181bfb81bbf01e07cdb"
+[live-tools.cargo]
+path = "/nix/store/w20n3pmhhd1av9llykxa3gd21c9jsm8l-cargo-1.98.1/bin/cargo"
+sha256 = "88a18d3c29700de42bc2a2f5590e919e36557964cf4e1dd2f60f892376f6c102"
+[live-tools.rustdoc]
+path = "/nix/store/vy0xilifxb02fwal0wihsrwc8s69rlyk-rustc-wrapper-1.98.1/bin/rustdoc"
+sha256 = "999b2098594b2b8d91db71e11bfbb2c0bd8cf24acac792308ac08c267f813bcb"
+[live-tools.rustfmt]
+path = "/nix/store/jpcqlbhkwxwvq507mq0hkacpxbxcdwjj-rustfmt-1.98.1/bin/rustfmt"
+sha256 = "9fc2eff4ce7281f2a77c0164ab8e8b55fcef98f3c8ba96d4e4179ba8f3abc7fd"
+[live-tools.cargo-clippy]
+path = "/nix/store/n88pdyarvdpyw98fahxcb03733nsclhq-clippy-1.98.1/bin/cargo-clippy"
+sha256 = "4396915d16e54967584fb1730560ca5c92bbea823398a8749c1e05109ad8e39c"
+[live-tools.clippy-driver]
+path = "/nix/store/n88pdyarvdpyw98fahxcb03733nsclhq-clippy-1.98.1/bin/clippy-driver"
+sha256 = "0616995d944bbdd0b2bc9aee822d4a0cb07b05f8eabf01367a67fc94de05089f"
+[live-tools.wasm-libcore]
+path = "/nix/store/xvp6nfxayb07si2jaggqwvx3iykw89g2-rustc-1.98.1/lib/rustlib/wasm32-unknown-unknown/lib/libcore-e6b063672db74229.rlib"
+sha256 = "e917c01a724e0622601835f8a6f1c8bff102f5f40a61152ce95a099a4bc7ba61"
+[live-tools.wasm-libstd]
+path = "/nix/store/xvp6nfxayb07si2jaggqwvx3iykw89g2-rustc-1.98.1/lib/rustlib/wasm32-unknown-unknown/lib/libstd-0d5130a4ee2cc288.rlib"
+sha256 = "61ce675fface73dbbf431603767a3aa7f05bf9d6995d0555855fa5e4ead667e6"
 [live-drivers.harness]
 file = ".ci/v01-tor-live.py"
 sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"
@@ -273,7 +297,7 @@ sha256 = "64796854b4d018d455b06d3ac67db5cc78a3058440c758a1161fb52d7f7e7e0a"
         let parsed = manifest(FIXTURE);
         assert_eq!(parsed.schema, 1);
         assert_eq!(parsed.live_inputs.len(), 3);
-        assert_eq!(parsed.live_tools.len(), 4);
+        assert_eq!(parsed.live_tools.len(), 12);
         assert_eq!(parsed.live_drivers.len(), 3);
         assert!(parsed.live_inputs["v01-source-bundle"]
             .digest_variable
