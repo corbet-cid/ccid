@@ -1873,7 +1873,7 @@ fn stage_consumer(dir: &Path, spec: &PushSpec, deadline: Instant) -> Result<Plan
         failure("Push jobs require a manifest refresh scope for the newest graph")
     })?;
     let mut gates: crate::Environment = std::env::vars_os().collect();
-    gates.retain(|key, _| !key.to_string_lossy().starts_with("CCID_STATUS_"));
+    gates.retain(|key, _| !crate::jobs::is_reporter_status_key(&key.to_string_lossy()));
     gates.insert("CI_COMMIT_SHA".into(), head.clone().into());
     gates.insert(
         "CI_COMMIT_BRANCH".into(),

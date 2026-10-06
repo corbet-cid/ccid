@@ -12,7 +12,8 @@ repository = "https://github.com/corbet-libs/ccid"
 windows-experimental = []
 
 [dependencies]
-cqlt = { git = "https://github.com/corbet-foss/cqlt", rev = "e6275c5373954ca7f3b4fc680ffaccc149dc32f6" }
+cqlt = { git = "https://git.corbet.ch/corbet-foss/cqlt", rev = "e6275c5373954ca7f3b4fc680ffaccc149dc32f6" }
+cmnp = { git = "https://git.corbet.ch/corbet-foss/cmnp.git", rev = "45f79bbdc67f57b85dc91ffe6ad7210f4be1e680" }
 clap = { version = "4.5", features = ["derive", "env"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 process-wrap = { version = "10.0", default-features = false, features = ["std", "process-group", "job-object"] }

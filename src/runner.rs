@@ -141,22 +141,6 @@ impl Runner {
                 .to_owned(),
         )
     }
-    /// Read a bounded prefix and terminate the producer's owned group.
-    /// Only for format sniffing after object integrity was independently checked.
-    pub(crate) fn run_prefix(&self, argv: &[String], length: usize) -> Result<Vec<u8>> {
-        validate_command(argv)?;
-        if length == 0 || length > 16 * 1024 * 1024 || Instant::now() >= self.deadline {
-            return Err(failure("Invalid prefix bound or expired deadline"));
-        }
-        #[cfg(unix)]
-        {
-            self.run_unix_bytes(argv, true, None, Some(length))
-        }
-        #[cfg(not(unix))]
-        {
-            Err(failure("Bounded prefix inspection requires Unix"))
-        }
-    }
     #[cfg(unix)]
     fn run_unix_bytes(
         &self,
