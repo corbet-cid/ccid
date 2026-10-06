@@ -187,14 +187,23 @@ fn save(path: &Path, value: &Value) -> Result<()> {
     File::open(parent)?.sync_all()?;
     Ok(())
 }
-fn lock(path: &Path) -> Result<File> {
+struct RequestLock(File);
+impl Drop for RequestLock {
+    fn drop(&mut self) {
+        // A concurrently spawning child can briefly inherit this description
+        // before exec closes it. Release ownership explicitly at scope exit.
+        #[cfg(unix)]
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
+fn lock(path: &Path) -> Result<RequestLock> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     #[cfg(unix)]
     rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| "Another submission owns this request")?;
     #[cfg(not(unix))]
     return Err("Submission locking requires Unix".into());
-    Ok(file)
+    Ok(RequestLock(file))
 }
 fn output(argv: &[String], cwd: Option<&Path>, input: Option<&[u8]>) -> Result<Vec<u8>> {
     let (program, args) = argv.split_first().ok_or("Empty command")?;

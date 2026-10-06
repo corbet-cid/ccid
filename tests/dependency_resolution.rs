@@ -76,6 +76,7 @@ mod linux {
             .env("SOURCE_SHA256", ccid::sha256_file(&archive).unwrap())
             .env("CARGO_HOME", root.join("cargo-home"))
             .env("CARGO_TARGET_DIR", root.join("target"))
+            .env("CCID_RESULT_CACHE", root.join("results"))
             .env("TMPDIR", root)
             .env("CI_JOBS", "1")
             .env("CI_TEST_THREADS", "1")
@@ -91,6 +92,20 @@ mod linux {
             command.arg("--generate-lockfile");
         }
         let output = command.output().unwrap();
+        if !output.status.success() {
+            eprintln!(
+                "resolver stdout: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            for entry in fs::read_dir(&output_dir).into_iter().flatten().flatten() {
+                if entry.path().extension().is_some_and(|e| e == "json") {
+                    eprintln!(
+                        "resolver receipt: {}",
+                        fs::read_to_string(entry.path()).unwrap_or_default()
+                    );
+                }
+            }
+        }
         assert_eq!(
             fs::read_to_string(source.join("Cargo.lock"))
                 .ok()

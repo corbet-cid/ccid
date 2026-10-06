@@ -64,27 +64,17 @@ test "$("$ci_binary" source-revision)" = "$CI_COMMIT_SHA"
 ci_stage=$(mktemp -d "$ci_revision_root/.$ci_target.XXXXXX")
 trap 'rm -rf -- "$ci_stage"' EXIT
 install -m 0755 "$ci_binary" "$ci_stage/ccid"
-for ci_tool in ccid-status ccid-pr-bridge; do
-  install -m 0755 "$CARGO_TARGET_DIR/$ci_target/release/$ci_tool" "$ci_stage/$ci_tool"
-done
 python3 - "$CI_COMMIT_SHA" "$ci_target" "$ci_stage" <<'PY'
 import hashlib,json,pathlib,sys
 revision,target,directory=sys.argv[1:]
 root=pathlib.Path(directory)
 digest=hashlib.file_digest((root/'ccid').open('rb'),'sha256').hexdigest()
 (root/'receipt.json').write_text(json.dumps({'source_revision':revision,'target':target,'binary_sha256':digest},sort_keys=True)+'\n')
-for name in ('ccid-status', 'ccid-pr-bridge'):
-    digest=hashlib.file_digest((root/name).open('rb'),'sha256').hexdigest()
-    (root/(name+'.sha256')).write_text(digest+'  '+name+'\n')
 PY
 ci_destination="$ci_revision_root/$ci_target"
 if [[ -e $ci_destination ]]; then
   cmp "$ci_stage/ccid" "$ci_destination/ccid"
   cmp "$ci_stage/receipt.json" "$ci_destination/receipt.json"
-  for ci_tool in ccid-status ccid-pr-bridge; do
-    cmp "$ci_stage/$ci_tool" "$ci_destination/$ci_tool"
-    cmp "$ci_stage/$ci_tool.sha256" "$ci_destination/$ci_tool.sha256"
-  done
 else
   mv -T -n "$ci_stage" "$ci_destination"
 fi

@@ -549,8 +549,10 @@ fn state_write_and_lock_are_atomic() {
         serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["phase"],
         "gha-intent"
     );
+    let inherited = guard.0.try_clone().unwrap();
     drop(guard);
     assert!(lock(&d.path().join("request.lock")).is_ok());
+    drop(inherited);
 }
 
 #[test]

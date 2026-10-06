@@ -73,6 +73,11 @@ fn field(header: &mut [u8; 512], start: usize, width: usize, value: &str) {
     }
 }
 fn octal(header: &mut [u8; 512], start: usize, width: usize, value: u64) -> Result<()> {
+    let value = if value >= 1u64 << (3 * (width - 1)) {
+        0 // The original value is retained in a PAX numeric extension.
+    } else {
+        value
+    };
     let value = format!("{value:0width$o}", width = width - 1);
     if value.len() >= width {
         return Err("Archive numeric field requires unsupported extended encoding".into());
@@ -158,9 +163,36 @@ fn append_header(output: &mut File, header: &mut Header) -> Result<()> {
             header.pax.push((key.into(), value.clone()));
         }
     }
+    for (key, value, width) in [
+        ("uid", header.uid, 8),
+        ("gid", header.gid, 8),
+        ("size", header.size, 12),
+        ("mtime", header.mtime, 12),
+    ] {
+        if value >= 1u64 << (3 * (width - 1)) && !header.pax.iter().any(|(k, _)| k == key) {
+            header.pax.push((key.into(), value.to_string()));
+        }
+    }
     pax(output, &header.pax, b'x')?;
     output.write_all(&header.bytes()?)?;
     Ok(())
+}
+
+#[test]
+fn large_lfs_sizes_use_python_pax_numeric_encoding() {
+    let mut output = tempfile::tempfile().unwrap();
+    let mut header = Header {
+        name: "large".into(),
+        size: 1 << 33,
+        kind: b'0',
+        ..Default::default()
+    };
+    append_header(&mut output, &mut header).unwrap();
+    output.rewind().unwrap();
+    let mut bytes = Vec::new();
+    output.read_to_end(&mut bytes).unwrap();
+    assert_eq!(&bytes[512..531], b"19 size=8589934592\n");
+    assert_eq!(&bytes[1024 + 124..1024 + 136], b"00000000000\0");
 }
 
 struct Closure<'a> {
