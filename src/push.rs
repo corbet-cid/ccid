@@ -1252,6 +1252,9 @@ fn is_ancestor_in(dir: &Path, old: &str, new: &str) -> bool {
     if !valid_sha(old) || !valid_sha(new) {
         return false;
     }
+    // `rev-list A..B` counts commits reachable from B but not A: empty
+    // exactly when old is ancestor-or-equal of new. The range direction
+    // matters — `old..new` is nonempty for genuine ancestry.
     let output = std::process::Command::new("git")
         .args(["rev-list", "--count", &format!("{new}..{old}")])
         .current_dir(dir)
@@ -3428,9 +3431,38 @@ mod tests {
 
     #[test]
     fn ancestry_proves_superseded_commits_offline() {
-        let (_repo, old, new) = fixture_repo();
+        let (repo, old, new) = fixture_repo();
         let dir = tempfile::tempdir().unwrap();
+        // Same commit is trivially covered; real ancestry, rejection of
+        // the reverse direction, divergent commits, and missing objects
+        // pin the range direction (`new..old` must be empty).
         assert!(is_ancestor_in(dir.path(), &new, &new));
+        assert!(is_ancestor_in(repo.path(), &old, &new));
+        assert!(!is_ancestor_in(repo.path(), &new, &old));
+        // Divergent commit branched from old: shares history with old
+        // but is neither ancestor nor descendant of new.
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["checkout", "-q", "-b", "side", &old]);
+        std::fs::write(repo.path().join("c.txt"), "c\n").unwrap();
+        git(&["add", "--all"]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-qm", "three"]);
+        let side = git(&["rev-parse", "HEAD"]);
+        assert_ne!(side, new);
+        assert!(is_ancestor_in(repo.path(), &old, &side));
+        assert!(!is_ancestor_in(repo.path(), &side, &new));
+        assert!(!is_ancestor_in(repo.path(), &new, &side));
+        // Missing objects fail closed, never attach.
+        assert!(!is_ancestor_in(repo.path(), &"f".repeat(40), &new));
+        assert!(!is_ancestor_in(repo.path(), &old, &"f".repeat(40)));
+        assert!(!is_ancestor_in(repo.path(), "short", &new));
         let (_repo2, old2, new2) = fixture_repo();
         assert_ne!(old2, new2);
         let _ = (old, new);
@@ -3626,16 +3658,17 @@ mod tests {
         let (_guard, spec) = setup(dep_trigger("deplib", &dep_sha));
         let receipt = receipt_for(spec.trigger.clone(), "pass", &[("deplib", dep_sha)]);
         store_test_receipt(&spec, &receipt);
-        // Fresh live head first: the stored receipt is still newest, so a
-        // matching head attaches to it instead of rebuilding.
+        // Fresh live head attaches to the proven receipt without building.
+        // This runs first: a rebuild would record a newer receipt that a
+        // later attach could never see past.
         let fresh_policy = fake_policy_live(&"c".repeat(40));
         let build = |_: u64| -> Result<BuildOutput> { panic!("must attach") };
         match run_push_with(&spec, build, &fresh_policy, 0, 2).unwrap() {
             PushOutcome::Attached { generation } => assert_eq!(generation, 7),
             PushOutcome::Built { .. } => panic!("must attach, not build"),
         }
-        // Stale live head after that: the receipt no longer proves the
-        // consumer configuration, so the same trigger rebuilds.
+        // Stale live head forces a rebuild even with exact dep proof: the
+        // live consumer commit pins the whole configuration.
         let stale_policy = FakePolicy {
             runtime_identity: "test-runtime-v1".into(),
             live_head: Some("e".repeat(40)),
@@ -3727,6 +3760,62 @@ mod tests {
         assert!(require_runtime_unchanged("r1", "r2").is_err());
         assert!(require_runtime_unchanged("", "r1").is_err());
         assert!(require_runtime_unchanged("r1", "").is_err());
+    }
+
+    #[test]
+    fn later_trigger_never_attaches_to_earlier_receipt() {
+        // End-to-end guard for the ancestry direction: a trigger NEWER
+        // than the receipt commit must rebuild, never attach — with the
+        // inverted range the real callback below would wrongly report
+        // coverage (false success). Exact identity, source, and live-head
+        // gates all pass here; only ancestry refuses.
+        struct GitAncestryPolicy {
+            repo: PathBuf,
+            live_head: String,
+        }
+        impl CoalescePolicy for GitAncestryPolicy {
+            fn current_proof(&self, spec: &PushSpec, _deadline: Instant) -> Result<LiveProof> {
+                Ok(LiveProof {
+                    identity: BuildIdentity {
+                        tool_revision: crate::SOURCE_REVISION.into(),
+                        runtime_identity: "test-runtime-v1".into(),
+                        config_identity: config_for(&self.live_head, &spec.job),
+                    },
+                    live_head: self.live_head.clone(),
+                })
+            }
+            fn is_ancestor(
+                &self,
+                _url: &str,
+                _branch: &str,
+                old: &str,
+                new: &str,
+                _deadline: Instant,
+            ) -> bool {
+                is_ancestor_in(&self.repo, old, new)
+            }
+        }
+        let (repo, old, new) = fixture_repo();
+        // Receipt proves the earlier commit; the event names its child.
+        let (_guard, spec) = setup(consumer_trigger(&new));
+        let receipt = receipt_for(consumer_trigger(&old), "pass", &[]);
+        store_test_receipt(&spec, &receipt);
+        let policy = GitAncestryPolicy {
+            repo: repo.path().into(),
+            live_head: old.clone(),
+        };
+        let calls = Arc::new(Mutex::new(0u32));
+        let build = |_: u64| {
+            *calls.lock().unwrap() += 1;
+            Ok(output_for(body(spec.trigger.clone(), "pass", &[])))
+        };
+        match run_push_with(&spec, build, &policy, 0, 5).unwrap() {
+            PushOutcome::Built { .. } => {}
+            PushOutcome::Attached { .. } => {
+                panic!("later trigger must rebuild, never attach to an earlier receipt")
+            }
+        }
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 
     #[test]
