@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "generator": "ccid render v1",
-  "tool_revision": "81ebac8e86e20bc93b69d5e912bbcb0c0d036d58",
-  "manifest_sha256": "5381ced1a2fc1c85a243fa7bd57a47e5d6588323c8d3bda3b6a7e1fe3d6ef5c9",
+  "tool_revision": "3caf43366cf4dd751e5283c246e4b9d6f0e3f8cd",
+  "manifest_sha256": "a5dae62e016dd3f9967dda55a3ffc0067c494ca4d920512ba01b951e08e692a5",
   "jobs": {
     "cache-acceptance": {
       "job": "cache-acceptance",
@@ -21,6 +21,18 @@
       "scheduler": "crow",
       "checks": [
         "compile"
+      ],
+      "workflow": "repository-jobs",
+      "command": [
+        "bash",
+        ".ci/run-job.sh"
+      ]
+    },
+    "native-compile-cache": {
+      "job": "native-compile-cache",
+      "scheduler": "crow",
+      "checks": [
+        "native-compile-cache"
       ],
       "workflow": "repository-jobs",
       "command": [

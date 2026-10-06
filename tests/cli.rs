@@ -13,9 +13,9 @@ fn cached_is_optional_and_never_hides_product_failures() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let binary = std::path::PathBuf::from(env!("CARGO_BIN_EXE_ccid"));
-    let mut paths = vec![binary.parent().unwrap().to_path_buf()];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    let path = std::env::join_paths(paths).unwrap();
+    // Invoke by absolute path like current execute-job adapters, without
+    // manually putting the tested runtime on PATH.
+    let path = std::env::var_os("PATH").unwrap();
     // Exercise a complete pure contract without storage, and a legacy contract
     // with storage. Neither case requires moon or fabricates a cache hit.
     for (storage, pure, success) in [

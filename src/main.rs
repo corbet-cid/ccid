@@ -151,6 +151,18 @@ enum Action {
 }
 
 fn main() -> ExitCode {
+    if let Some(result) = ccid::typescript_cache::dispatch() {
+        return result.unwrap_or_else(|error| {
+            eprintln!("ccid: TypeScript execution failed: {error}");
+            ExitCode::from(2)
+        });
+    }
+    if let Some(result) = ccid::compile_cache::dispatch() {
+        return result.unwrap_or_else(|error| {
+            eprintln!("ccid: compiler execution failed: {error}");
+            ExitCode::from(2)
+        });
+    }
     // Hidden compiler-wrapper diagnostic mode for one frozen library
     // build: Cargo invokes this binary as RUSTC_WORKSPACE_WRAPPER with
     // the real compiler first (workspace members only; artifacts cache

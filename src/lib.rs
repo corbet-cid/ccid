@@ -22,6 +22,7 @@ mod budget;
 mod cache;
 mod cached;
 mod checks;
+pub mod compile_cache;
 mod dependency;
 pub mod jobs;
 pub mod push;
@@ -32,6 +33,7 @@ pub mod rustc_diag;
 mod source;
 pub mod tor;
 pub(crate) mod tor_inputs;
+pub mod typescript_cache;
 
 use budget::positive;
 pub use budget::{budget, Budget};
@@ -478,6 +480,8 @@ fn run_checks_inner(
         cache::Freshness::invalidate(&target)?;
         None
     };
+    compile_cache::prepare_go(&mut environment);
+    let _compiler_cache = compile_cache::CompilerCache::prepare(&root, &mut environment);
     let mut runner = {
         // Resolver pre-step at the common verified-source execution point
         // (covers run_checks, run_archive_checks and Crow/Argo adapters).
@@ -523,9 +527,14 @@ fn run_checks_inner(
             }
             "nix" => nix_check(check, &mut runner)?,
             "javascript" => {
-                for command in javascript_commands(check)? {
+                let mut typescript = None;
+                for (index, command) in javascript_commands(check)?.into_iter().enumerate() {
+                    if index == usize::from(check.install.unwrap_or(true)) {
+                        typescript = typescript_cache::TypeScriptCache::prepare(&mut runner);
+                    }
                     runner.run(&command, false)?;
                 }
+                drop(typescript);
             }
             "commands" => {
                 runner.nix_inventory = None;
