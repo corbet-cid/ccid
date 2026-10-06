@@ -730,6 +730,10 @@ fn private_network(repo: &Path, env: &Environment) -> Result<()> {
     let global = global_deadline(env)?;
     let mut base = env.clone();
     base.insert(
+        OsString::from("HOME"),
+        OsString::from(stable_tool_home(env)?),
+    );
+    base.insert(
         OsString::from("RUNNER_TEMP"),
         scratch.path().as_os_str().to_owned(),
     );
@@ -803,6 +807,7 @@ fn private_network_inner(
         "toolchain": {"tor": tor_version, "rustc": rustc_version, "cargo": cargo_version},
         "probe": {"example": "private_network", "source": "ctrn-main"},
         "evidence": {"artifact": artifact.to_string_lossy(), "kept": kept, "coverage": coverage},
+        "tool_home": home,
         "source_archive_sha256": optional(base, "SOURCE_SHA256"),
         "adapter": {"job": "private-network", "command": "ccid tor private-network"},
     }))
@@ -862,6 +867,10 @@ fn records(repo: &Path, env: &Environment) -> Result<()> {
         .map_err(|error| failure(format!("Tor job cannot create scratch: {error}")))?;
     let global = global_deadline(env)?;
     let mut base = env.clone();
+    base.insert(
+        OsString::from("HOME"),
+        OsString::from(stable_tool_home(env)?),
+    );
     base.insert(
         OsString::from("RUNNER_TEMP"),
         scratch.path().as_os_str().to_owned(),
@@ -1091,6 +1100,7 @@ fn records_inner(
         "toolchain": {"tor": tor_version, "rustc": rustc_version, "cargo": cargo_version},
         "probe": {"example": "tor_records", "features": ["tor"], "source": "cmsh-main"},
         "evidence": {"artifact": artifact.to_string_lossy(), "kept": kept},
+        "tool_home": home,
         "source_archive_sha256": optional(base, "SOURCE_SHA256"),
         "adapter": {"job": "records", "command": "ccid tor records"},
         "note": "Live cdht Records evidence is owned by this cmsh probe at the pinned cdht revision; cdht sim checks prove nothing about Tor.",
@@ -1102,15 +1112,46 @@ fn records_inner(
 /// sources (product tar, cfry mirror, tooling) live in ephemeral job scratch
 /// and are rebuilt every attempt, so their outputs never leak across product
 /// revisions; only the compiler's own dependency fingerprints persist here.
-/// The `check` runner always supplies the root.
+/// The `check` runner always supplies the root while holding the target lock;
+/// a standalone direct invocation without the held lock fails closed so no
+/// unlocked path is ever claimed as stable.
 fn target_subdir(base: &Environment, name: &str) -> Result<String> {
     let root = required(base, "CARGO_TARGET_DIR")?;
-    let dir = PathBuf::from(&root).join(name);
+    let held = required(base, "CCID_TARGET_LOCK_HELD")?;
+    let root_path = PathBuf::from(&root);
+    let held_path = PathBuf::from(&held);
+    if !root_path.is_absolute() {
+        return Err(failure("Tor job requires an absolute CARGO_TARGET_DIR"));
+    }
+    if !held_path.is_absolute() {
+        return Err(failure(
+            "Tor job requires an absolute CCID_TARGET_LOCK_HELD",
+        ));
+    }
+    let locked = match (root_path.canonicalize(), held_path.canonicalize()) {
+        (Ok(canonical_root), Ok(canonical_held)) => canonical_root == canonical_held,
+        _ => root == held,
+    };
+    if !locked {
+        return Err(failure(
+            "Tor job requires the locked Cargo target directory (CCID_TARGET_LOCK_HELD must match CARGO_TARGET_DIR)",
+        ));
+    }
+    let dir = root_path.join(name);
     if !dir.is_absolute() {
         return Err(failure("Tor job requires an absolute CARGO_TARGET_DIR"));
     }
     fs::create_dir_all(&dir)?;
     Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Stable tool HOME beneath the locked Cargo target directory. Cached venv
+/// pip shebangs embed the interpreter path, so a transient per-job HOME
+/// breaks relocation across Crow workers; this stable absolute HOME keeps
+/// tooling and fixture on the same path warm across runs. `CARGO_HOME` and
+/// `RUSTUP_HOME` stay explicit and untouched.
+fn stable_tool_home(base: &Environment) -> Result<String> {
+    target_subdir(base, "tor-home")
 }
 
 fn snowflake_browser(repo: &Path, env: &Environment) -> Result<()> {
@@ -1988,6 +2029,93 @@ workflows = ["tor-jobs"]
             ("CI_TOR_LIB_OUT", ""),
             ("CI_TOR_LIB_DEV", ""),
         ]))
+        .unwrap_err();
+    }
+
+    #[test]
+    fn stable_tool_home_is_independent_of_transient_incoming_home() {
+        let target = tempfile::tempdir().unwrap();
+        let target_path = target.path().to_string_lossy().into_owned();
+        let first = environment(&[
+            ("CARGO_TARGET_DIR", target_path.as_str()),
+            ("CCID_TARGET_LOCK_HELD", target_path.as_str()),
+            ("HOME", "/transient/home-a"),
+            ("CARGO_HOME", "/cargo"),
+            ("RUSTUP_HOME", "/rustup"),
+        ]);
+        let second = environment(&[
+            ("CARGO_TARGET_DIR", target_path.as_str()),
+            ("CCID_TARGET_LOCK_HELD", target_path.as_str()),
+            ("HOME", "/transient/home-b"),
+            ("CARGO_HOME", "/cargo"),
+            ("RUSTUP_HOME", "/rustup"),
+        ]);
+        let first_home = stable_tool_home(&first).unwrap();
+        let second_home = stable_tool_home(&second).unwrap();
+        assert_eq!(first_home, second_home);
+        assert!(Path::new(&first_home).is_absolute());
+        assert!(first_home.ends_with("tor-home"));
+        assert!(Path::new(&first_home).is_dir());
+        // A distinct locked target owns a distinct stable home.
+        let other = tempfile::tempdir().unwrap();
+        let other_path = other.path().to_string_lossy().into_owned();
+        let third = environment(&[
+            ("CARGO_TARGET_DIR", other_path.as_str()),
+            ("CCID_TARGET_LOCK_HELD", other_path.as_str()),
+            ("HOME", "/transient/home-a"),
+            ("CARGO_HOME", "/cargo"),
+            ("RUSTUP_HOME", "/rustup"),
+        ]);
+        assert_ne!(stable_tool_home(&third).unwrap(), first_home);
+        // Callers overlay HOME while leaving the explicit cargo/rustup roots.
+        let mut base = first.clone();
+        base.insert(OsString::from("HOME"), OsString::from(first_home.clone()));
+        assert_eq!(
+            base.get(&OsString::from("CARGO_HOME"))
+                .and_then(|value| value.to_str()),
+            Some("/cargo")
+        );
+        assert_eq!(
+            base.get(&OsString::from("RUSTUP_HOME"))
+                .and_then(|value| value.to_str()),
+            Some("/rustup")
+        );
+        assert_eq!(
+            base.get(&OsString::from("HOME"))
+                .and_then(|value| value.to_str()),
+            Some(first_home.as_str())
+        );
+    }
+
+    #[test]
+    fn stable_tool_home_rejects_unlocked_or_malformed_target() {
+        let target = tempfile::tempdir().unwrap();
+        let target_path = target.path().to_string_lossy().into_owned();
+        // Absent lock fails closed for standalone direct invocations.
+        stable_tool_home(&environment(&[
+            ("CARGO_TARGET_DIR", target_path.as_str()),
+            ("HOME", "/transient/home"),
+        ]))
+        .unwrap_err();
+        // Mismatched lock fails closed.
+        let other = tempfile::tempdir().unwrap();
+        let other_path = other.path().to_string_lossy().into_owned();
+        stable_tool_home(&environment(&[
+            ("CARGO_TARGET_DIR", target_path.as_str()),
+            ("CCID_TARGET_LOCK_HELD", other_path.as_str()),
+            ("HOME", "/transient/home"),
+        ]))
+        .unwrap_err();
+        // Relative or missing target fails closed.
+        stable_tool_home(&environment(&[
+            ("CARGO_TARGET_DIR", "relative/target"),
+            ("CCID_TARGET_LOCK_HELD", "relative/target"),
+        ]))
+        .unwrap_err();
+        stable_tool_home(&environment(&[(
+            "CCID_TARGET_LOCK_HELD",
+            target_path.as_str(),
+        )]))
         .unwrap_err();
     }
 }
