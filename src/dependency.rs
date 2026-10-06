@@ -235,11 +235,17 @@ pub fn resolve_cargo(
         validation_source_sha256 = Some(source_before.clone());
         validation_manifest_sha256 = Some(digest(&manifest_before));
         let mut validation_environment = runner.environment.clone();
-        // Candidate validation attests that the entire isolated source stayed
-        // unchanged. Result-cache workspace/metrics files would themselves
-        // violate that contract. Keep compile/download caches, but run these
-        // selected checks directly until result-cache metadata is external.
-        validation_environment.remove(std::ffi::OsStr::new("CCID_RESULT_CACHE"));
+        // Candidate validation audits the complete source tree byte for byte.
+        // Result-cache receipts/workspaces would mutate that tree even for a
+        // bypassed check. Native compiler/download caches remain enabled.
+        if validation_environment
+            .remove(std::ffi::OsStr::new("CCID_RESULT_CACHE"))
+            .is_some()
+        {
+            event(
+                json!({"event":"cache-bypass","scope":"cargo-candidate-validation","reason":"candidate source integrity requires ordinary checks without result-cache workspace writes"}),
+            );
+        }
         let remaining = resolution_deadline.saturating_duration_since(std::time::Instant::now());
         let check_result = if remaining.is_zero() {
             Err(failure(

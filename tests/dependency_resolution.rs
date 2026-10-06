@@ -76,7 +76,7 @@ mod linux {
             .env("SOURCE_SHA256", ccid::sha256_file(&archive).unwrap())
             .env("CARGO_HOME", root.join("cargo-home"))
             .env("CARGO_TARGET_DIR", root.join("target"))
-            .env("CCID_RESULT_CACHE", root.join("results"))
+            .env("CCID_RESULT_CACHE", root)
             .env("TMPDIR", root)
             .env("CI_JOBS", "1")
             .env("CI_TEST_THREADS", "1")
@@ -151,8 +151,9 @@ mod linux {
         if generate && check == "valid" {
             assert!(
                 output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
+                "{}\nreceipt: {}",
+                String::from_utf8_lossy(&output.stderr),
+                receipt
             );
         }
         (output.status.success(), receipt)

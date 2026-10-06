@@ -13,7 +13,7 @@ windows-experimental = []
 
 [dependencies]
 cqlt = { git = "https://git.corbet.ch/corbet-foss/cqlt", rev = "e6275c5373954ca7f3b4fc680ffaccc149dc32f6" }
-cmnp = { git = "https://git.corbet.ch/corbet-foss/cmnp.git", rev = "d839e034188da1d21a4c253d7d56aa09b279362d" }
+cmnp = { git = "https://git.corbet.ch/corbet-foss/cmnp.git", rev = "694084b1c591967902aa93dc94688f7a2c540e72" }
 clap = { version = "4.5", features = ["derive", "env"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 process-wrap = { version = "10.0", default-features = false, features = ["std", "process-group", "job-object"] }

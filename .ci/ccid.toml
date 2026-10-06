@@ -2,7 +2,7 @@ schema = 1
 project = "ccid"
 
 [render]
-tool_revision = "81ebac8e86e20bc93b69d5e912bbcb0c0d036d58"
+tool_revision = "3caf43366cf4dd751e5283c246e4b9d6f0e3f8cd"
 
 [checks.test]
 kind = "commands"
@@ -45,5 +45,15 @@ command = ["bash", ".ci/run-job.sh"]
 [jobs.compile]
 scheduler = "crow"
 checks = ["compile"]
+workflow = "repository-jobs"
+command = ["bash", ".ci/run-job.sh"]
+
+[checks.native-compile-cache]
+kind = "commands"
+commands = [["cargo", "test", "--release", "--locked", "--test", "native_compile_cache", "--", "--ignored", "--nocapture"]]
+
+[jobs.native-compile-cache]
+scheduler = "crow"
+checks = ["native-compile-cache"]
 workflow = "repository-jobs"
 command = ["bash", ".ci/run-job.sh"]

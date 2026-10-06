@@ -40,8 +40,25 @@ pub(crate) fn run_cached_with_environment(
     selectors: &[String],
     plan: bool,
     force: bool,
-    environment: Environment,
+    mut environment: Environment,
 ) -> Result<()> {
+    // Adapters legitimately invoke the verified runtime by absolute path.
+    // Re-enter that same executable for cache misses even if PATH has no ccid
+    // (or an older one). Keep the task command logical; tool bytes are hashed.
+    let current = std::env::current_exe()?;
+    if current
+        .file_name()
+        .is_some_and(|name| name == "ccid" || name == "ccid.exe")
+    {
+        let mut paths = vec![current
+            .parent()
+            .ok_or_else(|| failure("Missing runtime directory"))?
+            .to_owned()];
+        if let Some(path) = environment.get(std::ffi::OsStr::new("PATH")) {
+            paths.extend(std::env::split_paths(path));
+        }
+        environment.insert("PATH".into(), std::env::join_paths(paths)?);
+    }
     crate::safe_relative(manifest)?;
     let root = repo.canonicalize()?;
     let (parsed, bytes) = load_manifest(&root, manifest)?;
