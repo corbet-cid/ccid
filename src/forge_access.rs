@@ -866,6 +866,18 @@ fn write_call(
     }
 }
 
+/// Look up one canonical target in a comparison world. A free function with
+/// explicit lifetimes: the closure version captured the loop-owned target by
+/// reference while returning an argument-derived reference, which lifetime
+/// inference rejects.
+fn lookup<'a>(
+    forge: ForgeKind,
+    table: &'a BTreeMap<ForgeKind, BTreeMap<Target, WorldGrant>>,
+    target: &Target,
+) -> Option<&'a WorldGrant> {
+    table.get(&forge).and_then(|grants| grants.get(target))
+}
+
 /// Three-way merge over the baseline and one snapshot per forge.
 ///
 /// Every change since the baseline becomes an event; each event is mirrored
@@ -942,15 +954,12 @@ pub fn plan(
                 mapped.push(kind);
             }
         }
-        let at = |forge: ForgeKind, table: &BTreeMap<ForgeKind, BTreeMap<Target, WorldGrant>>| {
-            table.get(&forge).and_then(|grants| grants.get(&target))
-        };
         // Events on observed mapped forges only. An unobserved forge
         // contributes no event: absence of evidence is not evidence.
         let mut events: Vec<(ForgeKind, Option<Level>, Option<Level>, i64)> = Vec::new();
         for forge in &mapped {
-            let before = at(*forge, &old.forges).map(|g| g.level);
-            let entry = at(*forge, &world.forges);
+            let before = lookup(*forge, &old.forges, &target).map(|g| g.level);
+            let entry = lookup(*forge, &world.forges, &target);
             let (after, time) = match entry {
                 Some(found) => (Some(found.level), found.at),
                 None => {
@@ -973,7 +982,7 @@ pub fn plan(
             let mut levels: BTreeMap<String, Level> = BTreeMap::new();
             for forge in &mapped {
                 if observed.contains(forge) {
-                    if let Some(found) = at(*forge, &world.forges) {
+                    if let Some(found) = lookup(*forge, &world.forges, &target) {
                         levels.insert(forge.as_str().into(), found.level);
                     }
                 }
@@ -1050,8 +1059,8 @@ pub fn plan(
             });
         }
         for forge in &mapped {
-            let before = at(*forge, &old.forges).map(|g| g.level);
-            let entry = at(*forge, &world.forges);
+            let before = lookup(*forge, &old.forges, &target).map(|g| g.level);
+            let entry = lookup(*forge, &world.forges, &target);
             let after = entry.map(|g| g.level);
             let handle = validated
                 .handle_for(&target.person, forge.as_str())
@@ -1248,14 +1257,14 @@ impl std::error::Error for ApiError {}
 /// performing provider writes.
 pub trait Transport {
     /// Execute one planned call, returning the provider status when known.
-    fn execute(&mut self, call: &Call) -> Result<(), ApiError>;
+    fn execute(&mut self, call: &Call) -> std::result::Result<(), ApiError>;
 }
 
 /// The draft transport: refuses every write.
 pub struct UnwiredTransport;
 
 impl Transport for UnwiredTransport {
-    fn execute(&mut self, _call: &Call) -> Result<(), ApiError> {
+    fn execute(&mut self, _call: &Call) -> std::result::Result<(), ApiError> {
         Err(ApiError::refused(
             "Live forge transport is unwired; refusing writes",
         ))
@@ -2152,11 +2161,11 @@ mod tests {
 
     struct Script {
         calls: Vec<Call>,
-        results: Vec<Result<(), ApiError>>,
+        results: Vec<std::result::Result<(), ApiError>>,
     }
 
     impl Transport for Script {
-        fn execute(&mut self, call: &Call) -> Result<(), ApiError> {
+        fn execute(&mut self, call: &Call) -> std::result::Result<(), ApiError> {
             self.calls.push(call.clone());
             if self.results.is_empty() {
                 return Ok(());
