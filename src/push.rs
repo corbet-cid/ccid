@@ -2684,14 +2684,15 @@ mod tests {
         }
     }
 
-    /// Shared ancestry predicate for the test policy fakes.
-    type AncestryPredicate = Arc<dyn Fn(&str, &str, &str, &str) -> bool + Send + Sync>;
+    /// Shared ancestry-probe shape for the fake policy: kept behind an
+    /// alias because the inline form trips `type_complexity`.
+    type AncestryFn = Arc<dyn Fn(&str, &str, &str, &str) -> bool + Send + Sync>;
 
     #[derive(Clone)]
     struct FakePolicy {
         runtime_identity: String,
         live_head: Option<String>,
-        ancestry: AncestryPredicate,
+        ancestry: AncestryFn,
     }
 
     impl CoalescePolicy for FakePolicy {
