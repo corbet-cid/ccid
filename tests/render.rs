@@ -205,7 +205,7 @@ fn push_manifest() -> String {
         "schema=1\nproject='fixture'\nrepository='https://forge.example.invalid/cpkg/demo.git'\n\
          [render]\ntool_revision='{PIN}'\n\
          [checks.test]\nkind='commands'\ncommands=[['true']]\n\
-         [jobs.fast]\nchecks=['test']\nworkflow='manual'\ncommand=['sh','.ci/run.sh']\n\
+         [jobs.fast]\nchecks=['test']\nworkflow='manual'\ncommand=['ccid:run-declared-checks']\n\
          push_branches=['v01']\n\
          [push_consumer.deplib]\nconsumer='https://forge.example.invalid/cpkg/deplib.git'\n\
          branch='v01'\nconsumer_branch='v01'\njob='v01-fast'\nself_name='deplib'\n"
@@ -292,8 +292,8 @@ fn invalid_push_declarations_fail_before_any_rendered_file_changes() {
             "",
         ),
         base.replace(
-            "tool_revision='{PIN}'",
-            "tool_revision='{PIN}'\ntool_secret_binary='lowercase-secret'",
+            &format!("tool_revision='{PIN}'"),
+            &format!("tool_revision='{PIN}'\ntool_secret_binary='lowercase-secret'"),
         ),
     ] {
         fs::write(&config, invalid).unwrap();
