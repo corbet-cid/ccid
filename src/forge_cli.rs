@@ -4,12 +4,7 @@ use ccid::{
     Environment, Result, Runner,
 };
 use clap::Subcommand;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
 #[derive(Subcommand)]
 pub enum Action {
@@ -71,210 +66,12 @@ pub enum Action {
         #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
     },
-    /// Mirror repository access across forges from a three-way merge.
-    /// `access plan` never writes; `access apply` advances the baseline state
-    /// and, once a live transport lands, executes the planned API calls.
-    Access {
-        #[command(subcommand)]
-        action: AccessAction,
-    },
-}
-
-/// Offline access reconciliation. Observations are collector-supplied JSON
-/// snapshots, one per forge; no provider API calls are made here.
-#[derive(Subcommand)]
-pub enum AccessAction {
-    /// Print the exact intended API calls without writing anything.
-    Plan {
-        #[arg(long)]
-        identities: PathBuf,
-        #[arg(long)]
-        baseline: PathBuf,
-        /// One snapshot per forge as `forge=path` (github, forgejo, gitlab,
-        /// bitbucket). Repeat for each observed forge.
-        #[arg(long = "observed", required = true)]
-        observed: Vec<String>,
-        /// Stable person id whose own access is never touched.
-        #[arg(long)]
-        operator: Option<String>,
-        /// Forges that are read but never written. Defaults to github.
-        #[arg(long = "frozen", default_value = "github")]
-        frozen: Vec<String>,
-    },
-    /// Advance the baseline state. Without --initialize this requires a
-    /// present baseline and a converged plan; forge writes run through the
-    /// transport, which is unwired in this draft and refuses every call.
-    Apply {
-        #[arg(long)]
-        identities: PathBuf,
-        #[arg(long)]
-        baseline: PathBuf,
-        #[arg(long = "observed", required = true)]
-        observed: Vec<String>,
-        #[arg(long)]
-        operator: Option<String>,
-        #[arg(long = "frozen", default_value = "github")]
-        frozen: Vec<String>,
-        /// Bootstrap the baseline from current observations without planning
-        /// any forge writes.
-        #[arg(long)]
-        initialize: bool,
-        /// Where to write the next baseline. Defaults to --baseline.
-        #[arg(long)]
-        state_out: Option<PathBuf>,
-        #[arg(long, default_value_t = 500)]
-        pace_ms: u64,
-    },
 }
 
 fn read(path: PathBuf) -> Result<Policy> {
     let policy: Policy = serde_json::from_slice(&fs::read(path)?)?;
     policy.validate()?;
     Ok(policy)
-}
-
-/// Load one `--observed forge=path` snapshot argument.
-fn read_observed(observed: &[String]) -> Result<Vec<ccid::forge_access::ObservedFile>> {
-    let mut files = Vec::new();
-    for item in observed {
-        let (forge, path) = item
-            .split_once('=')
-            .ok_or_else(|| "Observed snapshots require forge=path".to_string())?;
-        let file: ccid::forge_access::ObservedFile = serde_json::from_slice(
-            &fs::read(path)
-                .map_err(|error| format!("Cannot read {forge} snapshot {path}: {error}"))?,
-        )?;
-        if file.forge != ccid::forge_access::ForgeKind::parse(forge)? {
-            return Err(format!("Snapshot {path} declares a different forge").into());
-        }
-        files.push(file);
-    }
-    Ok(files)
-}
-
-fn access_inputs(
-    identities: &PathBuf,
-    baseline: &PathBuf,
-    observed: &[String],
-    operator: &Option<String>,
-    frozen: &[String],
-) -> Result<(
-    ccid::forge_access::IdentityMap,
-    Option<ccid::forge_access::Baseline>,
-    Vec<ccid::forge_access::ObservedFile>,
-    ccid::forge_access::PlanOptions,
-)> {
-    let text = fs::read_to_string(identities)?;
-    let maps: ccid::forge_access::IdentityMap = toml::from_str(&text)?;
-    maps.maps()?;
-    let state = match fs::read(baseline) {
-        Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
-    let files = read_observed(observed)?;
-    let mut forges = Vec::new();
-    for name in frozen {
-        forges.push(ccid::forge_access::ForgeKind::parse(name)?);
-    }
-    let run_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    Ok((
-        maps,
-        state,
-        files,
-        ccid::forge_access::PlanOptions {
-            frozen: forges,
-            operator: operator.clone(),
-            run_at,
-        },
-    ))
-}
-
-/// Pure offline plan. Never writes; prints the exact intended API calls.
-fn access_plan(
-    identities: &PathBuf,
-    baseline: &PathBuf,
-    observed: &[String],
-    operator: &Option<String>,
-    frozen: &[String],
-) -> Result<ccid::forge_access::AccessPlan> {
-    let (maps, state, files, options) =
-        access_inputs(identities, baseline, observed, operator, frozen)?;
-    ccid::forge_access::plan(&maps, state.as_ref(), &files, &options)
-}
-
-/// Baseline advancement. `--initialize` bootstraps from current observations
-/// without planning writes; otherwise a converged plan refreshes the state
-/// and anything else runs the (currently unwired) transport to fail closed.
-fn access_apply(
-    identities: &PathBuf,
-    baseline: &PathBuf,
-    observed: &[String],
-    operator: &Option<String>,
-    frozen: &[String],
-    initialize: bool,
-    state_out: &Option<PathBuf>,
-    pace_ms: u64,
-) -> Result<()> {
-    let (maps, state, files, options) =
-        access_inputs(identities, baseline, observed, operator, frozen)?;
-    let destination = state_out.clone().unwrap_or_else(|| baseline.clone());
-    if initialize {
-        if state.is_some() {
-            return Err("Refusing to initialize over an existing baseline".into());
-        }
-        let world = observed_world(&maps, &files)?;
-        let snapshot = ccid::forge_access::snapshot_world(&world);
-        fs::write(&destination, serde_json::to_string_pretty(&snapshot)?)?;
-        println!(
-            "{}",
-            serde_json::json!({"initialized": true, "state": destination})
-        );
-        return Ok(());
-    }
-    let Some(previous) = state else {
-        return Err("No baseline state; initialize it first with access apply --initialize".into());
-    };
-    let plan = ccid::forge_access::plan(&maps, Some(&previous), &files, &options)?;
-    if plan.complete {
-        let world = observed_world(&maps, &files)?;
-        let snapshot = ccid::forge_access::snapshot_world(&world);
-        fs::write(&destination, serde_json::to_string_pretty(&snapshot)?)?;
-        println!(
-            "{}",
-            serde_json::json!({"complete": true, "state": destination})
-        );
-        return Ok(());
-    }
-    let validated = maps.maps()?;
-    let observed_names: BTreeSet<String> = files
-        .iter()
-        .map(|file| file.forge.as_str().to_owned())
-        .collect();
-    let mut transport = ccid::forge_access::UnwiredTransport;
-    let report = ccid::forge_access::apply_plan(
-        &plan,
-        &mut transport,
-        Duration::from_millis(pace_ms),
-        &validated,
-        &observed_names,
-        &previous,
-    );
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Err("Live forge transport is unwired; baseline unchanged".into())
-}
-
-/// Canonicalize snapshots outside the planner for baseline snapshots.
-fn observed_world(
-    maps: &ccid::forge_access::IdentityMap,
-    files: &[ccid::forge_access::ObservedFile],
-) -> Result<ccid::forge_access::World> {
-    let validated = maps.maps()?;
-    let (world, _, _, _) = ccid::forge_access::observe(&validated, files)?;
-    Ok(world)
 }
 
 pub fn run(action: Action) -> Result<()> {
@@ -319,42 +116,6 @@ pub fn run(action: Action) -> Result<()> {
                 return Err("Reconciliation is incomplete; inspect the JSON report".into());
             }
         }
-        Action::Access { action } => match action {
-            AccessAction::Plan {
-                identities,
-                baseline,
-                observed,
-                operator,
-                frozen,
-            } => {
-                let plan = access_plan(&identities, &baseline, &observed, &operator, &frozen)?;
-                println!("{}", serde_json::to_string_pretty(&plan)?);
-                if !plan.complete {
-                    return Err("Access plan is not converged; inspect the JSON report".into());
-                }
-            }
-            AccessAction::Apply {
-                identities,
-                baseline,
-                observed,
-                operator,
-                frozen,
-                initialize,
-                state_out,
-                pace_ms,
-            } => {
-                access_apply(
-                    &identities,
-                    &baseline,
-                    &observed,
-                    &operator,
-                    &frozen,
-                    initialize,
-                    &state_out,
-                    pace_ms,
-                )?;
-            }
-        },
         Action::Plan { policy, repository } => {
             println!(
                 "{}",

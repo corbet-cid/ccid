@@ -24,7 +24,6 @@ mod cached;
 mod checks;
 mod dependency;
 pub mod forge;
-pub mod forge_access;
 pub mod forge_sync;
 pub mod jobs;
 pub mod pr_bridge;
