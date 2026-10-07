@@ -166,17 +166,58 @@ const SOCKET_SUFFIX_BUDGET: usize = 64;
 /// Length of the per-job leaf `ccid-job-` plus six random characters.
 #[cfg(unix)]
 const JOB_LEAF_LEN: usize = "ccid-job-".len() + 6;
+/// A scratch root the platform provides (a short owner-only directory on a
+/// path whose ancestors nobody else can write). It is a candidate only while
+/// it passes the hygiene rules below; ccid creates it, owner-only, when absent.
+#[cfg(unix)]
+const SCRATCH_ROOT_ENV: &str = "CCID_SCRATCH_ROOT";
+
+/// Whether a job directory directly below a root of `root_len` bytes leaves
+/// [`SOCKET_SUFFIX_BUDGET`] bytes for a checked program's socket paths.
+#[cfg(unix)]
+fn fits_socket_budget(root_len: usize) -> bool {
+    root_len + 1 + JOB_LEAF_LEN + SOCKET_SUFFIX_BUDGET <= SUN_PATH_MAX
+}
+
+/// A place a job scratch directory could live and the reason it was not used.
+#[cfg(unix)]
+struct Rejected {
+    source: &'static str,
+    path: PathBuf,
+    reason: String,
+}
+
+/// Where the job scratch landed. `hygienic` is false only when no candidate
+/// passed both rules and the pre-hygiene behaviour had to be used.
+#[cfg(unix)]
+struct ScratchChoice {
+    source: &'static str,
+    hygienic: bool,
+    rejected: Vec<Rejected>,
+}
 
 /// Per-job scratch directory; exports it as `TMPDIR` to the checked programs.
 ///
 /// The scratch path never enters a cache key (`TMPDIR` and `RUNNER_TEMP` are
-/// refused in `cache_env`), so where it lives is free to change. Checked
-/// programs create Unix sockets below `TMPDIR`, and a nested worker or
-/// `nix-shell` `TMPDIR` pushes such paths past `sun_path`. The scratch therefore
-/// stays beneath the inherited `TMPDIR` only while that leaves
-/// [`SOCKET_SUFFIX_BUDGET`] bytes for the program; otherwise it becomes a
-/// single-level directory in a short per-user base (`/tmp/c<uid>`). If that
-/// base is unusable the job degrades to the inherited parent, as before.
+/// refused in `cache_env`), so where it lives is free to change. Two hygiene
+/// rules decide where, because checked programs bind Unix sockets and keep
+/// private state below `TMPDIR`:
+///
+/// 1. the root plus a job directory and [`SOCKET_SUFFIX_BUDGET`] bytes stays
+///    within `sun_path`;
+/// 2. the root is an owner-only directory (0700; so is each job directory
+///    in it) and none of its ancestors is
+///    writable by group or others (Arti's `fs-mistrust` refuses state below
+///    a world-writable ancestor such as `/tmp`) or owned by anyone but root
+///    and this user.
+///
+/// Candidates are tried in order and the first that passes both is used: the
+/// platform-provided `CCID_SCRATCH_ROOT`, `XDG_RUNTIME_DIR`, the inherited
+/// `TMPDIR`, then the short per-user base `/tmp/c<uid>`. When none passes the
+/// scratch degrades to the earlier behaviour (the inherited `TMPDIR` while it
+/// leaves socket room, else the short base, else the inherited parent), never
+/// fails. The decision and every rejection are logged as a `scratch-root`
+/// event.
 pub(crate) fn scratch(env: &mut Environment) -> Result<tempfile::TempDir> {
     scratch_with_short_base(env, Path::new("/tmp"))
 }
@@ -185,18 +226,223 @@ fn scratch_with_short_base(
     env: &mut Environment,
     short_parent: &Path,
 ) -> Result<tempfile::TempDir> {
-    let parent = scratch_parent(env)?;
     #[cfg(unix)]
-    if parent.as_os_str().len() + 1 + JOB_LEAF_LEN + SOCKET_SUFFIX_BUDGET > SUN_PATH_MAX {
+    {
+        let (scratch, choice) = choose_scratch(env, short_parent, Path::new("/"))?;
+        log_scratch_choice(scratch.path(), &choice);
+        Ok(scratch)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = short_parent;
+        let parent = scratch_parent(env)?;
+        scratch_in(env, parent)
+    }
+}
+
+/// The selection behind [`scratch`]. `boundary` is the topmost ancestor whose
+/// hygiene is examined (production passes `/`, so every ancestor counts).
+#[cfg(unix)]
+fn choose_scratch(
+    env: &mut Environment,
+    short_parent: &Path,
+    boundary: &Path,
+) -> Result<(tempfile::TempDir, ScratchChoice)> {
+    let parent = scratch_parent(env)?;
+    let mut rejected = Vec::new();
+    let mut chosen = None;
+    if let Some(root) = value(env, SCRATCH_ROOT_ENV).filter(|root| !root.is_empty()) {
+        chosen = try_root(SCRATCH_ROOT_ENV, root.into(), true, boundary, &mut rejected)
+            .map(|scratch| (SCRATCH_ROOT_ENV, scratch));
+    }
+    if chosen.is_none() {
+        if let Some(runtime) = value(env, "XDG_RUNTIME_DIR").filter(|root| !root.is_empty()) {
+            chosen = try_root(
+                "XDG_RUNTIME_DIR",
+                runtime.into(),
+                false,
+                boundary,
+                &mut rejected,
+            )
+            .map(|scratch| ("XDG_RUNTIME_DIR", scratch));
+        }
+    }
+    if chosen.is_none() {
+        chosen = try_root(
+            "inherited TMPDIR",
+            parent.clone(),
+            false,
+            boundary,
+            &mut rejected,
+        )
+        .map(|scratch| ("inherited TMPDIR", scratch));
+    }
+    if chosen.is_none() {
+        match short_base(short_parent) {
+            Some(base) => {
+                chosen = try_root("short base", base, false, boundary, &mut rejected)
+                    .map(|scratch| ("short base", scratch));
+            }
+            None => rejected.push(Rejected {
+                source: "short base",
+                path: short_parent.join(format!("c{}", rustix::process::geteuid().as_raw())),
+                reason: "not creatable as an owner-only real directory".into(),
+            }),
+        }
+    }
+    if let Some((source, scratch)) = chosen {
+        set(env, "TMPDIR", scratch.path().as_os_str());
+        return Ok((
+            scratch,
+            ScratchChoice {
+                source,
+                hygienic: true,
+                rejected,
+            },
+        ));
+    }
+    // No candidate passes both rules: keep the earlier behaviour, never fail.
+    if !fits_socket_budget(parent.as_os_str().len()) {
         if let Some(scratch) = short_base(short_parent).and_then(|base| job_scratch_in(&base).ok())
         {
             set(env, "TMPDIR", scratch.path().as_os_str());
-            return Ok(scratch);
+            return Ok((
+                scratch,
+                ScratchChoice {
+                    source: "short base",
+                    hygienic: false,
+                    rejected,
+                },
+            ));
         }
     }
-    #[cfg(not(unix))]
-    let _ = short_parent;
-    scratch_in(env, parent)
+    let scratch = scratch_in(env, parent)?;
+    Ok((
+        scratch,
+        ScratchChoice {
+            source: "inherited TMPDIR",
+            hygienic: false,
+            rejected,
+        },
+    ))
+}
+
+#[cfg(unix)]
+fn try_root(
+    source: &'static str,
+    path: PathBuf,
+    create: bool,
+    boundary: &Path,
+    rejected: &mut Vec<Rejected>,
+) -> Option<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+    // The job directory is owner-only as well, whatever the umask says.
+    let outcome = vet_scratch_root(&path, create, boundary).and_then(|root| {
+        job_scratch_in(&root)
+            .and_then(|scratch| {
+                fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700))?;
+                Ok(scratch)
+            })
+            .map_err(|error| format!("job directory not creatable: {error}"))
+    });
+    match outcome {
+        Ok(scratch) => Some(scratch),
+        Err(reason) => {
+            rejected.push(Rejected {
+                source,
+                path,
+                reason,
+            });
+            None
+        }
+    }
+}
+
+/// Check both hygiene rules for `candidate` and return its resolved path. With
+/// `create` an absent root is created owner-only (one level, never recursive).
+/// Ancestors are checked on the resolved path, so a link cannot smuggle a
+/// scratch below a directory the chain never examined, up to `boundary`.
+#[cfg(unix)]
+fn vet_scratch_root(
+    candidate: &Path,
+    create: bool,
+    boundary: &Path,
+) -> std::result::Result<PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    if !candidate.is_absolute() {
+        return Err("not an absolute path".into());
+    }
+    let uid = rustix::process::geteuid().as_raw();
+    if create {
+        match fs::DirBuilder::new().mode(0o700).create(candidate) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(format!("not creatable: {error}")),
+        }
+    }
+    let root = fs::canonicalize(candidate).map_err(|error| format!("not resolvable: {error}"))?;
+    let meta = fs::metadata(&root).map_err(|error| format!("not readable: {error}"))?;
+    if !meta.is_dir() {
+        return Err("not a directory".into());
+    }
+    if meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        return Err(format!(
+            "root is not owner-only: mode {:04o}, owner uid {} (want 0700, uid {uid})",
+            meta.mode() & 0o7777,
+            meta.uid()
+        ));
+    }
+    let widest = root.as_os_str().len() + 1 + JOB_LEAF_LEN + SOCKET_SUFFIX_BUDGET;
+    if !fits_socket_budget(root.as_os_str().len()) {
+        return Err(format!(
+            "too long for Unix sockets: {widest} bytes with a job directory and a \
+             {SOCKET_SUFFIX_BUDGET}-byte suffix, limit {SUN_PATH_MAX}"
+        ));
+    }
+    for ancestor in root.ancestors().skip(1) {
+        let meta = fs::metadata(ancestor)
+            .map_err(|error| format!("ancestor {} not readable: {error}", ancestor.display()))?;
+        if meta.uid() != 0 && meta.uid() != uid {
+            return Err(format!(
+                "ancestor {} is owned by uid {}, neither root nor uid {uid}",
+                ancestor.display(),
+                meta.uid()
+            ));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(format!(
+                "ancestor {} is writable by group or others (mode {:04o})",
+                ancestor.display(),
+                meta.mode() & 0o7777
+            ));
+        }
+        if ancestor == boundary {
+            break;
+        }
+    }
+    Ok(root)
+}
+
+#[cfg(unix)]
+fn log_scratch_choice(scratch: &Path, choice: &ScratchChoice) {
+    let rejected: Vec<serde_json::Value> = choice
+        .rejected
+        .iter()
+        .map(|other| {
+            json!({
+                "source": other.source,
+                "path": other.path.display().to_string(),
+                "reason": other.reason,
+            })
+        })
+        .collect();
+    event(json!({
+        "event": "scratch-root",
+        "path": scratch.display().to_string(),
+        "source": choice.source,
+        "hygienic": choice.hygienic,
+        "rejected": rejected,
+    }));
 }
 
 fn scratch_parent(env: &Environment) -> Result<PathBuf> {
@@ -804,6 +1050,346 @@ mod tests {
             );
         }
         assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    /// A fresh directory below `/tmp` that serves as the examined boundary of a
+    /// test: only the directories under it are inspected, so the world-writable
+    /// `/tmp` above does not decide the outcome. Returns the guard and its
+    /// resolved path.
+    #[cfg(unix)]
+    fn hygiene_top() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::Builder::new()
+            .prefix(".h")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let top = temp.path().canonicalize().unwrap();
+        (temp, top)
+    }
+
+    #[cfg(unix)]
+    fn make_dir(parent: &Path, name: &str, mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = parent.join(name);
+        fs::create_dir_all(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn platform_environment<P: AsRef<std::ffi::OsStr>>(pairs: &[(&str, P)]) -> Environment {
+        let mut environment = Environment::new();
+        for (name, path) in pairs {
+            environment.insert((*name).into(), path.as_ref().into());
+        }
+        environment
+    }
+
+    #[cfg(unix)]
+    fn rejected_sources(choice: &ScratchChoice) -> Vec<&'static str> {
+        choice.rejected.iter().map(|other| other.source).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_budget_is_exact_at_the_sun_path_limit() {
+        // root + `/` + `ccid-job-XXXXXX` + 64 bytes == 107.
+        assert!(fits_socket_budget(27));
+        assert!(!fits_socket_budget(28));
+        assert_eq!(27 + 1 + JOB_LEAF_LEN + SOCKET_SUFFIX_BUDGET, SUN_PATH_MAX);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn platform_root_passing_both_rules_is_used_and_nothing_else_changes() {
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        let (_guard, top) = hygiene_top();
+        let root = make_dir(&top, "s", 0o700);
+        let nested = nested_tmpdir(&top);
+        let mut environment = platform_environment(&[("TMPDIR", &nested)]);
+        environment.insert(SCRATCH_ROOT_ENV.into(), root.as_os_str().into());
+        let before = environment.clone();
+        let (scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        let path = scratch.path().to_owned();
+        assert_eq!(path.parent(), Some(root.as_path()));
+        assert_eq!(choice.source, SCRATCH_ROOT_ENV);
+        assert!(choice.hygienic);
+        assert!(choice.rejected.is_empty());
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "job directory is owner only");
+        assert!(path.as_os_str().len() + SOCKET_SUFFIX_BUDGET <= SUN_PATH_MAX);
+        drop(UnixListener::bind(path.join("s".repeat(SOCKET_SUFFIX_BUDGET - 1))).unwrap());
+        // Only TMPDIR changes: scratch paths never reach a cache key.
+        let mut expected = before;
+        expected.insert("TMPDIR".into(), path.as_os_str().into());
+        assert_eq!(environment, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absent_platform_root_is_created_owner_only_one_level_deep() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_guard, top) = hygiene_top();
+        let root = top.join("fresh");
+        let mut environment = platform_environment(&[(SCRATCH_ROOT_ENV, &root)]);
+        let (scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert_eq!(choice.source, SCRATCH_ROOT_ENV);
+        assert_eq!(scratch.path().parent(), Some(root.as_path()));
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // A missing parent is not created: the candidate is rejected instead.
+        let deep = top.join("missing/deeper");
+        let mut environment = platform_environment(&[(SCRATCH_ROOT_ENV, &deep)]);
+        let (_scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert!(!choice.hygienic);
+        assert!(!top.join("missing").exists());
+        assert!(choice.rejected[0].reason.starts_with("not creatable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_platform_root_wins_over_the_runtime_dir_which_wins_over_the_rest() {
+        let (_guard, top) = hygiene_top();
+        let root = make_dir(&top, "s", 0o700);
+        let runtime = make_dir(&top, "run", 0o700);
+        let inherited = make_dir(&top, "t", 0o700);
+        let mut environment = platform_environment(&[
+            (SCRATCH_ROOT_ENV, &root),
+            ("XDG_RUNTIME_DIR", &runtime),
+            ("TMPDIR", &inherited),
+        ]);
+        let (scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert_eq!(scratch.path().parent(), Some(root.as_path()));
+        assert_eq!(choice.source, SCRATCH_ROOT_ENV);
+        drop(scratch);
+        let mut environment =
+            platform_environment(&[("XDG_RUNTIME_DIR", &runtime), ("TMPDIR", &inherited)]);
+        let (scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert_eq!(scratch.path().parent(), Some(runtime.as_path()));
+        assert_eq!(choice.source, "XDG_RUNTIME_DIR");
+        drop(scratch);
+        let mut environment = platform_environment(&[("TMPDIR", &inherited)]);
+        let (scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert_eq!(scratch.path().parent(), Some(inherited.as_path()));
+        assert_eq!(choice.source, "inherited TMPDIR");
+        // An unset or empty candidate is skipped without a rejection entry.
+        let mut environment = platform_environment(&[("TMPDIR", &inherited)]);
+        environment.insert(SCRATCH_ROOT_ENV.into(), "".into());
+        environment.insert("XDG_RUNTIME_DIR".into(), "".into());
+        let (_scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert!(choice.rejected.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ancestor_writable_by_group_or_others_rejects_the_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_guard, top) = hygiene_top();
+        let runtime = make_dir(&top, "run", 0o700);
+        // World-writable with and without the sticky bit (what `/tmp` is), and
+        // group-writable: none of them is acceptable above a scratch root.
+        for (index, mode) in [0o777, 0o1777, 0o2777, 0o775, 0o770, 0o757]
+            .into_iter()
+            .enumerate()
+        {
+            let open = make_dir(&top, &format!("open{index}"), 0o755);
+            let root = make_dir(&open, "s", 0o700);
+            fs::set_permissions(&open, fs::Permissions::from_mode(mode)).unwrap();
+            let mut environment =
+                platform_environment(&[(SCRATCH_ROOT_ENV, &root), ("XDG_RUNTIME_DIR", &runtime)]);
+            let (scratch, choice) =
+                choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+            assert_eq!(choice.source, "XDG_RUNTIME_DIR", "mode {mode:o}");
+            assert_eq!(scratch.path().parent(), Some(runtime.as_path()));
+            assert_eq!(rejected_sources(&choice), [SCRATCH_ROOT_ENV]);
+            let reason = &choice.rejected[0].reason;
+            assert!(
+                reason.contains("writable by group or others")
+                    && reason.contains(&format!("{:o}", mode & 0o777))
+                    && reason.contains(open.to_str().unwrap()),
+                "{reason}"
+            );
+            // Restore a mode the temporary directory can clean up.
+            fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // The same tree with a non-writable ancestor is accepted.
+        for mode in [0o755, 0o750, 0o700] {
+            let open = make_dir(&top, &format!("ok{mode:o}"), mode);
+            let root = make_dir(&open, "s", 0o700);
+            let mut environment = platform_environment(&[(SCRATCH_ROOT_ENV, &root)]);
+            let (_scratch, choice) =
+                choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+            assert_eq!(choice.source, SCRATCH_ROOT_ENV, "mode {mode:o}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_real_boundary_rejects_the_world_writable_tmp_above_any_root() {
+        let temp = tempfile::Builder::new()
+            .prefix("t")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = make_dir(temp.path(), "s", 0o700);
+        let reason = vet_scratch_root(&root, false, Path::new("/")).unwrap_err();
+        assert!(
+            reason.contains("ancestor /tmp is writable by group or others"),
+            "{reason}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_is_not_owner_only_is_rejected() {
+        let (_guard, top) = hygiene_top();
+        let runtime = make_dir(&top, "run", 0o700);
+        for mode in [0o755, 0o750, 0o770, 0o707] {
+            let root = make_dir(&top, &format!("r{mode:o}"), mode);
+            let mut environment =
+                platform_environment(&[(SCRATCH_ROOT_ENV, &root), ("XDG_RUNTIME_DIR", &runtime)]);
+            let (_scratch, choice) =
+                choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+            assert_eq!(choice.source, "XDG_RUNTIME_DIR", "mode {mode:o}");
+            assert!(
+                choice.rejected[0]
+                    .reason
+                    .starts_with("root is not owner-only"),
+                "{}",
+                choice.rejected[0].reason
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_too_long_for_unix_sockets_is_rejected() {
+        let (_guard, top) = hygiene_top();
+        let long = make_dir(&top, &"x".repeat(80), 0o700);
+        let runtime = make_dir(&top, "run", 0o700);
+        let mut environment =
+            platform_environment(&[(SCRATCH_ROOT_ENV, &long), ("XDG_RUNTIME_DIR", &runtime)]);
+        let (_scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert_eq!(choice.source, "XDG_RUNTIME_DIR");
+        assert!(
+            choice.rejected[0]
+                .reason
+                .starts_with("too long for Unix sockets"),
+            "{}",
+            choice.rejected[0].reason
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_resolved_and_its_real_ancestors_are_what_count() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_guard, top) = hygiene_top();
+        let good = make_dir(&top, "run", 0o700);
+        let link = top.join("link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        let mut environment = platform_environment(&[(SCRATCH_ROOT_ENV, &link)]);
+        let (scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert_eq!(choice.source, SCRATCH_ROOT_ENV);
+        assert_eq!(
+            scratch.path().parent(),
+            Some(good.as_path()),
+            "resolved path"
+        );
+        drop(scratch);
+        // The link itself sits in a clean directory but points below a
+        // world-writable one: the real chain is examined, so it is rejected.
+        let open = make_dir(&top, "open", 0o777);
+        let bad = make_dir(&open, "s", 0o700);
+        let bad_link = top.join("bad-link");
+        std::os::unix::fs::symlink(&bad, &bad_link).unwrap();
+        let mut environment = platform_environment(&[(SCRATCH_ROOT_ENV, &bad_link)]);
+        let (_scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert!(!choice.hygienic);
+        assert!(choice.rejected[0]
+            .reason
+            .contains("writable by group or others"));
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_inherited_tmpdir_is_never_chosen_while_a_passing_candidate_exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_guard, top) = hygiene_top();
+        let open = make_dir(&top, "open", 0o777);
+        let inherited = make_dir(&open, "t", 0o700);
+        // The inherited TMPDIR fits the socket budget, as the old rule wanted,
+        // but sits below a world-writable directory; the short base is clean.
+        assert!(fits_socket_budget(inherited.as_os_str().len()));
+        let short_parent = make_dir(&top, "base", 0o755);
+        let mut environment = platform_environment(&[("TMPDIR", &inherited)]);
+        let (scratch, choice) = choose_scratch(&mut environment, &short_parent, &top).unwrap();
+        let uid = rustix::process::geteuid().as_raw();
+        assert_eq!(choice.source, "short base");
+        assert!(choice.hygienic);
+        assert_eq!(
+            scratch.path().parent(),
+            Some(short_parent.join(format!("c{uid}")).as_path())
+        );
+        assert_eq!(rejected_sources(&choice), ["inherited TMPDIR"]);
+        assert_eq!(
+            value(&environment, "TMPDIR").as_deref(),
+            scratch.path().to_str()
+        );
+        drop(scratch);
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_no_passing_candidate_the_earlier_behaviour_applies_and_never_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_guard, top) = hygiene_top();
+        let open = make_dir(&top, "open", 0o777);
+        let inherited = make_dir(&open, "t", 0o700);
+        let file = top.join("not-a-directory");
+        fs::write(&file, "x").unwrap();
+        let mut environment = platform_environment(&[
+            (SCRATCH_ROOT_ENV, &top.join("missing/root")),
+            ("XDG_RUNTIME_DIR", &file),
+            ("TMPDIR", &inherited),
+        ]);
+        let (scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        // Short inherited TMPDIR: the old rule keeps the scratch beneath it.
+        assert!(!choice.hygienic);
+        assert_eq!(choice.source, "inherited TMPDIR");
+        assert_eq!(scratch.path().parent(), Some(inherited.as_path()));
+        assert_eq!(
+            rejected_sources(&choice),
+            [
+                SCRATCH_ROOT_ENV,
+                "XDG_RUNTIME_DIR",
+                "inherited TMPDIR",
+                "short base"
+            ]
+        );
+        drop(scratch);
+        // A nested, too-long inherited TMPDIR with an unusable short base: the
+        // old degradation to the inherited parent, still no failure.
+        let nested = nested_tmpdir(&inherited);
+        let mut environment = platform_environment(&[("TMPDIR", &nested)]);
+        let (scratch, choice) =
+            choose_scratch(&mut environment, &top.join("absent"), &top).unwrap();
+        assert!(!choice.hygienic);
+        assert_eq!(scratch.path().parent(), Some(nested.as_path()));
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[cfg(unix)]

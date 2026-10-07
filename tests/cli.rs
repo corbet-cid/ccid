@@ -256,6 +256,17 @@ fn check_preserves_explicit_package_and_target_roots_and_cleans_its_scratch() {
 /// replaces it.
 #[cfg(unix)]
 fn recorded_check_tmpdir(inherited: Option<&std::path::Path>) -> String {
+    recorded_check_run(inherited, None).0
+}
+
+/// The recorded `TMPDIR` and the run's standard output. `platform_root` is
+/// handed to ccid as `CCID_SCRATCH_ROOT`; the host's own value and
+/// `XDG_RUNTIME_DIR` never leak into the run.
+#[cfg(unix)]
+fn recorded_check_run(
+    inherited: Option<&std::path::Path>,
+    platform_root: Option<&std::path::Path>,
+) -> (String, String) {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let report = root.join("tmpdir");
@@ -278,6 +289,8 @@ fn recorded_check_tmpdir(inherited: Option<&std::path::Path>) -> String {
     command
         .env_remove("CCID_RESULT_CACHE")
         .env_remove("CCID_REMOTE_CACHE")
+        .env_remove("CCID_SCRATCH_ROOT")
+        .env_remove("XDG_RUNTIME_DIR")
         .args([
             "check",
             "--manifest",
@@ -296,13 +309,19 @@ fn recorded_check_tmpdir(inherited: Option<&std::path::Path>) -> String {
     if let Some(tmpdir) = inherited {
         command.env("TMPDIR", tmpdir);
     }
+    if let Some(platform_root) = platform_root {
+        command.env("CCID_SCRATCH_ROOT", platform_root);
+    }
     let result = command.output().unwrap();
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    fs::read_to_string(report).unwrap()
+    (
+        fs::read_to_string(report).unwrap(),
+        String::from_utf8(result.stdout).unwrap(),
+    )
 }
 
 /// `sockaddr_un.sun_path` holds 107 bytes of path; a checked program needs room
@@ -339,6 +358,41 @@ fn check_scratch_under_a_nested_tmpdir_leaves_room_for_unix_socket_paths() {
 #[test]
 fn check_scratch_under_the_real_worker_tmpdir_leaves_room_for_unix_socket_paths() {
     assert_socket_room(&recorded_check_tmpdir(None));
+}
+
+/// A platform root below a world-writable directory (`/tmp` is one everywhere)
+/// fails the hygiene rules: the run still succeeds, uses another scratch and
+/// logs the rejection with its reason.
+#[cfg(unix)]
+#[test]
+fn check_rejects_a_platform_scratch_root_below_a_world_writable_directory_and_still_runs() {
+    use std::os::unix::fs::DirBuilderExt;
+    let outer = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let platform = outer.path().join("platform-root");
+    fs::DirBuilder::new().mode(0o700).create(&platform).unwrap();
+    let (tmpdir, stdout) = recorded_check_run(None, Some(&platform));
+    assert!(
+        !std::path::Path::new(&tmpdir).starts_with(&platform),
+        "a root below a world-writable ancestor must not be used: {tmpdir}"
+    );
+    assert_socket_room(&tmpdir);
+    let event = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["event"] == "scratch-root")
+        .unwrap_or_else(|| panic!("no scratch-root event in:\n{stdout}"));
+    assert_eq!(event["path"].as_str(), Some(tmpdir.as_str()));
+    let rejected = &event["rejected"][0];
+    assert_eq!(rejected["source"], "CCID_SCRATCH_ROOT");
+    assert!(
+        rejected["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("writable by group or others")),
+        "{rejected}"
+    );
 }
 
 #[cfg(target_os = "linux")]

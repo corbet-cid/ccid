@@ -301,6 +301,8 @@ pub(crate) const FORBIDDEN_CACHED_ENV: &[&str] = &[
     "TMPDIR",
     "TEMP",
     "TMP",
+    // The platform-provided scratch root only moves where scratch lives.
+    "CCID_SCRATCH_ROOT",
 ];
 
 /// Central contract gate for the cached path only (`run_cached`). Uncached

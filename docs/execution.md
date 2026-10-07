@@ -41,15 +41,34 @@ Each invocation owns temporary verification/command directories beneath inherite
 `TMPDIR` (or the platform temporary directory), plus the marked stable source
 directory under its target. It removes only its own contents on handled exit.
 Operators choose disk-backed parents and their orphan lifecycle.
-Checked programs create Unix sockets below `TMPDIR`, and a socket path holds at
-most 107 bytes, so a nested worker or `nix-shell` `TMPDIR` can make a program
-fail at launch. The per-invocation scratch directory stays beneath the inherited
-parent only while it leaves 64 bytes for the program's own paths. Otherwise it is
-one level below a short per-user base, `/tmp/c<uid>` (created owner-only; an
-existing path is used only as a real directory owned by the same user without
-group or other access). An unusable base degrades to the inherited parent; it
-never fails the run. `TMPDIR` is never a cache key input, so the location does
-not change any result key.
+Checked programs create Unix sockets and private state below `TMPDIR`, which
+puts two hygiene rules on the scratch root:
+
+1. A socket path holds at most 107 bytes, so the root plus the job directory
+   (`ccid-job-XXXXXX`) must leave 64 bytes for the program's own paths; a nested
+   worker or `nix-shell` `TMPDIR` can otherwise make a program fail at launch.
+2. The root is an owner-only directory (0700) owned by the running user (each job
+   directory in it is created 0700 too), and none
+   of its resolved ancestors is writable by group or others (sticky bit or not)
+   or owned by anyone but root and the user. Tools that vet their state
+   directories, such as Arti's `fs-mistrust`, refuse a state below `/tmp` or a
+   Kubernetes `emptyDir` mount, which are world-writable.
+
+The scratch directory is created in the first candidate that passes both rules:
+`CCID_SCRATCH_ROOT` (a root the platform provides; ccid creates it owner-only
+when absent, one level deep and never recursively), `XDG_RUNTIME_DIR`, the
+inherited `TMPDIR`, then the short per-user base `/tmp/c<uid>` (created
+owner-only; an existing path is used only as a real directory owned by the same
+user without group or other access). Links are resolved first, so the ancestors
+examined are those of the real directory. When no candidate passes, the scratch
+keeps the earlier behaviour: beneath the inherited parent while it leaves 64
+bytes, otherwise one level below the short base, otherwise the inherited
+parent; it never fails the run. Every run logs one `scratch-root` event naming
+the chosen directory, its source, whether it satisfies the rules (`hygienic`)
+and each rejected candidate with the reason. `TMPDIR` is never a cache key
+input, and `CCID_SCRATCH_ROOT` is not one either, so the location does not
+change any result key. The stable Cargo scratch (`/tmp/ccid-<16 hex>`) is a
+fixed deterministic path and is not affected.
 ccid does not clear pre-existing scratch. Unix outer-process SIGKILL is covered
 by the supervisor described below; killing that supervisor or losing the host
 can still leave scratch behind.
