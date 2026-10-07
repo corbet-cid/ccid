@@ -41,6 +41,15 @@ Each invocation owns temporary verification/command directories beneath inherite
 `TMPDIR` (or the platform temporary directory), plus the marked stable source
 directory under its target. It removes only its own contents on handled exit.
 Operators choose disk-backed parents and their orphan lifecycle.
+Checked programs create Unix sockets below `TMPDIR`, and a socket path holds at
+most 107 bytes, so a nested worker or `nix-shell` `TMPDIR` can make a program
+fail at launch. The per-invocation scratch directory stays beneath the inherited
+parent only while it leaves 64 bytes for the program's own paths. Otherwise it is
+one level below a short per-user base, `/tmp/c<uid>` (created owner-only; an
+existing path is used only as a real directory owned by the same user without
+group or other access). An unusable base degrades to the inherited parent; it
+never fails the run. `TMPDIR` is never a cache key input, so the location does
+not change any result key.
 ccid does not clear pre-existing scratch. Unix outer-process SIGKILL is covered
 by the supervisor described below; killing that supervisor or losing the host
 can still leave scratch behind.

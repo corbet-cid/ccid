@@ -251,6 +251,96 @@ fn check_preserves_explicit_package_and_target_roots_and_cleans_its_scratch() {
     assert!(root.exists(), "the caller's scratch parent is retained");
 }
 
+/// Run one `commands` check that records the `TMPDIR` it was given. `inherited`
+/// leaves the caller's `TMPDIR` (a real worker's nested one inside Crow); a path
+/// replaces it.
+#[cfg(unix)]
+fn recorded_check_tmpdir(inherited: Option<&std::path::Path>) -> String {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let report = root.join("tmpdir");
+    let args = vec![
+        "sh",
+        "-c",
+        "printf '%s' \"$TMPDIR\" > \"$1\"",
+        "fixture",
+        report.to_str().unwrap(),
+    ];
+    fs::write(
+        root.join("ccid.toml"),
+        format!(
+            "schema=1\nproject='socket'\n[checks.tmp]\nkind='commands'\ncommands=[{}]\n",
+            serde_json::to_string(&args).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ccid"));
+    command
+        .env_remove("CCID_RESULT_CACHE")
+        .env_remove("CCID_REMOTE_CACHE")
+        .args([
+            "check",
+            "--manifest",
+            "ccid.toml",
+            "--check",
+            "tmp",
+            "--repo",
+        ])
+        .arg(root)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env("CI_JOBS", "1")
+        .env("CI_NIX_JOBS", "1")
+        .env_remove("CI_MIN_AVAILABLE_MB")
+        .env_remove("CI_MEMORY_MB")
+        .env_remove("CI_MEMORY_PER_JOB_MB");
+    if let Some(tmpdir) = inherited {
+        command.env("TMPDIR", tmpdir);
+    }
+    let result = command.output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    fs::read_to_string(report).unwrap()
+}
+
+/// `sockaddr_un.sun_path` holds 107 bytes of path; a checked program needs room
+/// below `TMPDIR` for its own socket paths (64 bytes).
+#[cfg(unix)]
+fn assert_socket_room(tmpdir: &str) {
+    assert!(
+        tmpdir.len() + 64 <= 107,
+        "TMPDIR {tmpdir} ({} bytes) leaves no room for a 64-byte socket path suffix",
+        tmpdir.len()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn check_scratch_under_a_nested_tmpdir_leaves_room_for_unix_socket_paths() {
+    let outer = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let nested = outer
+        .path()
+        .join("ccid-job-qtHmRu/nix-shell-258690-3654363251/ccid-job-p1d4KH");
+    fs::create_dir_all(&nested).unwrap();
+    let tmpdir = recorded_check_tmpdir(Some(&nested));
+    assert_socket_room(&tmpdir);
+    assert!(
+        !std::path::Path::new(&tmpdir).starts_with(&nested),
+        "the scratch root must not nest below the inherited TMPDIR: {tmpdir}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn check_scratch_under_the_real_worker_tmpdir_leaves_room_for_unix_socket_paths() {
+    assert_socket_room(&recorded_check_tmpdir(None));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn sigterm_cancels_the_owned_command_and_releases_its_cache_lock() {

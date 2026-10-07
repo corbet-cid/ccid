@@ -155,7 +155,51 @@ pub(crate) fn lock_target(target: &Path, overall_deadline: Instant) -> Result<(P
     }
 }
 
+/// A Unix socket path (`sockaddr_un.sun_path`) holds 108 bytes including the
+/// terminating NUL, so 107 bytes of path.
+#[cfg(unix)]
+const SUN_PATH_MAX: usize = 107;
+/// Room a checked program keeps below its scratch root for its own socket
+/// paths (a `/` plus nested directories and the socket file name).
+#[cfg(unix)]
+const SOCKET_SUFFIX_BUDGET: usize = 64;
+/// Length of the per-job leaf `ccid-job-` plus six random characters.
+#[cfg(unix)]
+const JOB_LEAF_LEN: usize = "ccid-job-".len() + 6;
+
+/// Per-job scratch directory; exports it as `TMPDIR` to the checked programs.
+///
+/// The scratch path never enters a cache key (`TMPDIR` and `RUNNER_TEMP` are
+/// refused in `cache_env`), so where it lives is free to change. Checked
+/// programs create Unix sockets below `TMPDIR`, and a nested worker or
+/// `nix-shell` `TMPDIR` pushes such paths past `sun_path`. The scratch therefore
+/// stays beneath the inherited `TMPDIR` only while that leaves
+/// [`SOCKET_SUFFIX_BUDGET`] bytes for the program; otherwise it becomes a
+/// single-level directory in a short per-user base (`/tmp/c<uid>`). If that
+/// base is unusable the job degrades to the inherited parent, as before.
 pub(crate) fn scratch(env: &mut Environment) -> Result<tempfile::TempDir> {
+    scratch_with_short_base(env, Path::new("/tmp"))
+}
+
+fn scratch_with_short_base(
+    env: &mut Environment,
+    short_parent: &Path,
+) -> Result<tempfile::TempDir> {
+    let parent = scratch_parent(env)?;
+    #[cfg(unix)]
+    if parent.as_os_str().len() + 1 + JOB_LEAF_LEN + SOCKET_SUFFIX_BUDGET > SUN_PATH_MAX {
+        if let Some(scratch) = short_base(short_parent).and_then(|base| job_scratch_in(&base).ok())
+        {
+            set(env, "TMPDIR", scratch.path().as_os_str());
+            return Ok(scratch);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = short_parent;
+    scratch_in(env, parent)
+}
+
+fn scratch_parent(env: &Environment) -> Result<PathBuf> {
     let parent = value(env, "TMPDIR").map(PathBuf::from).unwrap_or_else(|| {
         #[cfg(unix)]
         {
@@ -169,15 +213,41 @@ pub(crate) fn scratch(env: &mut Environment) -> Result<tempfile::TempDir> {
     if parent.as_os_str().is_empty() {
         return Err(failure("Temporary-directory parent must not be empty"));
     }
-    let scratch = tempfile::Builder::new()
+    Ok(parent)
+}
+
+fn job_scratch_in(parent: &Path) -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
         .prefix("ccid-job-")
-        .tempdir_in(parent)?;
+        .tempdir_in(parent)
+}
+
+fn scratch_in(env: &mut Environment, parent: PathBuf) -> Result<tempfile::TempDir> {
+    let scratch = job_scratch_in(&parent)?;
     set(env, "TMPDIR", scratch.path().as_os_str());
     #[cfg(windows)]
     for name in ["TEMP", "TMP"] {
         set(env, name, scratch.path().as_os_str());
     }
     Ok(scratch)
+}
+
+/// The short per-user base `<parent>/c<uid>`. It is created owner-only; an
+/// existing path is accepted only as a real directory (never a link) owned by
+/// this user without group or other access. Anything else, or an unwritable
+/// parent, returns `None` and the caller degrades to the inherited `TMPDIR`.
+#[cfg(unix)]
+fn short_base(parent: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let uid = rustix::process::geteuid().as_raw();
+    let base = parent.join(format!("c{uid}"));
+    match fs::DirBuilder::new().mode(0o700).create(&base) {
+        Ok(()) => (),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+        Err(_) => return None,
+    }
+    let meta = fs::symlink_metadata(&base).ok()?;
+    (meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0).then_some(base)
 }
 
 /// Disposable contents at a stable path. Never retain generated files between
@@ -623,6 +693,119 @@ mod tests {
         assert_eq!(first, second);
     }
     use super::*;
+
+    /// A worker-nested `TMPDIR` shaped like the one that broke Unix sockets:
+    /// outer job scratch, `nix-shell` scratch, inner job scratch.
+    #[cfg(unix)]
+    fn nested_tmpdir(root: &Path) -> PathBuf {
+        let nested = root.join("ccid-job-qtHmRu/nix-shell-258690-3654363251/ccid-job-p1d4KH");
+        fs::create_dir_all(&nested).unwrap();
+        nested
+    }
+
+    #[cfg(unix)]
+    fn tmpdir_environment(path: &Path) -> Environment {
+        let mut environment = Environment::new();
+        environment.insert("TMPDIR".into(), path.as_os_str().into());
+        environment
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn job_scratch_under_a_nested_tmpdir_is_short_single_level_and_socket_safe() {
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        let outer = tempfile::Builder::new()
+            .prefix("t")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let nested = nested_tmpdir(outer.path());
+        let mut environment = tmpdir_environment(&nested);
+        let before = environment.clone();
+        let path = {
+            let scratch = scratch(&mut environment).unwrap();
+            let path = scratch.path().to_owned();
+            assert!(path.is_dir());
+            assert!(!path.starts_with(&nested), "scratch must not nest");
+            assert_eq!(
+                path.parent().unwrap(),
+                Path::new("/tmp").join(format!("c{}", rustix::process::geteuid().as_raw())),
+                "one level below the short per-user base"
+            );
+            assert!(path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ccid-job-")));
+            assert_eq!(value(&environment, "TMPDIR").as_deref(), path.to_str());
+            // The scratch root plus a 64-byte suffix stays under sun_path.
+            assert!(path.as_os_str().len() + SOCKET_SUFFIX_BUDGET <= SUN_PATH_MAX);
+            // A real socket at the full suffix budget binds under the root.
+            let socket = path.join("s".repeat(SOCKET_SUFFIX_BUDGET - 1));
+            assert_eq!(socket.as_os_str().len(), path.as_os_str().len() + 64);
+            drop(UnixListener::bind(&socket).unwrap());
+            let base = fs::metadata(path.parent().unwrap()).unwrap();
+            assert_eq!(base.permissions().mode() & 0o077, 0, "base is owner only");
+            path
+        };
+        assert!(!path.exists(), "owned scratch is removed with its guard");
+        // Only TMPDIR changes: nothing that could reach a cache key is added.
+        let mut expected = before;
+        expected.insert("TMPDIR".into(), path.as_os_str().into());
+        assert_eq!(environment, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn job_scratch_stays_beneath_a_short_tmpdir_and_the_longest_short_root_fits() {
+        let parent = tempfile::Builder::new()
+            .prefix("s")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let mut environment = tmpdir_environment(parent.path());
+        let scratch = scratch(&mut environment).unwrap();
+        assert_eq!(scratch.path().parent(), Some(parent.path()));
+        // Worst case of the short root: a 10-digit uid.
+        let widest_base = format!("/tmp/c{}/", u32::MAX);
+        assert!(widest_base.len() + JOB_LEAF_LEN + SOCKET_SUFFIX_BUDGET <= SUN_PATH_MAX);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn job_scratch_degrades_to_the_inherited_tmpdir_when_the_short_base_is_unusable() {
+        use std::os::unix::fs::PermissionsExt;
+        let outer = tempfile::Builder::new()
+            .prefix("t")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let nested = nested_tmpdir(outer.path());
+        let uid = rustix::process::geteuid().as_raw();
+        // A link planted at the base is never followed.
+        let linked = outer.path().join("linked");
+        let elsewhere = outer.path().join("elsewhere");
+        fs::create_dir_all(&linked).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, linked.join(format!("c{uid}"))).unwrap();
+        // A group- or other-accessible base is refused.
+        let open = outer.path().join("open");
+        fs::create_dir_all(open.join(format!("c{uid}"))).unwrap();
+        fs::set_permissions(
+            open.join(format!("c{uid}")),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        // An unwritable (absent) parent is refused too.
+        let absent = outer.path().join("absent");
+        for short_parent in [&linked, &open, &absent] {
+            let mut environment = tmpdir_environment(&nested);
+            let scratch = scratch_with_short_base(&mut environment, short_parent).unwrap();
+            assert_eq!(scratch.path().parent(), Some(nested.as_path()));
+            assert_eq!(
+                value(&environment, "TMPDIR").as_deref(),
+                scratch.path().to_str()
+            );
+        }
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn stable_sources_remove_only_owned_contents_and_refuse_symlink_roots() {
