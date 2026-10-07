@@ -758,9 +758,10 @@ fn manifest_git_deps(
     Ok(())
 }
 
-/// Scan one workspace member manifest (literal path only, one level).
-/// Glob patterns, escapes, and unreadable members fail closed: silently
-/// skipping a member would silently narrow the inventory.
+/// Scan one workspace member manifest (literal path only, one level; a
+/// final `dir/*` is expanded by `expand_member`). Other glob patterns,
+/// escapes, and unreadable members fail closed: silently skipping a member
+/// would silently narrow the inventory.
 fn scan_member_manifest(
     root: &Path,
     member: &str,
@@ -787,6 +788,47 @@ fn scan_member_manifest(
         toml::from_str(&text).map_err(|_| failure("Invalid workspace member manifest"))?;
     manifest_git_deps(&doc, out)?;
     Ok(())
+}
+
+/// Expand the one glob form workspaces use in practice: a literal directory
+/// followed by a final `*` component. Every other pattern stays literal and is
+/// rejected by `scan_member_manifest`; a symlinked entry fails closed. An
+/// inventory must never silently narrow, and one pattern must not fail every
+/// job of an ordinary `crates/*` workspace.
+fn expand_member(root: &Path, member: &str) -> Result<Vec<String>> {
+    let Some(parent) = member.strip_suffix("/*") else {
+        return Ok(vec![member.to_owned()]);
+    };
+    if parent.is_empty()
+        || parent.starts_with('/')
+        || parent.contains(['*', '?', '[', ']', '{', '}', '!', '\\'])
+        || parent
+            .split('/')
+            .any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return Ok(vec![member.to_owned()]);
+    }
+    let directory = root.join(parent);
+    let mut members = Vec::new();
+    for entry in std::fs::read_dir(&directory)
+        .map_err(|_| failure("Workspace member directory unreadable"))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(failure("Workspace member symlink is unsupported"));
+        }
+        if !file_type.is_dir() || !entry.path().join("Cargo.toml").is_file() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| failure("Workspace member name requires UTF-8"))?;
+        members.push(format!("{parent}/{name}"));
+    }
+    members.sort();
+    Ok(members)
 }
 
 fn workspace_members(doc: &toml::Value) -> Vec<String> {
@@ -819,7 +861,9 @@ fn scan_refs(root: &Path) -> Result<BTreeMap<String, ScannedGit>> {
             toml::from_str(&text).map_err(|_| failure("Invalid Cargo manifest"))?;
         manifest_git_deps(&doc, &mut manifest)?;
         for member in workspace_members(&doc) {
-            scan_member_manifest(root, &member, &mut manifest)?;
+            for expanded in expand_member(root, &member)? {
+                scan_member_manifest(root, &expanded, &mut manifest)?;
+            }
         }
     }
     // key -> (base url, pinned, moving)
@@ -2003,6 +2047,58 @@ mod inventory_tests {
     }
 
     #[test]
+    fn final_star_member_expands_to_manifest_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha = "d".repeat(40);
+        write_file(
+            dir.path(),
+            "Cargo.toml",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[workspace]\nmembers = [\"crates/*\"]\n",
+        );
+        std::fs::create_dir_all(dir.path().join("crates/a")).unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/b")).unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/no-manifest")).unwrap();
+        write_file(&dir.path().join("crates"), "README.md", "not a member\n");
+        write_file(
+            &dir.path().join("crates/a"),
+            "Cargo.toml",
+            &format!("[package]\nname = \"a\"\nversion = \"0.1.0\"\n[dependencies]\nadep = {{ git = \"https://git.example/acme/adep\", rev = \"{sha}\" }}\n"),
+        );
+        write_file(
+            &dir.path().join("crates/b"),
+            "Cargo.toml",
+            &format!("[package]\nname = \"b\"\nversion = \"0.1.0\"\n[dependencies]\nbdep = {{ git = \"https://git.example/acme/bdep\", rev = \"{sha}\" }}\n"),
+        );
+        write_file(
+            dir.path(),
+            "Cargo.lock",
+            &format!("[[package]]\nname = \"adep\"\nversion = \"0.1.0\"\nsource = \"git+https://git.example/acme/adep?rev={sha}#{sha}\"\n[[package]]\nname = \"bdep\"\nversion = \"0.1.0\"\nsource = \"git+https://git.example/acme/bdep?rev={sha}#{sha}\"\n"),
+        );
+        let inv = build_inventory(dir.path(), &[], &test_config()).unwrap();
+        let paths: Vec<&str> = inv.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(paths, vec!["acme/adep", "acme/bdep"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_star_member_refuses_a_symlinked_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(
+            dir.path(),
+            "Cargo.toml",
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[workspace]\nmembers = [\"crates/*\"]\n",
+        );
+        std::fs::create_dir_all(dir.path().join("crates")).unwrap();
+        std::fs::create_dir_all(dir.path().join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("elsewhere"),
+            dir.path().join("crates/linked"),
+        )
+        .unwrap();
+        assert!(build_inventory(dir.path(), &[], &test_config()).is_err());
+    }
+
+    #[test]
     fn conflicting_and_unsupported_members_fail_closed() {
         let config = test_config();
         // Same URL, different refs across tables: conflict.
@@ -2027,14 +2123,19 @@ mod inventory_tests {
         );
         let inv = build_inventory(dir.path(), &[], &config).unwrap();
         assert_eq!(inv.len(), 1);
-        // Glob member pattern: unsupported, explicit error.
-        let dir = tempfile::tempdir().unwrap();
-        write_file(
-            dir.path(),
-            "Cargo.toml",
-            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n[workspace]\nmembers = [\"crates/*\"]\n",
-        );
-        assert!(build_inventory(dir.path(), &[], &config).is_err());
+        // Any glob other than a final `dir/*`: unsupported, explicit error.
+        for pattern in ["crates/**", "crates/a?", "cr*/x", "{a,b}", "*", "../*"] {
+            let dir = tempfile::tempdir().unwrap();
+            write_file(
+                dir.path(),
+                "Cargo.toml",
+                &format!("[package]\nname = \"x\"\nversion = \"0.1.0\"\n[workspace]\nmembers = [\"{pattern}\"]\n"),
+            );
+            assert!(
+                build_inventory(dir.path(), &[], &config).is_err(),
+                "{pattern}"
+            );
+        }
         // Listed but missing member manifest: explicit error.
         let dir = tempfile::tempdir().unwrap();
         write_file(

@@ -2,7 +2,7 @@ schema = 1
 project = "ccid"
 
 [render]
-tool_revision = "3caf43366cf4dd751e5283c246e4b9d6f0e3f8cd"
+tool_revision = "223adb5a008f4ed1ba36d1f52796ccd29077db6e"
 
 [checks.test]
 kind = "commands"
