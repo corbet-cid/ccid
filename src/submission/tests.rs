@@ -3,6 +3,7 @@ use super::*;
 use std::cell::RefCell;
 
 mod archives;
+mod cfrg_client;
 mod contracts;
 mod dependent_checks;
 mod failure_digest;
@@ -11,6 +12,7 @@ mod provider_routes;
 mod providers;
 mod resolution;
 mod retry;
+mod rollout_cases;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 fn config(root: &Path) -> Config {

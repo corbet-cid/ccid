@@ -1,10 +1,11 @@
 //! Dependent discovery and the post-landing check driver.
 use super::failure_digest::{entries, pipeline};
 use super::*;
+use crate::submission::cfrg::{Line, LineFile};
 use crate::submission::dependents::{
     self, Class, Clock, Dependent, Drive, Prepared, Record, Submitted, Submitter,
 };
-use crate::submission::forge_scan::{self, Cache, HttpStatus, Matcher};
+use crate::submission::manifest_scan::{self, Cache, Manifests, Matcher};
 use base64::Engine;
 use std::{
     cell::{Cell, RefCell},
@@ -43,25 +44,25 @@ fn matcher<'a>(
 
 #[test]
 fn references_come_from_cargo_text_and_flake_lock_json() {
-    let lock = forge_scan::references("Cargo.lock", CARGO_LOCK);
+    let lock = manifest_scan::references("Cargo.lock", CARGO_LOCK);
     assert!(lock.iter().any(|r| r
         == &format!(
             "git+https://forge.example.invalid/example-libs/cgbl.git?rev={LANDED}#{LANDED}"
         )));
     assert!(lock.iter().all(|r| !r.starts_with("registry")), "{lock:?}");
-    let toml = forge_scan::references("Cargo.toml", CARGO_TOML);
+    let toml = manifest_scan::references("Cargo.toml", CARGO_TOML);
     assert!(toml.contains(&"https://forge.example.invalid/example-libs/cgbl.git".to_string()));
-    let flake = forge_scan::references("flake.lock", FLAKE_LOCK);
+    let flake = manifest_scan::references("flake.lock", FLAKE_LOCK);
     assert!(flake.iter().any(|r| {
         r.starts_with("https://forge.example.invalid/example-nix/nixscroll.git#8c1310a2")
     }));
     assert!(flake.contains(&"https://forge.example.invalid/example-nix/nixscroll.git".to_string()));
-    let nix = forge_scan::references("flake.nix", FLAKE_NIX);
+    let nix = manifest_scan::references("flake.nix", FLAKE_NIX);
     assert!(nix.contains(
         &"git+https://forge.example.invalid/example-nix/nixscroll.git?allRefs=1".to_string()
     ));
     assert!(
-        forge_scan::references("flake.lock", "not json \"https://a.invalid/x/y\"")
+        manifest_scan::references("flake.lock", "not json \"https://a.invalid/x/y\"")
             .contains(&"https://a.invalid/x/y".to_string())
     );
 }
@@ -113,70 +114,94 @@ fn matching_follows_the_canonical_identity_and_reports_exact_pins() {
     );
 }
 
-struct FakeForge {
-    responses: HashMap<String, std::result::Result<Value, u16>>,
-    calls: RefCell<Vec<String>>,
+/// What the forge holds for one repository, as cfrg would report it.
+enum Held {
+    Files(Vec<(&'static str, char, &'static str)>),
+    Absent,
+    Failed(&'static str),
 }
-impl Api for FakeForge {
-    fn call(&self, path: &str, _: Option<&Value>) -> Result<Value> {
-        self.calls.borrow_mut().push(path.to_string());
-        match self.responses.get(path) {
-            Some(Ok(value)) => Ok(value.clone()),
-            Some(Err(code)) => Err(Box::new(HttpStatus(*code))),
-            None => Err(Box::new(HttpStatus(404))),
+struct FakeManifests {
+    repos: HashMap<&'static str, Held>,
+    /// `(targets asked, blobs listed as known)` per call.
+    asked: RefCell<Vec<(usize, usize)>>,
+    delivered: RefCell<usize>,
+}
+impl Manifests for FakeManifests {
+    fn read(&self, targets: &[(String, String)], known: &BTreeSet<String>) -> Result<Vec<Line>> {
+        self.asked.borrow_mut().push((targets.len(), known.len()));
+        let blob_id = |c: char| c.to_string().repeat(40);
+        let mut lines = Vec::new();
+        for (name, _) in targets {
+            // A repository the forge does not know has no branch to read.
+            let held = self.repos.get(name.as_str()).unwrap_or(&Held::Absent);
+            let line = match held {
+                Held::Absent => Line {
+                    repository: name.clone(),
+                    state: "absent".into(),
+                    files: vec![],
+                    error: None,
+                },
+                Held::Failed(error) => Line {
+                    repository: name.clone(),
+                    state: "failed".into(),
+                    files: vec![],
+                    error: Some((*error).into()),
+                },
+                Held::Files(files) => Line {
+                    repository: name.clone(),
+                    state: "found".into(),
+                    files: files
+                        .iter()
+                        // cfrg is asked for the manifests only.
+                        .filter(|(path, _, _)| manifest_scan::MANIFESTS.contains(path))
+                        .map(|(path, id, content)| {
+                            let blob = blob_id(*id);
+                            let content = (!known.contains(&blob)).then(|| {
+                                *self.delivered.borrow_mut() += 1;
+                                base64::engine::general_purpose::STANDARD.encode(content)
+                            });
+                            LineFile {
+                                path: (*path).into(),
+                                blob,
+                                content,
+                            }
+                        })
+                        .collect(),
+                    error: None,
+                },
+            };
+            lines.push(line);
         }
+        Ok(lines)
     }
-}
-fn blob(content: &str) -> Value {
-    let packed = base64::engine::general_purpose::STANDARD.encode(content);
-    let wrapped: Vec<&str> = packed
-        .as_bytes()
-        .chunks(60)
-        .map(|c| std::str::from_utf8(c).unwrap())
-        .collect();
-    json!({"encoding":"base64","content":wrapped.join("\n")})
 }
 fn record(id: u64, full_name: &str) -> Value {
     json!({"id":id,"active":true,"full_name":full_name,"default_branch":"main",
         "clone_url":format!("https://forge.example.invalid/{full_name}.git")})
 }
-fn forge() -> FakeForge {
-    let sha = |c: char| c.to_string().repeat(40);
-    let tree = |files: &[(&str, char)]| json!({"tree":files.iter().map(|(p, c)| json!({"path":p,"type":"blob","sha":sha(*c)})).collect::<Vec<_>>()});
-    FakeForge {
-        responses: HashMap::from([
+fn forge() -> FakeManifests {
+    FakeManifests {
+        repos: HashMap::from([
             (
-                "/repos/example-libs/cmty/git/trees/main".into(),
-                Ok(tree(&[
-                    ("Cargo.lock", 'a'),
-                    ("Cargo.toml", 'b'),
-                    ("README.md", 'f'),
-                ])),
+                "example-libs/cmty",
+                Held::Files(vec![
+                    ("Cargo.lock", 'a', CARGO_LOCK),
+                    ("Cargo.toml", 'b', CARGO_TOML),
+                    ("README.md", 'f', "readme"),
+                ]),
             ),
             (
-                format!("/repos/example-libs/cmty/git/blobs/{}", sha('a')),
-                Ok(blob(CARGO_LOCK)),
+                "example-nix/nixlaunch",
+                Held::Files(vec![
+                    ("flake.lock", 'c', FLAKE_LOCK),
+                    ("flake.nix", 'd', FLAKE_NIX),
+                ]),
             ),
-            (
-                format!("/repos/example-libs/cmty/git/blobs/{}", sha('b')),
-                Ok(blob(CARGO_TOML)),
-            ),
-            (
-                "/repos/example-nix/nixlaunch/git/trees/main".into(),
-                Ok(tree(&[("flake.lock", 'c'), ("flake.nix", 'd')])),
-            ),
-            (
-                format!("/repos/example-nix/nixlaunch/git/blobs/{}", sha('c')),
-                Ok(blob(FLAKE_LOCK)),
-            ),
-            (
-                format!("/repos/example-nix/nixlaunch/git/blobs/{}", sha('d')),
-                Ok(blob(FLAKE_NIX)),
-            ),
-            ("/repos/example-libs/empty/git/trees/main".into(), Err(409)),
-            ("/repos/example-libs/broken/git/trees/main".into(), Err(500)),
+            ("example-libs/empty", Held::Absent),
+            ("example-libs/broken", Held::Failed("Native API HTTP 500")),
         ]),
-        calls: RefCell::new(vec![]),
+        asked: RefCell::new(vec![]),
+        delivered: RefCell::new(0),
     }
 }
 fn records() -> Vec<Value> {
@@ -195,7 +220,7 @@ fn scan_finds_dependents_skips_self_and_degrades_on_errors() {
     let aliases = aliases();
     let forge = forge();
     let mut cache = Cache::default();
-    let scan = forge_scan::scan(
+    let scan = manifest_scan::scan(
         &forge,
         &records(),
         &matcher(IDENTITY, &aliases, &[]),
@@ -217,7 +242,31 @@ fn scan_finds_dependents_skips_self_and_degrades_on_errors() {
         scan.unreadable
     );
     assert_eq!(scan.fetched, 4);
-    assert!(!forge.calls.borrow().iter().any(|c| c.contains("README")));
+    assert_eq!(*forge.delivered.borrow(), 4);
+    // One call for every scanned repository, nothing known yet.
+    assert_eq!(*forge.asked.borrow(), vec![(4, 0)]);
+    assert!(found.files.iter().all(|f| !f.contains("README")));
+}
+
+#[test]
+fn a_failed_cfrg_call_marks_every_scanned_repository_unreadable() {
+    struct Down;
+    impl Manifests for Down {
+        fn read(&self, _: &[(String, String)], _: &BTreeSet<String>) -> Result<Vec<Line>> {
+            Err("cfrg failed (exit status: 2): Native rate/plan hold".into())
+        }
+    }
+    let aliases = aliases();
+    let scan = manifest_scan::scan(
+        &Down,
+        &records(),
+        &matcher(IDENTITY, &aliases, &[]),
+        &mut Cache::default(),
+    );
+    assert!(scan.dependents.is_empty());
+    assert_eq!(scan.scanned, 4);
+    assert_eq!(scan.unreadable.len(), 4);
+    assert!(scan.unreadable.iter().all(|u| u.contains("rate/plan hold")));
 }
 
 #[test]
@@ -226,27 +275,29 @@ fn flake_inputs_are_dependents_too_and_a_warm_scan_fetches_no_blob() {
     let forge = forge();
     let mut cache = Cache::default();
     let nix = "https://forge.example.invalid/example-nix/nixscroll";
-    let cold = forge_scan::scan(&forge, &records(), &matcher(nix, &aliases, &[]), &mut cache);
+    let cold = manifest_scan::scan(&forge, &records(), &matcher(nix, &aliases, &[]), &mut cache);
     assert_eq!(cold.dependents.len(), 1);
     assert_eq!(cold.dependents[0].files, vec!["flake.lock", "flake.nix"]);
     assert!(cold.dependents[0]
         .pins
         .iter()
         .any(|p| p.starts_with("8c1310a2")));
-    let before = forge.calls.borrow().len();
-    let warm = forge_scan::scan(&forge, &records(), &matcher(nix, &aliases, &[]), &mut cache);
+    let before = *forge.delivered.borrow();
+    let warm = manifest_scan::scan(&forge, &records(), &matcher(nix, &aliases, &[]), &mut cache);
     assert_eq!(warm.fetched, 0);
     assert_eq!(warm.dependents.len(), 1);
-    let blobs = forge.calls.borrow()[before..]
-        .iter()
-        .filter(|c| c.contains("/blobs/"))
-        .count();
-    assert_eq!(blobs, 0, "cached references must not be fetched again");
+    assert_eq!(
+        *forge.delivered.borrow(),
+        before,
+        "cached references must not be fetched again"
+    );
+    // Every blob the cold scan read is handed to cfrg as known.
+    assert_eq!(forge.asked.borrow().last(), Some(&(5, before)));
     // The cache round-trips through its file.
     let dir = tempfile::tempdir().unwrap();
     cache.save(&dir.path().join("refs.json")).unwrap();
     let mut reloaded = Cache::load(&dir.path().join("refs.json"));
-    let again = forge_scan::scan(
+    let again = manifest_scan::scan(
         &forge,
         &records(),
         &matcher(nix, &aliases, &[]),
@@ -259,12 +310,17 @@ fn flake_inputs_are_dependents_too_and_a_warm_scan_fetches_no_blob() {
 }
 
 #[test]
-fn forge_root_comes_from_the_clone_url() {
+fn forge_origin_comes_from_the_clone_url() {
+    use crate::submission::cfrg::origin;
     assert_eq!(
-        forge_scan::Forge::root("https://forge.example.invalid/o/r.git").unwrap(),
-        "https://forge.example.invalid/api/v1"
+        origin("https://forge.example.invalid/o/r.git").unwrap(),
+        "https://forge.example.invalid"
     );
-    assert!(forge_scan::Forge::root("http://forge.example.invalid/o/r.git").is_err());
+    assert_eq!(
+        origin("https://forge.example.invalid:3001/o/r.git").unwrap(),
+        "https://forge.example.invalid:3001"
+    );
+    assert!(origin("http://forge.example.invalid/o/r.git").is_err());
 }
 
 #[test]
@@ -598,7 +654,7 @@ fn existing_runs_are_reused_and_unsubmittable_repositories_are_skipped() {
         .lines
         .iter()
         .any(|l| l.starts_with("skip") && l.contains("no [jobs.verify] declared")));
-    let scan = forge_scan::Scan {
+    let scan = manifest_scan::Scan {
         scanned: 190,
         fetched: 4,
         ..Default::default()

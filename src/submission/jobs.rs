@@ -101,7 +101,7 @@ pub(super) fn admit_previous(phase: &str, rerun: bool) -> Result<()> {
     }
     Ok(())
 }
-fn planner(config: &Config, revision: &str, remote: &Value) -> Result<PathBuf> {
+pub(super) fn planner(config: &Config, revision: &str, remote: &Value) -> Result<PathBuf> {
     let root = config.directory("ci-job-tools")?.join(revision);
     fs::create_dir_all(&root)?;
     let _lock = lock(&root.join("download.lock"))?;

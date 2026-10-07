@@ -3,83 +3,29 @@
 //! Which active repositories pin or track a given canonical git identity?
 //! The answer is read from each repository's default branch on the forge
 //! (root manifests `Cargo.lock`, `Cargo.toml`, `flake.lock`, `flake.nix`),
-//! never from local checkouts. A blob is fetched once ever: extracted
-//! references are cached by git blob id, so a warm scan costs one tree
-//! request per repository.
-use super::core::Api;
+//! never from local checkouts, and always through cfrg. A blob is fetched
+//! once ever: extracted references are cached by git blob id and handed to
+//! cfrg as known blobs, so a warm scan costs one tree request per repository.
+use super::cfrg::Line;
 use super::*;
 use regex::Regex;
-use std::{fmt, sync::LazyLock, time::Duration};
+use std::sync::LazyLock;
 
 pub(super) const MANIFESTS: [&str; 4] = ["Cargo.lock", "Cargo.toml", "flake.lock", "flake.nix"];
-const BACKOFF_SECONDS: [u64; 4] = [2, 4, 8, 16];
 
 static QUOTED_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#""((?:git\+)?(?:https?|ssh)://[^"\s]+)""#).expect("static reference pattern")
 });
 
-/// A non-2xx forge answer.
-#[derive(Debug)]
-pub(super) struct HttpStatus(pub u16);
-impl fmt::Display for HttpStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Forge request failed: HTTP {}", self.0)
-    }
+/// The manifests of many repositories, as the forge holds them.
+pub(super) trait Manifests {
+    /// One line per `(repository, branch)` target. Blobs in `known` come back
+    /// without their bytes.
+    fn read(&self, targets: &[(String, String)], known: &BTreeSet<String>) -> Result<Vec<Line>>;
 }
-impl std::error::Error for HttpStatus {}
-fn status_of(error: &(dyn std::error::Error + 'static)) -> Option<u16> {
-    error.downcast_ref::<HttpStatus>().map(|s| s.0)
-}
-
-/// Read-only forge API client: paced, and patient with rate limits (429).
-pub(super) struct Forge {
-    base: String,
-    token: Option<String>,
-    pause: Duration,
-}
-impl Forge {
-    pub fn new(base: String, token: Option<String>) -> Self {
-        Self {
-            base,
-            token,
-            pause: Duration::from_millis(100),
-        }
-    }
-    /// The API root for a repository's clone URL (`https://host/api/v1`).
-    pub fn root(clone_url: &str) -> Result<String> {
-        let url = url::Url::parse(clone_url)?;
-        if url.scheme() != "https" {
-            return Err("Forge API needs an https clone URL".into());
-        }
-        Ok(format!(
-            "https://{}/api/v1",
-            url.host_str().ok_or("Forge host missing")?
-        ))
-    }
-}
-impl Api for Forge {
-    fn call(&self, path: &str, _: Option<&Value>) -> Result<Value> {
-        if !path.starts_with('/') || path.contains(['\r', '\n', '#']) {
-            return Err("Invalid forge API path".into());
-        }
-        let mut waits = BACKOFF_SECONDS.iter();
-        loop {
-            std::thread::sleep(self.pause);
-            let response = transport::http(
-                &format!("{}{path}", self.base),
-                self.token.as_deref(),
-                None,
-                16 * 1024 * 1024,
-            )?;
-            match response.status {
-                200..=299 => return Ok(serde_json::from_slice(&response.data)?),
-                429 => match waits.next() {
-                    Some(seconds) => std::thread::sleep(Duration::from_secs(*seconds)),
-                    None => return Err(Box::new(HttpStatus(429))),
-                },
-                other => return Err(Box::new(HttpStatus(other))),
-            }
-        }
+impl Manifests for super::cfrg::Cfrg {
+    fn read(&self, targets: &[(String, String)], known: &BTreeSet<String>) -> Result<Vec<Line>> {
+        self.contents(targets, &MANIFESTS, known)
     }
 }
 
@@ -179,24 +125,15 @@ pub(super) struct Scan {
     pub unreadable: Vec<String>,
 }
 
-fn blob_text(forge: &dyn Api, full_name: &str, sha: &str) -> Result<String> {
-    use base64::Engine;
-    let blob = forge.call(&format!("/repos/{full_name}/git/blobs/{sha}"), None)?;
-    let packed: String = text(&blob, "content").split_whitespace().collect();
-    Ok(
-        String::from_utf8_lossy(&base64::engine::general_purpose::STANDARD.decode(packed)?)
-            .into_owned(),
-    )
-}
-
 /// Scan every active repository except the landed one.
 pub(super) fn scan(
-    forge: &dyn Api,
+    manifests: &dyn Manifests,
     records: &[Value],
     matcher: &Matcher,
     cache: &mut Cache,
 ) -> Scan {
     let mut result = Scan::default();
+    let mut targets = Vec::new();
     for record in records {
         let full_name = text(record, "full_name");
         let branch = match text(record, "default_branch").as_str() {
@@ -212,49 +149,78 @@ pub(super) fn scan(
             continue;
         }
         result.scanned += 1;
-        let tree = match forge.call(&format!("/repos/{full_name}/git/trees/{branch}"), None) {
-            Ok(tree) => tree,
-            Err(e) if matches!(status_of(e.as_ref()), Some(404 | 409)) => continue,
-            Err(e) => {
-                result.unreadable.push(format!("{full_name} ({e})"));
+        targets.push((record, full_name, branch));
+    }
+    let wanted: Vec<(String, String)> = targets
+        .iter()
+        .map(|(_, name, branch)| (name.clone(), branch.clone()))
+        .collect();
+    let known: BTreeSet<String> = cache.blobs.keys().cloned().collect();
+    let lines = match manifests.read(&wanted, &known) {
+        Ok(lines) => lines,
+        Err(e) => {
+            result
+                .unreadable
+                .extend(targets.iter().map(|(_, name, _)| format!("{name} ({e})")));
+            return result;
+        }
+    };
+    let answers: BTreeMap<&str, &Line> = lines.iter().map(|l| (l.repository.as_str(), l)).collect();
+    for (record, full_name, _) in targets {
+        let Some(line) = answers.get(full_name.as_str()) else {
+            result.unreadable.push(format!("{full_name} (no answer)"));
+            continue;
+        };
+        match line.state.as_str() {
+            "found" => {}
+            // No such branch, or an empty repository: nothing to depend on.
+            "absent" => continue,
+            _ => {
+                let reason = line.error.as_deref().unwrap_or("not read");
+                result.unreadable.push(format!("{full_name} ({reason})"));
                 continue;
             }
-        };
+        }
         let mut found = Found {
             record: record.clone(),
             files: vec![],
             pins: BTreeSet::new(),
         };
-        for entry in rows(&tree["tree"]) {
-            let path = text(entry, "path");
-            let sha = text(entry, "sha");
-            if text(entry, "type") != "blob"
-                || !MANIFESTS.contains(&path.as_str())
-                || !exact_sha(&sha)
-            {
+        for file in &line.files {
+            if !MANIFESTS.contains(&file.path.as_str()) || !exact_sha(&file.blob) {
                 continue;
             }
-            if !cache.blobs.contains_key(&sha) {
-                match blob_text(forge, &full_name, &sha) {
-                    Ok(content) => {
+            if !cache.blobs.contains_key(&file.blob) {
+                match file.text() {
+                    Ok(Some(content)) => {
                         result.fetched += 1;
-                        cache.blobs.insert(sha.clone(), references(&path, &content));
+                        cache
+                            .blobs
+                            .insert(file.blob.clone(), references(&file.path, &content));
+                    }
+                    Ok(None) => {
+                        result
+                            .unreadable
+                            .push(format!("{full_name}/{} (bytes not delivered)", file.path));
+                        continue;
                     }
                     Err(e) => {
-                        result.unreadable.push(format!("{full_name}/{path} ({e})"));
+                        result
+                            .unreadable
+                            .push(format!("{full_name}/{} ({e})", file.path));
                         continue;
                     }
                 }
             }
             let mut hit = false;
-            for reference in &cache.blobs[&sha] {
+            for reference in &cache.blobs[&file.blob] {
                 if let Some(pin) = matcher.pin(reference) {
                     hit = true;
                     found.pins.extend(pin);
                 }
             }
             if hit {
-                found.files.push(path);
+                found.files.push(file.path.clone());
             }
         }
         if !found.files.is_empty() {

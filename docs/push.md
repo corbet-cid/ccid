@@ -51,7 +51,7 @@ self_name = "deplib"
   and check execution alike (for example a shared warm `CARGO_TARGET_DIR`,
   build parallelism, fetch policy). Reserved identity, status, and
   job-ownership keys (`CCID_BIN`, `CI_COMMIT_SHA`, `RUNNER_TEMP`,
-  `CFRG_STATUS_*` (plus legacy `CCID_STATUS_*`, still stripped), and related
+  `CFRG_STATUS_*` and `CCID_STATUS_*`, and related
   prefixes) can never be overridden: the
   entrypoint assigns `RUNNER_TEMP` to the owned scratch directory, and the
   manifest overlay must never undo that. Old manifests without these keys

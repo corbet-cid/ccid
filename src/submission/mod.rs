@@ -3,16 +3,18 @@
 
 mod adapter;
 mod archive;
+mod cfrg;
 mod cli;
 mod core;
 mod dependents;
 mod digest;
-mod forge_scan;
 mod github;
 mod jobs;
 mod log_digest;
+mod manifest_scan;
 mod pinned;
 mod probe;
+mod rollout;
 mod routing;
 mod submit;
 mod transport;

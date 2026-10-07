@@ -8,10 +8,11 @@
 //! admission instead of failing, and a dependent is submitted at most once
 //! per landing: the landing's record survives restarts and a second call only
 //! resumes and reports.
+use super::cfrg::Cfrg;
 use super::cli::DependentsArgs;
 use super::core::{self, Api};
-use super::forge_scan::{self, Cache, Forge, Matcher};
 use super::log_digest::{self, CacheStats};
+use super::manifest_scan::{self, Cache, Matcher};
 use super::*;
 use std::{
     collections::VecDeque,
@@ -405,7 +406,7 @@ pub(super) fn summary(
     landed: &str,
     outcomes: &[Outcome],
     wall: Duration,
-    scan: &forge_scan::Scan,
+    scan: &manifest_scan::Scan,
 ) -> String {
     let count = |c: Class| outcomes.iter().filter(|o| o.class == c).count();
     let (hits, requests) = outcomes
@@ -575,16 +576,7 @@ pub(super) fn run(config: &Config, config_path: &Path, args: &DependentsArgs) ->
     let first = records
         .first()
         .ok_or("Crow reports no active repositories")?;
-    let token = if config.forge_token_command.is_empty() {
-        None
-    } else {
-        Some(
-            String::from_utf8(output(&config.forge_token_command, None, None)?)?
-                .trim()
-                .to_owned(),
-        )
-    };
-    let forge = Forge::new(Forge::root(&text(first, "clone_url"))?, token);
+    let cfrg = Cfrg::open(config, &args.cfrg, &text(first, "clone_url"))?;
     let directory = config.directory("crow-ci-dependents")?;
     let cache_path = directory.join("manifest-references.json");
     let mut cache = Cache::load(&cache_path);
@@ -593,7 +585,7 @@ pub(super) fn run(config: &Config, config_path: &Path, args: &DependentsArgs) ->
         aliases: &config.origin_aliases,
         legacy_hosts: &config.legacy_hosts,
     };
-    let scan = forge_scan::scan(&forge, &records, &matcher, &mut cache);
+    let scan = manifest_scan::scan(&cfrg, &records, &matcher, &mut cache);
     cache.save(&cache_path)?;
     for note in &scan.unreadable {
         println!("note: unreadable {note}");

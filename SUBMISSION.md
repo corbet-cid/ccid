@@ -77,10 +77,12 @@ retains degrades to the step's recorded exit code. The extractors are tested on
 real, sanitized Crow logs (`src/submission/tests/fixtures`).
 
 `crow-ci check-dependents --repo PATH [--commit SHA] [--job verify] [--slots 8]
-[--admission-wait SECONDS] [--wait SECONDS] [--plan]` runs after a repository's
-main moved. Dependents are read from the forge: every active Crow repository
-whose root `Cargo.lock`, `Cargo.toml`, `flake.lock` or `flake.nix` references the
-repository's canonical identity (references are cached by git blob id, so a warm
+[--admission-wait SECONDS] [--wait SECONDS] [--cfrg PATH] [--plan]` runs after a
+repository's main moved. Dependents are read from the forge, always through
+`cfrg contents` (the executable named by `--cfrg` or `CFRG_BIN`, default `cfrg` on
+`PATH`): every active Crow repository whose root `Cargo.lock`, `Cargo.toml`,
+`flake.lock` or `flake.nix` references the repository's canonical identity
+(references are cached by git blob id and handed to cfrg as known blobs, so a warm
 scan costs one tree request per repository; hosts listed in `legacy_hosts` match
 by repository name only). Each dependent's repository job runs on its current
 main through managed checkouts, so unaffected dependents hit the result cache.
@@ -88,8 +90,9 @@ At most `--slots` (never more than eight) runs are in flight, workers wait for
 host admission (`CI_ADMISSION_WAIT_SECONDS`), a dependent is submitted at most
 once per landing (the record survives restarts; a second call resumes and reports)
 and one line per dependent is printed, then a summary with the result-cache hit
-rate and wall time. Optional configuration fields: `forge_token_command` (private
-repositories) and `legacy_hosts`.
+rate and wall time. Configuration fields: `forge_token_command` (required: the
+command that prints the forge token handed to cfrg in its environment) and the
+optional `legacy_hosts`.
 
 ## Pod-local mode
 
@@ -118,3 +121,28 @@ local `/proc`. Argo submission (`kubectl`) is not available without ssh.
   "argo_template": "ccid-job"
 }
 ```
+
+## Fleet rollout of the commit verdict
+
+`crow-ci rollout-verdict` moves every eligible repository to the aggregated verdict
+(`docs/commit-verdict.md`) in one unattended, resumable run:
+
+```
+crow-ci rollout-verdict --revision REV --config verdict-rollout.json \
+  --land-policy land-policy.json --land-state DIR --lanes LANES.md [--only PATTERN] [--plan]
+```
+
+It first blocks until a line of LANES.md begins with `VERDICT-PROVISIONED` (the
+operator's statement that the status reporter exists; `--no-gate` skips it). Then, per
+repository and `--concurrency` at a time: repin the adapters to `REV` and re-render on
+branch `ci/verdict-rollout`, land it with `cfrg land` (exact green heads only), wait for
+the first green `ccid/verdict` on the landed commit, and only then switch that
+repository's land `contexts` from `ci/crow/*` to `ccid/verdict` (committed through
+`brain-commit`; custom contexts are left alone). Repositories without adapters, without
+a `verify` job or `[verdict]` declaration, and those matched by the declared skip list
+(other lanes) are skipped unless the runtime they already pin contains the verdict
+(`supports_from`). Every forge read of the rollout (a repository's manifest, the head
+of main, the statuses of a commit) goes through `cfrg contents` and `cfrg observe`;
+`--cfrg` or `CFRG_BIN` names the executable, and it needs `forge_token_command`. State is saved after every repository; a rerun repeats nothing that is
+done, and `awaiting` or `failed` repositories are retried. `--plan` lists what would happen
+and changes nothing.

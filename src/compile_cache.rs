@@ -13,6 +13,21 @@ use std::{
 };
 
 const CONFIG: &str = "CCID_COMPILE_CACHE_CONFIG";
+/// Nesting depth of compiler aliases; a configuration cycle fails instead of
+/// forking forever.
+const DEPTH: &str = "CCID_COMPILE_CACHE_DEPTH";
+const MAX_DEPTH: u32 = 8;
+
+fn next_depth(current: Option<&std::ffi::OsStr>) -> Result<u32> {
+    let depth = current
+        .and_then(|d| d.to_str())
+        .and_then(|d| d.parse::<u32>().ok())
+        .unwrap_or(0);
+    if depth >= MAX_DEPTH {
+        return Err(failure("Compiler alias recursion detected"));
+    }
+    Ok(depth + 1)
+}
 const COMPILERS: &[&str] = &["cc", "c++", "gcc", "g++", "clang", "clang++"];
 
 /// Go's native cache remains responsible for source, toolchain and flag keys.
@@ -35,19 +50,34 @@ struct Config {
     compilers: BTreeMap<String, PathBuf>,
 }
 
+/// A directory of job-owned compiler aliases (symlinks to a ccid binary).
+fn alias_directory(directory: &Path) -> bool {
+    directory
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("ccid-compiler-"))
+}
+
+/// The first executable named `name` on PATH. Compiler aliases of an enclosing
+/// ccid are skipped: a nested check must find the real compiler, never the
+/// outer job's alias, which would dispatch back to itself through the nested
+/// configuration forever.
 pub(crate) fn executable(environment: &Environment, name: &str) -> Option<PathBuf> {
     let path = environment.get(std::ffi::OsStr::new("PATH"))?;
-    std::env::split_paths(path).map(|p| p.join(name)).find(|p| {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        }
-        #[cfg(not(unix))]
-        {
-            p.is_file()
-        }
-    })
+    std::env::split_paths(path)
+        .filter(|directory| !alias_directory(directory))
+        .map(|p| p.join(name))
+        .find(|p| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            }
+            #[cfg(not(unix))]
+            {
+                p.is_file()
+            }
+        })
 }
 
 /// The owned directory lives until the checked process tree has terminated.
@@ -160,6 +190,7 @@ pub fn dispatch() -> Option<Result<ExitCode>> {
     }
     let config = std::env::var_os(CONFIG)?;
     Some((|| {
+        let depth = next_depth(std::env::var_os(DEPTH).as_deref())?;
         let config: Config = serde_json::from_slice(&fs::read(config)?)?;
         let compiler = config
             .compilers
@@ -168,6 +199,7 @@ pub fn dispatch() -> Option<Result<ExitCode>> {
         // Path semantics are identical with and without the optional cache.
         let Some(cache) = &config.cache else {
             let status = Command::new(compiler)
+                .env(DEPTH, depth.to_string())
                 .args(remapped_arguments(
                     &config.root,
                     std::env::args_os().skip(1),
@@ -182,6 +214,7 @@ pub fn dispatch() -> Option<Result<ExitCode>> {
         };
         let log = tempfile::NamedTempFile::new().ok();
         let mut command = Command::new(cache);
+        command.env(DEPTH, depth.to_string());
         command.arg(compiler).args(remapped_arguments(
             &config.root,
             std::env::args_os().skip(1),
@@ -252,5 +285,34 @@ mod tests {
         let before = environment.clone();
         assert!(CompilerCache::prepare(Path::new("/repo"), &mut environment).is_none());
         assert_eq!(before, environment);
+    }
+    #[test]
+    fn a_nested_check_skips_the_enclosing_jobs_compiler_aliases() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let alias = root.path().join("ccid-compiler-AbC123");
+        let real = root.path().join("real");
+        for directory in [&alias, &real] {
+            fs::create_dir(directory).unwrap();
+            let tool = directory.join("cc");
+            fs::write(&tool, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut environment = Environment::new();
+        environment.insert(
+            "PATH".into(),
+            std::env::join_paths([&alias, &real]).unwrap(),
+        );
+        assert_eq!(executable(&environment, "cc").unwrap(), real.join("cc"));
+        environment.insert("PATH".into(), alias.as_os_str().to_owned());
+        assert_eq!(executable(&environment, "cc"), None);
+    }
+
+    #[test]
+    fn alias_recursion_is_cut_off() {
+        assert_eq!(next_depth(None).unwrap(), 1);
+        assert_eq!(next_depth(Some("3".as_ref())).unwrap(), 4);
+        assert_eq!(next_depth(Some("junk".as_ref())).unwrap(), 1);
+        assert!(next_depth(Some("8".as_ref())).is_err());
     }
 }

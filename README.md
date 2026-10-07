@@ -8,11 +8,11 @@ jobs or pretend that one platform proves another. The Rust executor does not
 publish releases. The optional [registry publisher resource](adapters/registry-publish.md)
 provides explicit, separately invoked uploads of already-verified archives.
 
-Repository placement, exact cloning, reconciliation, status reporting,
-contribution bridging, evidence collection and access mirroring live in
-[cfrg](https://git.corbet.ch/corbet-libs/cfrg): `cfrg validate`, `cfrg plan`,
-`cfrg decide`, `cfrg clone`, `cfrg sync`, `cfrg status`, `cfrg bridge`,
-`cfrg collect` and `cfrg access`.
+ccid never talks to a forge. Everything that does goes through
+[cfrg](https://git.corbet.ch/corbet-libs/cfrg): placement and exact cloning,
+reconciliation, status reporting, landing, releases, evidence collection, access
+mirroring, and the reads behind `check-dependents` and `rollout-verdict`
+(`cfrg contents`, `cfrg observe`).
 
 [`ccid quality`](docs/quality.md) evaluates saved organization and repository
 evidence through the separate, deterministic cqlt policy library.
@@ -137,14 +137,6 @@ these definitions; `ccid render --check` detects drift without writing files.
 See [adapter rendering](docs/rendering.md) for the tool pin and staging contract.
 This repository declares `verify` for its full checks and `compile` for a narrow
 Rust build, both using the same verified job runtime.
-
-Explicit replica reconciliation, native status reporting and contribution
-bridging live in [cfrg](https://git.corbet.ch/corbet-libs/cfrg):
-`cfrg sync` inspects explicitly selected replicas and reconciles them only
-with `--apply` (never force-pushes or deletes refs), `cfrg status` reports
-native commit statuses, and `cfrg bridge` imports exact commits from GitLab
-merge requests into a dedicated Forgejo fork without scheduling checks or
-executing contributed code.
 
 ## Manifest
 

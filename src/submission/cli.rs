@@ -50,6 +50,9 @@ pub struct DependentsArgs {
     /// Only list the dependents; submit nothing.
     #[arg(long)]
     pub plan: bool,
+    /// The cfrg executable that reads the forge for the dependents scan.
+    #[arg(long, env = "CFRG_BIN", default_value = "cfrg")]
+    pub cfrg: String,
 }
 #[derive(Subcommand)]
 pub enum Action {
@@ -94,6 +97,8 @@ pub enum Action {
         number: u64,
         step_id: u64,
     },
+    /// Move the fleet to one verdict per commit: repin, re-render, land, then switch the land policy.
+    RolloutVerdict(rollout::RolloutArgs),
     /// After a landing: submit every dependent's job on its main and print one line each.
     CheckDependents(DependentsArgs),
     /// Read a result: one line when green, otherwise the errors of each failed step.
@@ -208,6 +213,7 @@ pub fn run(action: Action, path: Option<&Path>) -> Result<()> {
     match action {
         Action::Plan(args) => routing::route(&config, &args, true),
         Action::Run(args) => routing::route(&config, &args, false),
+        Action::RolloutVerdict(args) => rollout::run(&config, &args),
         Action::CheckDependents(args) => dependents::run(&config, &Config::locate(path)?, &args),
         Action::Resolve {
             repo,
