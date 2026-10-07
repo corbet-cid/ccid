@@ -2,7 +2,8 @@
 use super::*;
 use crate::submission::rollout::{
     self, drive, matches_pattern, parse_manifest, pin_manifest, switch_policy_document,
-    Config as Plan, Fleet, Manifest, Repin, Repo, RepoState, Run, Skip, State, Switch, Verdict,
+    Config as Plan, Fleet, Landing, Manifest, Repin, Repo, RepoState, Run, Skip, State, Switch,
+    Verdict,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -28,6 +29,7 @@ fn plan() -> Plan {
                 reason: "cfrg lane".into(),
             },
         ],
+        gate_source: None,
     }
 }
 fn repo(name: &str) -> Repo {
@@ -48,6 +50,8 @@ struct Fake {
     calls: Mutex<Vec<String>>,
     verdicts: Mutex<HashMap<String, VecDeque<Option<Verdict>>>>,
     stuck: HashSet<String>,
+    /// Repositories whose rollout branch is already part of main.
+    contained: HashSet<String>,
     policy: Mutex<Value>,
 }
 impl Fake {
@@ -62,6 +66,7 @@ impl Fake {
             calls: Mutex::new(vec![]),
             verdicts: Mutex::new(HashMap::new()),
             stuck: HashSet::new(),
+            contained: HashSet::new(),
             policy: Mutex::new(
                 json!({"contexts":["ci/crow/*"],"repositories":[{"path":"corbet-libs/cfrg"}]}),
             ),
@@ -110,15 +115,18 @@ impl Fleet for Fake {
         }
         Ok(Repin::Pushed)
     }
-    fn land(&self, repo: &Repo) -> Result<()> {
+    fn land(&self, repo: &Repo) -> Result<Landing> {
         self.log("land", repo);
+        if self.contained.contains(&repo.full_name) {
+            return Ok(Landing::AlreadyContained);
+        }
         if !self.stuck.contains(&repo.full_name) {
             let mut manifests = self.manifests.lock().unwrap();
             if let Some(Some(m)) = manifests.get_mut(&repo.full_name) {
                 m.pin = REVISION.into();
             }
         }
-        Ok(())
+        Ok(Landing::Enqueued)
     }
     fn head(&self, repo: &Repo) -> Result<String> {
         Ok(format!("{:0>40}", repo.full_name.len()))
@@ -449,4 +457,195 @@ fn the_gate_opens_on_a_line_that_begins_with_the_marker_and_only_then() {
         Duration::from_secs(1),
         &|_| {}
     ));
+}
+
+#[test]
+fn a_branch_already_in_main_goes_straight_to_the_verdict() {
+    let mut fake = Fake::new(&[("org/app", Some(manifest(OLD, &["verify"])))]);
+    fake.contained.insert("org/app".into());
+    let state = fresh();
+    walk(&fake, &["org/app"], &state, 1);
+    assert_eq!(status(&state, "org/app"), "done");
+    // The pin never moved (nothing was queued), yet nothing waits for it.
+    assert_eq!(
+        fake.order("org/app"),
+        ["repin", "land", "verdict", "switch"],
+        "{:?}",
+        fake.calls.lock().unwrap()
+    );
+    assert_eq!(contexts(&fake, "org/app"), Some(json!(["ccid/verdict"])));
+}
+
+#[test]
+fn land_outcomes_follow_the_exit_status_and_the_message() {
+    use std::os::unix::process::ExitStatusExt;
+    let exit = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+    let contained =
+        "cfrg: Nothing to land: the branch is already contained in the default branch\n";
+    assert_eq!(
+        rollout::land_outcome(&exit(0), "").unwrap(),
+        Landing::Enqueued
+    );
+    assert_eq!(
+        rollout::land_outcome(&exit(2), contained).unwrap(),
+        Landing::AlreadyContained
+    );
+    // Any other failure stays a failure, with cfrg's own last line.
+    let error = rollout::land_outcome(&exit(2), "cfrg: Invalid branch name\n")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Invalid branch name"), "{error}");
+    assert!(rollout::land_outcome(&exit(1), contained).is_err());
+}
+
+/// The layout of the declared policy: pretty-printed, one key per line.
+const DECLARED: &str = r#"{
+  "contexts": [
+    "ci/crow/*"
+  ],
+  "retest": [
+    "ci-job",
+    "run"
+  ],
+  "repositories": [
+    {
+      "path": "org/plain"
+    },
+    {
+      "path": "org/custom",
+      "contexts": [
+        "ci/crow/manual/ccid"
+      ],
+      "retest": [
+        "crow-ci"
+      ]
+    },
+    {
+      "path": "org/retest-only",
+      "retest": [
+        "crow-ci"
+      ]
+    },
+    {
+      "path": "org/old",
+      "contexts": [
+        "ci/crow/*"
+      ]
+    },
+    {
+      "path": "org/done",
+      "contexts": [
+        "ccid/verdict"
+      ]
+    }
+  ]
+}
+"#;
+
+fn wanted(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|n| (*n).to_owned()).collect()
+}
+
+#[test]
+fn declared_gates_are_added_with_the_smallest_possible_edit() {
+    let edited = rollout::declare_gates(
+        DECLARED,
+        &wanted(&[
+            "org/plain",
+            "org/custom",
+            "org/retest-only",
+            "org/old",
+            "org/done",
+            "org/new",
+        ]),
+    )
+    .unwrap()
+    .unwrap();
+    // Entries with their own gate and the one that already has it are not touched.
+    assert!(edited.contains("\"ci/crow/manual/ccid\""));
+    let value: Value = serde_json::from_str(&edited).unwrap();
+    let gate = |name: &str| {
+        value["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["path"] == name)
+            .map(|e| e["contexts"].clone())
+    };
+    assert_eq!(gate("org/plain"), Some(json!(["ccid/verdict"])));
+    assert_eq!(gate("org/retest-only"), Some(json!(["ccid/verdict"])));
+    assert_eq!(gate("org/old"), Some(json!(["ccid/verdict"])));
+    assert_eq!(gate("org/new"), Some(json!(["ccid/verdict"])));
+    assert_eq!(gate("org/custom"), Some(json!(["ci/crow/manual/ccid"])));
+    // The retest of the entry that has one is kept, key order is not shuffled.
+    let retest_only = edited.find("\"path\": \"org/retest-only\"").unwrap();
+    assert!(edited[retest_only..].starts_with(
+        "\"path\": \"org/retest-only\",\n      \"contexts\": [\n        \"ccid/verdict\"\n      ],\n      \"retest\": ["
+    ));
+    // Everything else is byte-identical: only these lines changed.
+    let removed = DECLARED
+        .lines()
+        .filter(|l| !edited.lines().any(|e| e == *l))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        removed,
+        ["      \"path\": \"org/plain\"", "        \"ci/crow/*\""]
+    );
+    // Nothing missing: no edit at all.
+    assert!(
+        rollout::declare_gates(&edited, &wanted(&["org/plain", "org/new"]))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_gate_is_added_to_an_empty_or_single_entry_list() {
+    for text in [
+        "{\n  \"repositories\": [\n  ]\n}\n",
+        "{\n  \"repositories\": [\n    {\n      \"path\": \"org/a\"\n    }\n  ]\n}\n",
+    ] {
+        let edited = rollout::declare_gates(text, &wanted(&["org/b"]))
+            .unwrap()
+            .unwrap();
+        let value: Value = serde_json::from_str(&edited).unwrap();
+        assert_eq!(
+            rollout::verdict_gates(&value),
+            wanted(&["org/b"]),
+            "{edited}"
+        );
+    }
+}
+
+#[test]
+fn only_verdict_gates_are_collected() {
+    let policy: Value = serde_json::from_str(DECLARED).unwrap();
+    assert_eq!(rollout::verdict_gates(&policy), wanted(&["org/done"]));
+}
+
+#[test]
+fn the_gate_source_is_optional_and_has_a_default_batch() {
+    let plain: Plan = serde_json::from_value(json!({
+        "schema": 1,
+        "supports_from": "0a610405e1e8dbd4f917b4e80d29b2b6d21fc7b0",
+        "skip": []
+    }))
+    .unwrap();
+    assert!(plain.gate_source.is_none());
+    let declared: Plan = serde_json::from_value(json!({
+        "schema": 1,
+        "supports_from": "0a610405e1e8dbd4f917b4e80d29b2b6d21fc7b0",
+        "skip": [],
+        "gate_source": {"repository": "org/infra", "file": "lib/policy.json"}
+    }))
+    .unwrap();
+    let source = declared.gate_source.unwrap();
+    assert_eq!((source.batch, source.render.len()), (20, 0));
+    assert!(serde_json::from_value::<Plan>(json!({
+        "schema": 1,
+        "supports_from": "0a610405e1e8dbd4f917b4e80d29b2b6d21fc7b0",
+        "skip": [],
+        "gate_source": {"repository": "org/infra", "file": "p.json", "unknown": 1}
+    }))
+    .is_err());
 }

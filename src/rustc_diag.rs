@@ -9,11 +9,12 @@
 //! compiler (or a composed outer wrapper) untouched.
 //!
 //! The transform inserts static-stage `eprintln!` diagnostics (error enum
-//! variant only, never peer IDs, paths, keys or payloads) at exact anchor
-//! sites, compiles, then restores the original bytes and verifies the
-//! restore — including on compiler failure. Original sources stay verified;
-//! the receipt records original/diagnostic digests, the transformation
-//! list, and the compiler/status outcome. Unix only: the owning jobs run
+//! variant or a transport error's static kind and context only, never peer IDs,
+//! paths, keys or payloads) at exact anchor sites, compiles, then restores
+//! the original bytes and verifies the restore — including on compiler
+//! failure. Original sources stay verified; the receipt records
+//! original/diagnostic digests, the transformation list, and the
+//! compiler/status outcome. Unix only: the owning jobs run
 //! on Linux workers.
 use crate::{failure, Result};
 use serde_json::json;
@@ -76,6 +77,23 @@ fn sites() -> Vec<Site> {
             replacement: r#"        eprintln!("ccid-diag discovery-result: peers={} expired={} exhausted={} limited={} elapsed_ms={}", search.storage_peers().len(), expired, search.exhausted(), search.limited(), self.clock.now().saturating_sub(start));
         Ok(TorDiscoveryReport {
             peers: search.storage_peers(),"#,
+        },
+        // Every FindNode, record and watch call shares this transport site.
+        // ctrn errors are a coarse kind plus a compile-time context string by
+        // construction (no addresses, keys, payloads or upstream text), so
+        // printing one separates local resource limits, onion connection
+        // failures and stream failures behind the single `Unavailable`.
+        Site {
+            name: "transport failure",
+            anchor: r#"            .app_call(&checked.endpoint, outgoing.as_bytes())
+            .await
+            .map_err(|_| Error::Unavailable)?;"#,
+            replacement: r#"            .app_call(&checked.endpoint, outgoing.as_bytes())
+            .await
+            .map_err(|error| {
+                eprintln!("ccid-diag transport-error: {error}");
+                Error::Unavailable
+            })?;"#,
         },
     ]
 }
@@ -538,10 +556,11 @@ mod tests {
         "head\n        let received = self.discovery.authenticate(bytes.clone()).await?;\ntail\n";
 
     /// Each bounded discovery diagnostic appears exactly once.
-    const EXPECTED_TAGS: [&str; 3] = [
+    const EXPECTED_TAGS: [&str; 4] = [
         "ccid-diag discovery-rpc-ok",
         "ccid-diag discovery-rpc-error",
         "ccid-diag discovery-result",
+        "ccid-diag transport-error",
     ];
 
     #[test]
@@ -1159,7 +1178,7 @@ impl<I: TorNodeIdentity, V: Verifier> TorDiscovery<I, V> {
     /// mechanically and pinned here and in the consumer manifest. Any table
     /// change must update both under review.
     const EXPECTED_DIAGNOSTIC_SHA256: &str =
-        "f67ec53ed7f19e9bf7293eca631a24687b14fc2558109269edcbd901fade91d7";
+        "42dc2e7df8f7e134a0a385587176bb0d2713954a12ca1e217e98e150d8f79785";
 
     #[test]
     fn transform_applies_to_real_frozen_file() {

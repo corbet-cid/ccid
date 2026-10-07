@@ -135,7 +135,14 @@ repository's land `contexts` from `ci/crow/*` to `ccid/verdict` (committed throu
 `brain-commit`; custom contexts are left alone). Repositories without adapters, without
 a `verify` job or `[verdict]` declaration, and those matched by the declared skip list
 (other lanes) are skipped unless the runtime they already pin contains the verdict
-(`supports_from`). Every forge read of the rollout (a repository's manifest, the head
+(`supports_from`). A branch that `cfrg land` reports as already contained in main (exit 2,
+"already contained in the default branch") counts as landed and the run goes on to the verdict.
+When the rollout configuration names a `gate_source` (`repository`, `file`, optional `render`
+command run in the checkout, optional `batch`, default 20), every switched gate is also written
+to that declared policy: the rollout edits only the lines it needs on branch `ci/verdict-gates`,
+runs the render command, pushes and hands the branch to `cfrg land`; this happens when `batch`
+gates are waiting, when the run starts (gates a former run left over) and when it ends, and the
+run is not complete until the declared source carries every gate. Every forge read of the rollout (a repository's manifest, the head
 of main, the statuses of a commit) goes through `cfrg contents` and `cfrg observe`;
 `--cfrg` or `CFRG_BIN` names the executable, and it needs `forge_token_command`. State is saved after every repository; a rerun repeats nothing that is
 done, and `awaiting` or `failed` repositories are retried. `--plan` lists what would happen

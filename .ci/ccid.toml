@@ -2,7 +2,7 @@ schema = 1
 project = "ccid"
 
 [render]
-tool_revision = "223adb5a008f4ed1ba36d1f52796ccd29077db6e"
+tool_revision = "78a4e05b4e1cb25aaeba3966951564d74277bcbd"
 
 # Formatting, Clippy with warnings denied and the full test suite, on the
 # release profile the compile job and the shipped binary share.
