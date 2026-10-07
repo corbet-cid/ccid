@@ -105,48 +105,16 @@ their own identities and evidence.
 
 ## Building and platform evidence
 
-The manual GitHub Actions `ccid portable Linux bootstrap` workflow accepts only an
-explicit full `source_revision`, fetches that commit, and runs the existing
-bootstrap with stable Rust on `ubuntu-24.04` using a bounded four-job/test
-thread budget. It uploads one immutable `ccid-<source-revision>-linux-x86_64`
-artifact containing the binary and `receipt.json`; the receipt binds the source,
-binary SHA, target, rustc output, workflow/config/manifest digests and locked
-Cargo dependency snapshot. It is a free public Linux build lane, not native
-macOS/Windows evidence, and Crow remains the fallback provider. Consumers must
-verify the receipt and use the artifact only for the exact source, checks and
-Linux environment it records.
+Crow builds the tool as an ordinary repository job: `compile` builds the release
+binary from the exact commit on the worker, `verify` runs formatting, Clippy with
+warnings denied and the test suite on the same release profile. The binary of a
+commit is published once to the forge's generic package registry (`cfrg release`),
+immutable per commit and fetched by URL and sha256; its `receipt.json` binds the
+source revision, target triple and binary digest. A consumer verifies the receipt
+and `source-revision` before it uses the binary, and only for the exact source,
+checks and Linux environment it records. This is a Linux lane, not native
+macOS/Windows evidence.
 
-The reusable `ccid reusable Linux check` workflow accepts a caller's exact
-source commit, checks, request id, dependency snapshot, tool revision/run and
-artifact IDs, binary digest, manifest digest and provider-config digest. It
-requires committed `.ci/ccid.toml` and `.ci/providers.toml`; the provider
-configuration's `[dependencies].files` list defines the canonical sorted
-path-to-file-digest snapshot supplied by the caller. It guards the detached
-source checkout and dependency files before and after the check, verifies the
-artifact and `source-revision`, runs the existing Rust binary, and uploads a
-result receipt containing the actual Rust, Node and Bun environment plus the
-selected exit code. The caller's thin wrapper owns `run-name:
-ccid/<request_id>`; the reusable workflow never retries, masks failures or
-silently falls back.
-Callers may set positive `ci_jobs`, `ci_test_threads`, `ci_min_available_mb`,
-and `ci_timeout` inputs; their defaults remain 4 jobs, 4 test threads, 4096 MiB
-reserved, and 1800 seconds. A caller using one job must pass one explicitly.
-Successful receipts must contain the matching allocation emitted by ccid,
-including its actual budget and Python version. `setup_rust: false` avoids a
-toolchain refresh for checks requiring only already-provisioned non-Rust tools;
-its default remains true and selects current stable. `.ci/test_hosted_budget.py`
-exercises the workflow's actual validation and receipt code without hosted work.
-Cross-repository artifact access uses the caller's builtin token and must be
-proven before enabling a provider mapping. Any hosted mapping published before
-that proof is experimental and must retain Crow as the operational fallback;
-the reusable workflow does not claim hosted success from a missing artifact or
-an unverified token boundary.
-
-The manual Crow `build` workflow runs formatting and release-profile tests,
-then builds the binary with the same profile, target and persistent cache.
-`CCID_SOURCE_REVISION` embeds the exact source identity exposed by
-`ccid source-revision`. A successful build atomically publishes a native binary
-and `receipt.json` containing `source_revision`, `target`, and `binary_sha256`.
 A conflicting existing artifact is never overwritten. Consumers verify and
 reuse this artifact; they do not compile ccid per repository.
 

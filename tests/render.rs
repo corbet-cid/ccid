@@ -362,6 +362,87 @@ fn resolver_token_secret_opt_in_projects_only_the_named_reference() {
     assert!(render(root.path(), false).is_err());
 }
 
+fn secret_manifest(declaration: &str, release_secrets: &str) -> String {
+    format!(
+        "schema=1\nproject='fixture'\n[render]\ntool_revision='{PIN}'\n{declaration}\n\
+         [checks.test]\nkind='commands'\ncommands=[['true']]\n\
+         [jobs.verify]\nchecks=['test']\nworkflow='verify'\ncommand=['sh','.ci/run.sh']\n\
+         [jobs.release]\nchecks=['test']\nworkflow='verify'\ncommand=['sh','.ci/run.sh']\n{release_secrets}\n"
+    )
+}
+
+#[test]
+fn secret_environment_projects_named_references_and_scopes_them_to_jobs() {
+    let root = repository();
+    let write = |text: String| fs::write(root.path().join(".ci/ccid.toml"), text).unwrap();
+    write(secret_manifest("", ""));
+    render(root.path(), false).unwrap();
+    let plain = rendered_workflow(&root);
+    assert!(!plain.contains("from_secret"));
+
+    write(secret_manifest(
+        "secret_environment = { CFRG_RELEASE_TOKEN = 'cfrg_release_token', ANOTHER_KEY = 'another_key' }",
+        "secrets = ['CFRG_RELEASE_TOKEN']",
+    ));
+    render(root.path(), false).unwrap();
+    let keyed = rendered_workflow(&root);
+    assert_eq!(keyed.matches("from_secret").count(), 2);
+    // Name order, one reference each, between the revision pin and the commands
+    // of the repository-job step.
+    let job = keyed.find("name: repository-job").unwrap();
+    let step = &keyed[job..];
+    let pin = step.find("CCID_REVISION: '").unwrap();
+    let first = step
+        .find("ANOTHER_KEY:\n        from_secret: \"another_key\"")
+        .unwrap();
+    let second = step
+        .find("CFRG_RELEASE_TOKEN:\n        from_secret: \"cfrg_release_token\"")
+        .unwrap();
+    assert!(pin < first && first < second);
+    assert!(second < step.find("commands:").unwrap());
+    // Native-status steps never carry a reference.
+    let status = keyed.find("native-status-pending").unwrap();
+    assert!(!keyed[status..job].contains("from_secret"));
+    // The inventory records which job may see a secret, and no other.
+    let inventory: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(".ci/jobs.json")).unwrap()).unwrap();
+    assert_eq!(
+        inventory["jobs"]["release"]["secrets"],
+        serde_json::json!(["CFRG_RELEASE_TOKEN"])
+    );
+    assert!(inventory["jobs"]["verify"].get("secrets").is_none());
+    assert!(inventory["jobs"]["release"].get("withheld").is_none());
+    assert!(render(root.path(), true).unwrap().checked);
+}
+
+#[test]
+fn secret_environment_refuses_names_it_could_shadow_and_undeclared_secrets() {
+    let root = repository();
+    for declaration in [
+        "secret_environment = { lowercase = 'ok' }",
+        "secret_environment = { CI_COMMIT_SHA = 'ok' }",
+        "secret_environment = { CCID_ANYTHING = 'ok' }",
+        "secret_environment = { CFRG_STATUS_TOKEN = 'ok' }",
+        "secret_environment = { CFRG_RESOLVER_FORGEJO_TOKEN = 'ok' }",
+        "secret_environment = { RUNNER_TEMP = 'ok' }",
+        "secret_environment = { GOOD_NAME = 'bad name!' }",
+    ] {
+        fs::write(
+            root.path().join(".ci/ccid.toml"),
+            secret_manifest(declaration, ""),
+        )
+        .unwrap();
+        assert!(render(root.path(), false).is_err(), "{declaration}");
+        assert!(!root.path().join(".crow").exists());
+    }
+    fs::write(
+        root.path().join(".ci/ccid.toml"),
+        secret_manifest("", "secrets = ['NOT_DECLARED']"),
+    )
+    .unwrap();
+    assert!(render(root.path(), false).is_err());
+}
+
 #[test]
 fn resolver_token_secret_preserves_auxiliary_source_variables() {
     let root = repository();

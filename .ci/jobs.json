@@ -2,8 +2,20 @@
   "schema": 1,
   "generator": "ccid render v1",
   "tool_revision": "223adb5a008f4ed1ba36d1f52796ccd29077db6e",
-  "manifest_sha256": "0035eeebca8457eb3a9aa8254c5c7c63c28b38fbb20755b994d474c5b95b82da",
+  "manifest_sha256": "a8f641a2a2e1fdabfc6a69ac765b4954c321fddd189c68854fa24e9e7e61f499",
   "jobs": {
+    "build": {
+      "job": "build",
+      "scheduler": "crow",
+      "checks": [
+        "build"
+      ],
+      "workflow": "repository-jobs",
+      "command": [
+        "bash",
+        ".ci/run-job.sh"
+      ]
+    },
     "cache-acceptance": {
       "job": "cache-acceptance",
       "scheduler": "crow",
@@ -44,7 +56,8 @@
       "job": "verify",
       "scheduler": "crow",
       "checks": [
-        "test"
+        "test",
+        "registry-publisher"
       ],
       "workflow": "repository-jobs",
       "command": [

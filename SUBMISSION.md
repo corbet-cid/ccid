@@ -5,8 +5,8 @@ repository-owned jobs already planned by `ccid job`. Symlinks named `crow-ci`
 and `ci-job` select the corresponding subcommand and retain the existing arguments.
 
 ```
-ccid crow-ci plan --repo . --branch main --workflow verify --provider crow
-ccid crow-ci run --repo . --branch main --workflow verify --provider crow
+ccid crow-ci plan --repo . --branch main --workflow verify
+ccid crow-ci run --repo . --branch main --workflow verify
 ccid crow-ci status REPOSITORY_ID RUN_NUMBER
 ccid ci-job plan --repo . --job verify
 ccid ci-job run --repo . --job verify
@@ -30,7 +30,6 @@ Configuration is JSON selected by `--submission-config PATH` or
 | `tool_origins` | Allowed canonical HTTPS identities for that checkout |
 | `origin_aliases` | Exact hostname aliases; ports are not silently aliased |
 | `argo_namespace`, `argo_template` | Existing declarative Argo namespace/template |
-| `github_tool_repository` | Historical public tool repository for receipt reconciliation, or null |
 
 No credentials or fleet paths are built into ccid. The helper uses the declared
 credential command without logging its output. Native Git chooses committed
@@ -47,11 +46,6 @@ are retained. Locks are advisory `flock` locks shared with running legacy
 workers. Intent writes are atomic and synchronized before network mutations.
 Cached restarts require exact stored transport paths and workflow configuration.
 Unknown outcomes never trigger an automatic retry.
-
-GitHub is frozen. Explicit GitHub requests, dispatch and cancellation writes
-are refused before transport. Existing reviewed mappings and receipts remain
-readable; unresolved hosted work still blocks Crow fallback. An owned queued
-hosted run is never cancelled to make room for Crow during the freeze.
 
 `crow-ci archive` exposes offline source staging for integrity checks.
 `crow-ci validate-adapters` verifies a digest-bound adapter corpus with its

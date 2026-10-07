@@ -244,8 +244,6 @@ fn run(config: &Config, args: &JobArgs, plan_only: bool) -> Result<()> {
                 expect_commit: Some(commit),
                 workflows: vec![text(&plan, "workflow")],
                 variables: vec![format!("CCID_JOB_REQUEST={}", encode(&request)?)],
-                provider: "crow".into(),
-                provider_wait: 0,
                 queue_timeout: 120,
                 rerun: args.rerun,
                 cached_rerun: false,

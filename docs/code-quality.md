@@ -6,8 +6,8 @@ failing test.
 
 ## Enforced in this repository
 
-The bootstrap runs formatting, Clippy with warnings denied, and the existing
-behavioral tests before publishing an immutable binary receipt. All targets
+The `verify` job runs formatting, Clippy with warnings denied, and the existing
+behavioral tests before a binary is published with an immutable receipt. All targets
 means Rust targets in the current native build; it does not claim coverage of
 other operating systems. Experimental Windows execution remains unverified.
 

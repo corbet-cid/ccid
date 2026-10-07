@@ -2,7 +2,12 @@
 
 fn main() {
     println!("cargo:rerun-if-env-changed=CCID_SOURCE_REVISION");
-    let revision = std::env::var("CCID_SOURCE_REVISION").unwrap_or_else(|_| "unversioned".into());
+    println!("cargo:rerun-if-env-changed=CI_COMMIT_SHA");
+    // Crow jobs always set the verified CI_COMMIT_SHA; developers building
+    // locally get "unversioned" unless they export CCID_SOURCE_REVISION.
+    let revision = std::env::var("CCID_SOURCE_REVISION")
+        .or_else(|_| std::env::var("CI_COMMIT_SHA"))
+        .unwrap_or_else(|_| "unversioned".into());
     assert!(
         revision == "unversioned"
             || revision.len() == 40

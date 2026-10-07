@@ -4,27 +4,29 @@ project = "ccid"
 [render]
 tool_revision = "223adb5a008f4ed1ba36d1f52796ccd29077db6e"
 
+# Formatting, Clippy with warnings denied and the full test suite, on the
+# release profile the compile job and the shipped binary share.
 [checks.test]
-kind = "commands"
-commands = [["bash", ".ci/build.sh", "test"]]
+kind = "cargo"
+release = true
 
-[checks.build]
-kind = "commands"
-commands = [["bash", ".ci/build.sh"]]
-
-# A narrow Rust compile gate; the bootstrap remains responsible for publishing tools.
+# A narrow Rust compile gate: the binary every release publishes.
 [checks.compile]
 kind = "cargo"
 actions = ["build"]
 release = true
 
+# The binary a release publishes, with its commit embedded: a commands check
+# hands the job's CI_COMMIT_SHA to the build script, the cargo checks do not.
+# Never cached: the result is the file left in the target directory.
+[checks.build]
+kind = "commands"
+cache = false
+commands = [["cargo", "build", "--release", "--locked"]]
+
 [checks.registry-publisher]
 kind = "commands"
 commands = [["python3", ".ci/registry_publish_test.py"]]
-
-[checks.hosted-contract]
-kind = "commands"
-commands = [["python3", ".ci/test_hosted_budget.py", "--lint"]]
 
 [checks.cache-acceptance]
 kind = "commands"
@@ -38,7 +40,7 @@ command = ["bash", ".ci/run-job.sh"]
 
 [jobs.verify]
 scheduler = "crow"
-checks = ["test"]
+checks = ["test", "registry-publisher"]
 workflow = "repository-jobs"
 command = ["bash", ".ci/run-job.sh"]
 
@@ -51,6 +53,12 @@ command = ["bash", ".ci/run-job.sh"]
 [checks.native-compile-cache]
 kind = "commands"
 commands = [["cargo", "test", "--release", "--locked", "--test", "native_compile_cache", "--", "--ignored", "--nocapture"]]
+
+[jobs.build]
+scheduler = "crow"
+checks = ["build"]
+workflow = "repository-jobs"
+command = ["bash", ".ci/run-job.sh"]
 
 [jobs.native-compile-cache]
 scheduler = "crow"

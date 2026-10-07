@@ -23,8 +23,7 @@ subordinate Vale backend, with a versioned writing policy and stable reports.
 The Rust command library forbids unsafe code in this crate and requires Rust
 1.89+ to build. Git and the selected check's existing tools are required at runtime.
 The checked Linux binary is built once per source revision and reused by scheduler
-adapters. The existing Python entry point remains for pinned consumers and
-bootstrapping the tool build; it requires Python 3.12+.
+adapters.
 Scheduler adapters own submission and status; ccid owns verification, check
 execution, resource admission and receipts. Crow is the default scheduler for
 declared jobs, with Argo available per job.
@@ -217,8 +216,8 @@ workspace package's direct dependency changes compatibility major (or the
 minor compatibility line for a 0.x dependency, including the patch line for
 0.0.x); transitive implementation-version changes remain Cargo's declared-
 constraint responsibility. Ordinary checks continue to require `--locked`.
-The workflow that consumes a candidate must publish that exact snapshot to both
-provider paths, preserving one resolved lock identity.
+The workflow that consumes a candidate must publish that exact snapshot,
+preserving one resolved lock identity.
 
 For an initial lock or a manifest change that makes the old lock unusable,
 explicitly pass `--generate-lockfile` (Crow variable

@@ -14,10 +14,6 @@ pub struct SubmitArgs {
     pub workflows: Vec<String>,
     #[arg(long = "var")]
     pub variables: Vec<String>,
-    #[arg(long, default_value="auto", value_parser=["auto","github","crow"])]
-    pub provider: String,
-    #[arg(long, default_value_t = 150)]
-    pub provider_wait: u64,
     #[arg(long, default_value_t = 120)]
     pub queue_timeout: u64,
     #[arg(long, conflicts_with = "cached_rerun")]
@@ -211,8 +207,8 @@ pub fn run(action: Action, path: Option<&Path>) -> Result<()> {
     }
     let config = Config::load(path)?;
     match action {
-        Action::Plan(args) => routing::route(&config, &args, true),
-        Action::Run(args) => routing::route(&config, &args, false),
+        Action::Plan(args) => submit::route(&config, &args, true),
+        Action::Run(args) => submit::route(&config, &args, false),
         Action::RolloutVerdict(args) => rollout::run(&config, &args),
         Action::CheckDependents(args) => dependents::run(&config, &Config::locate(path)?, &args),
         Action::Resolve {

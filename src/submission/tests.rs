@@ -8,8 +8,6 @@ mod contracts;
 mod dependent_checks;
 mod failure_digest;
 mod pod_local;
-mod provider_routes;
-mod providers;
 mod resolution;
 mod retry;
 mod rollout_cases;
@@ -34,7 +32,6 @@ fn config(root: &Path) -> Config {
         )]),
         argo_namespace: "ci-fixture".into(),
         argo_template: "ccid-job".into(),
-        github_tool_repository: Some("owner/ccid".into()),
         token_file: None,
         forge_token_command: vec![],
         legacy_hosts: vec![],
@@ -109,8 +106,6 @@ impl Fixture {
             expect_commit: None,
             workflows: vec!["verify".into()],
             variables: vec![],
-            provider: "crow".into(),
-            provider_wait: 0,
             queue_timeout: 120,
             rerun: false,
             cached_rerun: false,
@@ -561,17 +556,4 @@ fn state_write_and_lock_are_atomic() {
     drop(guard);
     assert!(lock(&d.path().join("request.lock")).is_ok());
     drop(inherited);
-}
-
-#[test]
-fn github_freeze_rejects_before_transport() {
-    assert!(transport::http(
-        "https://api.github.com/repos/fixture/test",
-        None,
-        Some(&json!({})),
-        1024
-    )
-    .unwrap_err()
-    .to_string()
-    .contains("frozen"));
 }

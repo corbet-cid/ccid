@@ -41,6 +41,35 @@ existing dispatcher; the repository inventory does not create a Kubernetes
 template. Native forge push/PR dispatch and result reporting are separate
 integration work and are not supplied by these manual adapters.
 
+## Secret environment
+
+A job that needs a credential (for example a release token) declares it in two
+places. `[render].secret_environment` maps an environment variable to the name of
+a Crow repository secret; the renderer adds one `from_secret` reference per entry
+to the `repository-job` step, never to a status step, and never a value. A job
+lists the variables it may see in its own `secrets`:
+
+```toml
+[render]
+tool_revision = "1234567890abcdef1234567890abcdef12345678"
+secret_environment = { PUBLISH_TOKEN = "publish_token" }
+
+[jobs.release]
+checks = ["publish"]
+workflow = "repository-jobs"
+command = ["bash", ".ci/run-job.sh"]
+secrets = ["PUBLISH_TOKEN"]
+```
+
+`execute-job` strips every declared variable a job does not list, so `verify`
+and every other job on the same workflow never see the value. Names are plain
+uppercase identifiers that cannot shadow scheduler, reporter or resolver
+variables (`CI_*`, `CCID_*`, `CFRG_STATUS_*`, `CFRG_RESOLVER_*` and the reserved
+job keys), a job's own `environment` may not set a declared variable, and a job
+with `secrets` must run on Crow. The inventory records each job's `secrets`. The
+Crow secret itself, restricted to the manual event, is provisioned by the
+operator; ccid never distributes tokens.
+
 `--check` fails on missing, changed or obsolete generated files without writing
 anything. Normal rendering updates only files marked as renderer-owned and
 removes obsolete generated Crow adapters after a workflow rename. Foreign

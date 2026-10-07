@@ -305,6 +305,14 @@ pub struct Config {
     /// No operator hostnames appear here.
     #[serde(default)]
     pub resolver_token_secret: Option<String>,
+    /// Crow repository secrets projected as environment variables into the
+    /// repository-job step: `NAME = "<crow secret>"`. Only a job that lists
+    /// `NAME` in its own `secrets` sees the value; `execute` withholds it from
+    /// every other job. Secret references (names only) are rendered, values
+    /// never. Native-status steps never carry them. Empty by default: rendered
+    /// output is byte-identical to the unopted template.
+    #[serde(default)]
+    pub secret_environment: BTreeMap<String, String>,
 }
 
 fn default_tool_secret_binary() -> String {
@@ -403,6 +411,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
     if let Some(secret) = config.resolver_token_secret.as_deref() {
         validate_resolver_token_secret(secret)?;
     }
+    validate_secret_environment(&config.secret_environment)?;
     if parsed.jobs.is_empty() {
         return Err(failure("Rendering requires at least one declared job"));
     }
@@ -429,10 +438,14 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         outputs.insert(
             PathBuf::from(format!(".crow/{}.yaml", plan.workflow)),
             inject_gating(
-                inject_resolver_token(
-                    workflow_adapter(&config.tool_revision, &plan.workflow, &sources)?,
+                inject_secret_environment(
+                    inject_resolver_token(
+                        workflow_adapter(&config.tool_revision, &plan.workflow, &sources)?,
+                        &config.tool_revision,
+                        config.resolver_token_secret.as_deref(),
+                    )?,
                     &config.tool_revision,
-                    config.resolver_token_secret.as_deref(),
+                    &config.secret_environment,
                 )?,
                 &gating,
             )?,
@@ -621,20 +634,48 @@ fn validate_push_name(name: &str) -> Result<()> {
 }
 
 fn validate_resolver_token_secret(name: &str) -> Result<()> {
+    validate_crow_secret(name, "[render].resolver_token_secret")
+}
+
+/// A Crow repository secret reference: a name only, never a value.
+fn validate_crow_secret(name: &str, field: &str) -> Result<()> {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > 64 {
-        return Err(failure(
-            "Invalid [render].resolver_token_secret: must be 1-64 characters",
-        ));
+        return Err(failure(format!("Invalid {field}: must be 1-64 characters")));
     }
     let first_ok = bytes[0].is_ascii_alphanumeric() || bytes[0] == b'_';
     let rest_ok = bytes[1..]
         .iter()
         .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-' || *b == b'.');
     if !first_ok || !rest_ok {
-        return Err(failure(
-            "Invalid [render].resolver_token_secret: use [A-Za-z0-9_.-], leading [A-Za-z0-9_]",
-        ));
+        return Err(failure(format!(
+            "Invalid {field}: use [A-Za-z0-9_.-], leading [A-Za-z0-9_]"
+        )));
+    }
+    Ok(())
+}
+
+/// Secret variable names are plain uppercase identifiers that cannot shadow
+/// anything the scheduler, the reporter or the resolver owns.
+fn validate_secret_environment(secrets: &BTreeMap<String, String>) -> Result<()> {
+    for (name, secret) in secrets {
+        let bytes = name.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > 64
+            || !bytes[0].is_ascii_uppercase()
+            || !bytes
+                .iter()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || *b == b'_')
+            || name.starts_with("CI_")
+            || name.starts_with("CCID_")
+            || name.starts_with("CFRG_RESOLVER_")
+            || jobs::reserved_env_key(name)
+        {
+            return Err(failure(format!(
+                "Invalid [render].secret_environment name: {name}"
+            )));
+        }
+        validate_crow_secret(secret, "[render].secret_environment secret")?;
     }
     Ok(())
 }
@@ -749,6 +790,31 @@ fn inject_resolver_token(
     }
     let insertion =
         format!("{pin_line}      {RESOLVER_TOKEN_ENV}:\n        from_secret: {quoted}\n");
+    Ok(base.replacen(&pin_line, &insertion, 1))
+}
+
+/// Project the declared secret environment into an already-built Crow
+/// adapter: one `NAME: { from_secret: <quoted> }` entry per declared variable
+/// in the repository-job environment, in name order. No declaration returns
+/// the input byte-identical.
+fn inject_secret_environment(
+    base: String,
+    tool_revision: &str,
+    secrets: &BTreeMap<String, String>,
+) -> Result<String> {
+    if secrets.is_empty() {
+        return Ok(base);
+    }
+    let pin_line = format!("      CCID_REVISION: '{tool_revision}'\n");
+    if base.matches(&pin_line).count() != 1 {
+        return Err(failure("Render template lost its CCID_REVISION pin"));
+    }
+    let mut insertion = pin_line.clone();
+    for (name, secret) in secrets {
+        // serde_json string quoting is valid YAML and escapes control chars.
+        let quoted = serde_json::to_string(secret)?;
+        insertion.push_str(&format!("      {name}:\n        from_secret: {quoted}\n"));
+    }
     Ok(base.replacen(&pin_line, &insertion, 1))
 }
 

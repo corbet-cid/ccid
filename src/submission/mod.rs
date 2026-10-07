@@ -8,14 +8,12 @@ mod cli;
 mod core;
 mod dependents;
 mod digest;
-mod github;
 mod jobs;
 mod log_digest;
 mod manifest_scan;
 mod pinned;
 mod probe;
 mod rollout;
-mod routing;
 mod submit;
 mod transport;
 
@@ -60,7 +58,6 @@ pub struct Config {
     pub origin_aliases: BTreeMap<String, String>,
     pub argo_namespace: String,
     pub argo_template: String,
-    pub github_tool_repository: Option<String>,
     /// Optional command printing a forge API token (private repositories).
     #[serde(default)]
     pub forge_token_command: Vec<String>,

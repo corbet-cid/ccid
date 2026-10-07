@@ -31,6 +31,13 @@ pub(super) struct Prepared {
     dependencies: Vec<pinned::Source>,
     tool: Option<(PathBuf, String)>,
 }
+/// Submit the exact committed source to Crow, or print the plan.
+pub(super) fn route(config: &Config, args: &SubmitArgs, plan: bool) -> Result<()> {
+    let api = core::Crow::new(config)?;
+    Prepared::new(config, args, &api)?
+        .run(config, args, &api, plan, &mut |_| Ok(()), &mut |_| Ok(()))
+}
+
 impl Prepared {
     pub fn new(config: &Config, args: &SubmitArgs, api: &dyn Api) -> Result<Self> {
         if args.rerun && args.cached_rerun {
@@ -488,8 +495,6 @@ pub(super) fn resolve_with(
         expect_commit: Some(tool_commit),
         workflows: vec!["resolve".into()],
         variables,
-        provider: "crow".into(),
-        provider_wait: 0,
         queue_timeout: 120,
         rerun: true,
         cached_rerun: false,

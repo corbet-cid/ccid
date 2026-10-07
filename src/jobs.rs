@@ -38,6 +38,11 @@ pub struct Job {
     /// overridden (validated).
     #[serde(default)]
     environment: BTreeMap<String, String>,
+    /// Secret environment variables this job may see: names declared in
+    /// `[render].secret_environment`. Every declared variable a job does not
+    /// list is withheld from it. Crow jobs only.
+    #[serde(default)]
+    secrets: Vec<String>,
 }
 
 /// Manifest-owned newest-head refresh scope: update every first-party git
@@ -76,6 +81,12 @@ pub struct Plan {
     /// manifests render byte-identical to before.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
+    /// Declared secret variables this job may see; skipped when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
+    /// Declared secret variables this job must not see; `execute` strips them.
+    #[serde(skip)]
+    pub withheld: Vec<String>,
 }
 
 /// Exact inputs staged by a scheduler adapter. Credentials never belong here.
@@ -132,6 +143,7 @@ pub fn execute(request: &Request) -> Result<()> {
     // Manifest-owned per-job environment applies consistently to manual and
     // push routes. Re-run admission and budget afterwards so declared values
     // (e.g. CI_JOBS) are bound/validated exactly like scheduler-provided ones.
+    withhold_secrets(&mut environment, &planned.withheld);
     crate::jobs::apply_job_environment(&mut environment, &planned.environment);
     crate::admission::admit(&mut environment)?;
     environment.insert("CHECKS".into(), planned.checks.join(",").into());
@@ -254,6 +266,29 @@ pub fn plan(
         validate_refresh(refresh)?;
     }
     validate_job_environment(&job.environment)?;
+    let declared: Vec<&String> = manifest
+        .render
+        .as_ref()
+        .map(|render| render.secret_environment.keys().collect())
+        .unwrap_or_default();
+    if let Some(unknown) = job.secrets.iter().find(|name| !declared.contains(name)) {
+        return Err(failure(format!(
+            "Job names a secret that [render].secret_environment does not declare: {unknown}"
+        )));
+    }
+    if let Some(clash) = job.environment.keys().find(|key| declared.contains(key)) {
+        return Err(failure(format!(
+            "Job environment cannot set a declared secret variable: {clash}"
+        )));
+    }
+    if !job.secrets.is_empty() && scheduler.unwrap_or(job.scheduler) != Scheduler::Crow {
+        return Err(failure("Jobs with secrets must run on Crow"));
+    }
+    let withheld = declared
+        .into_iter()
+        .filter(|name| !job.secrets.contains(name))
+        .cloned()
+        .collect();
     // Push-executed jobs must explicitly opt into generic declared-checks
     // execution. Arbitrary commands are refused here (fail closed) so push
     // can never silently ignore jobs.command. Manual-only jobs (no push
@@ -273,6 +308,8 @@ pub fn plan(
         push_branches: manifest.jobs[name].push_branches.clone(),
         refresh: manifest.jobs[name].refresh.clone(),
         environment: manifest.jobs[name].environment.clone(),
+        secrets: job.secrets.clone(),
+        withheld,
     })
 }
 
@@ -323,7 +360,7 @@ pub(crate) fn is_reporter_status_key(key: &str) -> bool {
 /// identity, reporting tokens, target-lock guard), plus the job-owned
 /// scratch directory: `execute` assigns `RUNNER_TEMP` to the owned scratch
 /// after planning, and the manifest overlay must never undo that ownership.
-fn reserved_env_key(key: &str) -> bool {
+pub(crate) fn reserved_env_key(key: &str) -> bool {
     matches!(
         key,
         "CCID_BIN"
@@ -351,6 +388,13 @@ pub(crate) fn validate_prepare_commands(commands: &[Vec<String>]) -> Result<()> 
         crate::validate_command(argv)?;
     }
     Ok(())
+}
+
+/// Remove the declared secret variables a job did not ask for.
+fn withhold_secrets(environment: &mut crate::Environment, withheld: &[String]) {
+    for name in withheld {
+        environment.remove(std::ffi::OsStr::new(name));
+    }
 }
 
 /// Generic per-job environment, shared by planning, push staging and manual
@@ -397,6 +441,72 @@ mod tests {
             "schema = 1\nproject = 'demo'\n[checks.test]\nkind = 'commands'\ncommands = [['true']]\n[jobs.verify]\n{job}\n"
         )).unwrap();
         root
+    }
+
+    fn secret_repository(jobs: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("ci.toml"),
+            format!(
+                "schema = 1\nproject = 'demo'\n[render]\ntool_revision = '{}'\n\
+                 secret_environment = {{ DEMO_TOKEN = 'demo_token', OTHER_KEY = 'other_key' }}\n\
+                 [checks.test]\nkind = 'commands'\ncommands = [['true']]\n{jobs}",
+                "0".repeat(40)
+            ),
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn a_job_sees_only_the_declared_secrets_it_lists() {
+        let root = secret_repository(
+            "[jobs.verify]\nchecks = ['test']\nworkflow = 'verify'\ncommand = ['true']\n\
+             [jobs.release]\nchecks = ['test']\nworkflow = 'verify'\ncommand = ['true']\n\
+             secrets = ['DEMO_TOKEN']\n",
+        );
+        let verify = plan(root.path(), Path::new("ci.toml"), "verify", None).unwrap();
+        assert!(verify.secrets.is_empty());
+        assert_eq!(verify.withheld, ["DEMO_TOKEN", "OTHER_KEY"]);
+        let release = plan(root.path(), Path::new("ci.toml"), "release", None).unwrap();
+        assert_eq!(release.secrets, ["DEMO_TOKEN"]);
+        assert_eq!(release.withheld, ["OTHER_KEY"]);
+
+        let mut environment = crate::Environment::new();
+        for name in ["DEMO_TOKEN", "OTHER_KEY", "PATH"] {
+            environment.insert(name.into(), "value".into());
+        }
+        withhold_secrets(&mut environment, &release.withheld);
+        assert!(environment.contains_key(std::ffi::OsStr::new("DEMO_TOKEN")));
+        assert!(!environment.contains_key(std::ffi::OsStr::new("OTHER_KEY")));
+        assert!(environment.contains_key(std::ffi::OsStr::new("PATH")));
+        withhold_secrets(&mut environment, &verify.withheld);
+        assert_eq!(environment.len(), 1);
+    }
+
+    #[test]
+    fn secrets_must_be_declared_unshadowed_and_on_crow() {
+        for job in [
+            // Not declared in [render].secret_environment.
+            "checks = ['test']\nworkflow = 'verify'\ncommand = ['true']\nsecrets = ['UNDECLARED']",
+            // The job's own environment may not set a declared secret variable.
+            "checks = ['test']\nworkflow = 'verify'\ncommand = ['true']\nenvironment = { DEMO_TOKEN = 'x' }",
+            // Argo has no secret projection.
+            "scheduler = 'argo'\nchecks = ['test']\nworkflow = 'verify'\ncommand = ['true']\nsecrets = ['DEMO_TOKEN']",
+        ] {
+            let root = secret_repository(&format!("[jobs.verify]\n{job}\n"));
+            assert!(plan(root.path(), Path::new("ci.toml"), "verify", None).is_err(), "{job}");
+        }
+        // Without any declaration nothing is withheld and `secrets` is refused.
+        let bare = repository(
+            "checks = ['test']\nworkflow = 'verify'\ncommand = ['true']\nsecrets = ['DEMO_TOKEN']",
+        );
+        assert!(plan(bare.path(), Path::new("ci.toml"), "verify", None).is_err());
+        let plain = repository("checks = ['test']\nworkflow = 'verify'\ncommand = ['true']");
+        assert!(plan(plain.path(), Path::new("ci.toml"), "verify", None)
+            .unwrap()
+            .withheld
+            .is_empty());
     }
 
     #[test]

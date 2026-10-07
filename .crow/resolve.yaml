@@ -1,11 +1,16 @@
-# Resolve the latest compatible Cargo dependency graph on Crow and publish a
-# reviewable lock snapshot. The source worktree is never updated in place.
+# Resolve the latest compatible Cargo dependency graph on Crow with the verified
+# ccid binary and publish a reviewable lock snapshot. The source worktree is
+# never updated in place.
 when:
   - event: manual
 skip_clone: true
 variables:
   SOURCE_ARCHIVE: {default: ""}
   SOURCE_SHA256: {default: ""}
+  CI_TOOL_ARCHIVE: {default: ""}
+  CI_TOOL_SHA256: {default: ""}
+  CI_TOOL_BINARY: {default: ""}
+  CI_TOOL_BINARY_SHA256: {default: ""}
   RESOLVE_SOURCE_ARCHIVE: {default: ""}
   RESOLVE_SOURCE_SHA256: {default: ""}
   RESOLVE_SOURCE_COMMIT: {default: ""}
@@ -26,94 +31,58 @@ variables:
 steps:
   - name: cargo-resolution
     image: bash
+    environment:
+      CCID_REVISION: 'b6efb8e612fb3bcca806286bf3927dae8ea6167f'
     commands:
       - |
         set -eu
+        test -n "$CI_TOOL_BINARY"
+        test -n "$CI_TOOL_BINARY_SHA256"
+        printf '%s  %s\n' "$CI_TOOL_SHA256" "$CI_TOOL_ARCHIVE" | sha256sum --check --strict
+        test "$(git get-tar-commit-id < "$CI_TOOL_ARCHIVE")" = "$CCID_REVISION"
+        printf '%s  %s\n' "$CI_TOOL_BINARY_SHA256" "$CI_TOOL_BINARY" | sha256sum --check --strict
+        test "$("$CI_TOOL_BINARY" source-revision)" = "$CCID_REVISION"
+        printf '%s  %s\n' "$SOURCE_SHA256" "$SOURCE_ARCHIVE" | sha256sum --check --strict
+        test "$(git get-tar-commit-id < "$SOURCE_ARCHIVE")" = "$CI_COMMIT_SHA"
+        case "$RESOLVE_GENERATE_LOCKFILE" in 0|1) ;; *) echo 'RESOLVE_GENERATE_LOCKFILE must be 0 or 1' >&2; exit 2;; esac
+        # Resolve another committed consumer when all four target inputs are
+        # supplied together; none resolves this workflow's own source.
+        if [ -n "$RESOLVE_SOURCE_ARCHIVE$RESOLVE_SOURCE_SHA256$RESOLVE_SOURCE_COMMIT$RESOLVE_REPOSITORY_URL" ]; then
+          if [ -z "$RESOLVE_SOURCE_ARCHIVE" ] || [ -z "$RESOLVE_SOURCE_SHA256" ] || [ -z "$RESOLVE_SOURCE_COMMIT" ] || [ -z "$RESOLVE_REPOSITORY_URL" ]; then
+            echo 'RESOLVE_SOURCE_ARCHIVE, RESOLVE_SOURCE_SHA256, RESOLVE_SOURCE_COMMIT, and RESOLVE_REPOSITORY_URL must be supplied together' >&2
+            exit 2
+          fi
+          target_archive=$RESOLVE_SOURCE_ARCHIVE
+          target_sha256=$RESOLVE_SOURCE_SHA256
+          target_commit=$RESOLVE_SOURCE_COMMIT
+          target_repository=$RESOLVE_REPOSITORY_URL
+        else
+          test -n "$CI_REPOSITORY_URL"
+          target_archive=$SOURCE_ARCHIVE
+          target_sha256=$SOURCE_SHA256
+          target_commit=$CI_COMMIT_SHA
+          target_repository=$CI_REPOSITORY_URL
+        fi
         TMPDIR="$${TMPDIR:-/tmp}"
         export TMPDIR
-        export MODE=build
-        export CI_REPOSITORY_URL="$${CI_REPOSITORY_URL:-https://github.com/corbet-libs/ccid}"
-        exec python3 - <<'PY_RESOLVE'
-        import hashlib, json, os, pathlib, re, runpy, shutil, signal, subprocess, sys, tarfile, tempfile
-
-        def interrupted(_signal, _frame):
-            raise KeyboardInterrupt
-        signal.signal(signal.SIGTERM, interrupted)
-        with tempfile.TemporaryDirectory(prefix='ccid-bootstrap-') as directory:
-            root = pathlib.Path(directory)
-            snapshot = root / 'source.tar'
-            shutil.copyfile(os.environ['SOURCE_ARCHIVE'], snapshot)
-            digest = os.environ['SOURCE_SHA256']
-            if not re.fullmatch(r'[0-9a-f]{64}', digest) or hashlib.file_digest(snapshot.open('rb'), 'sha256').hexdigest() != digest:
-                raise SystemExit('Source archive SHA-256 mismatch')
-            with snapshot.open('rb') as stream:
-                commit = subprocess.check_output(['git', 'get-tar-commit-id'], stdin=stream, text=True).strip()
-            if commit != os.environ['CI_COMMIT_SHA']:
-                raise SystemExit('Source archive commit mismatch')
-            source = root / 'source'
-            source.mkdir()
-            with tarfile.open(snapshot, 'r:') as archive:
-                archive.extractall(source, filter='data')
-            for path in source.rglob('*'):
-                if not path.is_symlink():
-                    os.utime(path, None)
-            os.chdir(source)
-            sys.path.insert(0, str(source))
-            target = subprocess.check_output(['rustc', '-vV'], text=True)
-            target = next(line.split(': ', 1)[1] for line in target.splitlines() if line.startswith('host: '))
-            output_root = pathlib.Path(os.environ.get('CCID_OUTPUT_ROOT') or pathlib.Path(os.environ['CARGO_HOME']) / 'ccid-artifacts')
-            core_destination = output_root / commit / target
-            binary = core_destination / 'ccid'
-            receipt_path = core_destination / 'receipt.json'
-            reuse = False
-            if binary.is_file() and receipt_path.is_file():
-                try:
-                    receipt = json.loads(receipt_path.read_text())
-                    digest = hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest()
-                    reuse = (receipt == {'binary_sha256': digest, 'source_revision': commit, 'target': target}
-                             and subprocess.check_output([str(binary), 'source-revision'], text=True).strip() == commit)
-                except (OSError, ValueError, subprocess.CalledProcessError):
-                    reuse = False
-            if reuse:
-                print('ccid-artifact-reuse', binary, receipt_path)
-            else:
-                runpy.run_path(str(source / '.ci/bootstrap.py'), run_name='__main__')
-                if not binary.is_file() or not receipt_path.is_file():
-                    raise SystemExit('Bootstrap did not publish the expected ccid binary and receipt')
-            target_inputs = [
-                os.environ.get('RESOLVE_SOURCE_ARCHIVE', ''),
-                os.environ.get('RESOLVE_SOURCE_SHA256', ''),
-                os.environ.get('RESOLVE_SOURCE_COMMIT', ''),
-                os.environ.get('RESOLVE_REPOSITORY_URL', ''),
-            ]
-            if any(target_inputs) and not all(target_inputs):
-                raise SystemExit('RESOLVE_SOURCE_ARCHIVE, RESOLVE_SOURCE_SHA256, RESOLVE_SOURCE_COMMIT, and RESOLVE_REPOSITORY_URL must be supplied together')
-            if all(target_inputs):
-                target_archive, target_sha256, target_commit, target_repository = target_inputs
-            else:
-                target_archive, target_sha256, target_commit, target_repository = (
-                    os.environ['SOURCE_ARCHIVE'], os.environ['SOURCE_SHA256'], commit,
-                    os.environ['CI_REPOSITORY_URL'])
-            os.environ.update({
-                'SOURCE_ARCHIVE': target_archive,
-                'SOURCE_SHA256': target_sha256,
-                'CI_COMMIT_SHA': target_commit,
-                'CI_REPOSITORY_URL': target_repository,
-            })
-            output = output_root / target_commit / 'cargo-resolution'
-            command = [str(binary), 'cargo-resolve', '--repo', str(source), '--output-dir', str(output)]
-            generate = os.environ.get('RESOLVE_GENERATE_LOCKFILE', '0')
-            if generate not in ('0', '1'):
-                raise SystemExit('RESOLVE_GENERATE_LOCKFILE must be 0 or 1')
-            if generate == '1':
-                command.append('--generate-lockfile')
-            for check in os.environ.get('RESOLVE_CHECKS', '').split(','):
-                if check:
-                    command.extend(['--check', check])
-            subprocess.run(command, check=True)
-            for artifact in sorted(output.iterdir()):
-                if artifact.is_file():
-                    print('cargo-resolution-artifact', artifact, artifact.stat().st_size, hashlib.file_digest(artifact.open('rb'), 'sha256').hexdigest())
-                    if artifact.suffix == '.json':
-                        print(artifact.read_text())
-        PY_RESOLVE
+        output_root="$${CCID_OUTPUT_ROOT:-$CARGO_HOME/ccid-artifacts}"
+        output="$output_root/$target_commit/cargo-resolution"
+        # The working directory only has to sit outside the output directory:
+        # the tool verifies and unpacks the target archive itself.
+        workdir=$(mktemp -d)
+        trap 'rm -rf -- "$workdir"' EXIT
+        cd "$workdir"
+        set -- "$CI_TOOL_BINARY" cargo-resolve --repo "$workdir" --output-dir "$output"
+        if [ "$RESOLVE_GENERATE_LOCKFILE" = 1 ]; then
+          set -- "$@" --generate-lockfile
+        fi
+        for check in $(printf '%s' "$RESOLVE_CHECKS" | tr ',' ' '); do
+          set -- "$@" --check "$check"
+        done
+        env SOURCE_ARCHIVE="$target_archive" SOURCE_SHA256="$target_sha256" \
+          CI_COMMIT_SHA="$target_commit" CI_REPOSITORY_URL="$target_repository" "$@"
+        for artifact in "$output"/*; do
+          [ -f "$artifact" ] || continue
+          printf 'cargo-resolution-artifact %s %s %s\n' "$artifact" "$(wc -c < "$artifact" | tr -d ' ')" "$(sha256sum "$artifact" | cut -d ' ' -f 1)"
+          case "$artifact" in *.json) cat "$artifact";; esac
+        done
