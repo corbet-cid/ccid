@@ -27,6 +27,7 @@ fn config() -> RunnerConfig {
         placement: None,
         tool: None,
         primary_source: None,
+        emergency_fallback: false,
         timeout_secs: 30,
     }
 }
@@ -274,4 +275,49 @@ fn same_owner_repos_keep_distinct_plan_primaries() {
         let (primary, _) = parse_plan_output(text).unwrap();
         assert_eq!(primary, want);
     }
+}
+
+/// The resolver's `emergency-fallback` outcome (a moving ref served by a
+/// declared store because the canonical pointer or the primary could not
+/// answer) installs its rewrite and credential scope like a routed store. The
+/// warning goes to the job log; the response itself is otherwise unchanged.
+#[test]
+fn emergency_fallback_outcome_is_accepted_and_routes_through_its_store() {
+    let config = config();
+    let mut env: BTreeMap<OsString, OsString> = BTreeMap::new();
+    let mut value: serde_json::Value = serde_json::from_str(&response_text()).unwrap();
+    value["decisions"][1]["outcome"] = serde_json::json!("emergency-fallback");
+    value["decisions"][1]["store"] = serde_json::json!(0);
+    value["decisions"][1]["via"] =
+        serde_json::json!("http://forgejo.example:3001/acme/neighbor.git");
+    value["decisions"][1]["instead_of"] = serde_json::json!([
+        [
+            "https://git.example/acme/neighbor",
+            "http://forgejo.example:3001/acme/neighbor.git"
+        ],
+        [
+            "https://git.example/acme/neighbor.git",
+            "http://forgejo.example:3001/acme/neighbor.git"
+        ]
+    ]);
+    let routed =
+        apply_response(&mut env, &value.to_string(), &requested(), "cfrg", &config).unwrap();
+    assert!(routed > 0);
+    let keys: Vec<String> = env
+        .iter()
+        .filter(|(name, _)| name.to_string_lossy().starts_with("GIT_CONFIG_KEY_"))
+        .map(|(_, value)| value.to_string_lossy().into_owned())
+        .collect();
+    assert!(keys
+        .iter()
+        .any(|key| key == "url.http://forgejo.example:3001/acme/neighbor.git.insteadOf"));
+}
+
+#[test]
+fn unknown_outcomes_are_still_refused() {
+    let config = config();
+    let mut env: BTreeMap<OsString, OsString> = BTreeMap::new();
+    let mut value: serde_json::Value = serde_json::from_str(&response_text()).unwrap();
+    value["decisions"][1]["outcome"] = serde_json::json!("emergency");
+    assert!(apply_response(&mut env, &value.to_string(), &requested(), "cfrg", &config).is_err());
 }

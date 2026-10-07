@@ -61,6 +61,13 @@ pub struct RunnerConfig {
     pub tool: Option<ToolPin>,
     #[serde(default)]
     pub primary_source: Option<PrimarySource>,
+    /// Resilience opt-in, passed through to cfrg only when set: a moving ref
+    /// whose primary has no declared store may be served by a declared store
+    /// when the canonical pointer or the primary cannot answer, with a warning
+    /// (see cfrg's clmr README). Omitted from the request when false, so older
+    /// resolver binaries that reject unknown fields keep working.
+    #[serde(default)]
+    pub emergency_fallback: bool,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
 }
@@ -1005,6 +1012,8 @@ struct ApiRequest<'a> {
     timeout_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     primary_source: Option<&'a PrimarySource>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    emergency_fallback: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1090,6 +1099,7 @@ pub fn build_request_json(
         stores: &config.stores,
         timeout_secs: config.timeout_secs,
         primary_source: config.primary_source.as_ref(),
+        emergency_fallback: config.emergency_fallback,
     };
     serde_json::to_value(&request).map_err(|_| failure("Request serialization"))
 }
@@ -1387,8 +1397,19 @@ pub fn apply_response(
         if !seen.insert(d.id.clone()) {
             return Err(failure("Duplicate resolver decision"));
         }
-        if d.outcome != "routed" && d.outcome != "canonical-pointer" {
+        if d.outcome != "routed"
+            && d.outcome != "canonical-pointer"
+            && d.outcome != "emergency-fallback"
+        {
             return Err(failure("Invalid resolver outcome"));
+        }
+        if d.outcome == "emergency-fallback" {
+            // Never silent: the copy may lag its primary. The note is the
+            // resolver's own fixed text (no store credentials or bodies).
+            eprintln!(
+                "ccid: WARNING emergency fallback for {}: moving ref served from a declared store that is not its primary and may lag it",
+                d.path
+            );
         }
     }
     if seen != *requested_ids {
@@ -1577,6 +1598,7 @@ mod tests {
             placement: None,
             tool: None,
             primary_source: None,
+            emergency_fallback: false,
             timeout_secs: 30,
         }
     }
@@ -2145,5 +2167,13 @@ mod primary_source_tests {
         bare.primary_source = None;
         let value = build_request_json(&inv, &primaries, &bare).unwrap();
         assert!(value.get("primary_source").is_none());
+        // The emergency opt-in reaches cfrg only when declared; an older
+        // resolver binary rejects unknown request fields, so it is omitted
+        // otherwise.
+        assert!(value.get("emergency_fallback").is_none());
+        let mut declared = test_config();
+        declared.emergency_fallback = true;
+        let value = build_request_json(&inv, &primaries, &declared).unwrap();
+        assert_eq!(value["emergency_fallback"], true);
     }
 }
