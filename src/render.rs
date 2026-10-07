@@ -767,7 +767,7 @@ fn gating_jobs(parsed: &crate::Manifest) -> Result<Vec<String>> {
 
 /// Bake the gating jobs into the status steps of a rendered adapter.
 fn inject_gating(base: String, gating: &[String]) -> Result<String> {
-    if base.matches(GATING_PLACEHOLDER).count() != 2 {
+    if base.matches(GATING_PLACEHOLDER).count() != 3 {
         return Err(failure("Render template lost its verdict placeholders"));
     }
     Ok(base.replace(GATING_PLACEHOLDER, &gating.join(",")))

@@ -165,7 +165,7 @@ fn generated_shell_preserves_request_data_and_binds_the_crow_source() {
         .split("  - name: repository-job\n")
         .nth(1)
         .unwrap()
-        .split("  - name: native-status-complete\n")
+        .split("  - name: native-status-failure\n")
         .next()
         .unwrap()
         .split("      - |\n")
@@ -492,11 +492,21 @@ fn status_steps_report_the_verdict_with_verify_gating_by_default() {
     let root = repository();
     render(root.path(), false).unwrap();
     let yaml = rendered_workflow(&root);
-    assert_eq!(yaml.matches("CCID_VERDICT_JOBS: 'verify'").count(), 2);
+    // The pending step, the job step (which reports its own result) and the
+    // failure step that covers a job that never reached its own report.
+    assert_eq!(yaml.matches("CCID_VERDICT_JOBS: 'verify'").count(), 3);
     assert_eq!(
         yaml.matches("\"$CI_TOOL_BINARY\" verdict --commit").count(),
         2
     );
+    // Crow 6.4 provides no pipeline status variable to steps.
+    assert!(!yaml.contains("CI_PIPELINE_STATUS"));
+    assert!(!yaml.contains("native-status-complete"));
+    let job = yaml.find("name: repository-job").unwrap();
+    let failure = yaml.find("name: native-status-failure").unwrap();
+    assert!(yaml[job..failure].contains("CCID_STATUS_CONFIG: '${CCID_STATUS_CONFIG:-}'"));
+    assert!(yaml[failure..].contains("- status: [failure]"));
+    assert!(yaml[failure..].contains("--state failure"));
     assert!(yaml.contains("--gating \"$CCID_VERDICT_JOBS\""));
     assert!(!yaml.contains("CCID_GATING_JOBS"));
     // The reporter is verified through the same verified tool, never skipped.
@@ -521,7 +531,7 @@ fn a_manifest_declares_which_jobs_gate_and_side_jobs_stay_out() {
         rendered_workflow(&root)
             .matches("CCID_VERDICT_JOBS: 'verify,alternate'")
             .count(),
-        2
+        3
     );
     let side_only = format!("{}[verdict]\njobs=['verify']\n", manifest("verify", "crow"));
     fs::write(&config, side_only).unwrap();
@@ -530,7 +540,7 @@ fn a_manifest_declares_which_jobs_gate_and_side_jobs_stay_out() {
         rendered_workflow(&root)
             .matches("CCID_VERDICT_JOBS: 'verify'")
             .count(),
-        2
+        3
     );
     assert!(!rendered_workflow(&root).contains("alternate"));
 }
@@ -554,6 +564,6 @@ fn verdict_declarations_are_validated_and_absent_gating_posts_no_verdict() {
         rendered_workflow(&root)
             .matches("CCID_VERDICT_JOBS: ''")
             .count(),
-        2
+        3
     );
 }

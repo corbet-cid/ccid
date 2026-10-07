@@ -31,10 +31,22 @@ other manifest change.
 
 ## How it works
 
-The generated `native-status-pending` and `native-status-complete` steps run
-`"$CI_TOOL_BINARY" verdict --commit SHA --job JOB --gating A,B --state S ...`
-(only when the operator configured `CCID_STATUS_CONFIG`; unconfigured adapters
-behave as before). The command verifies the reporter (`CCID_STATUS_BINARY`
+A generated adapter reports in three places, all only when the operator enabled
+reporting (`CCID_STATUS_CONFIG`; unconfigured adapters behave as before):
+
+* the `native-status-pending` step runs
+  `"$CI_TOOL_BINARY" verdict --commit SHA --job JOB --gating A,B --state pending ...`
+  before the job;
+* `execute-job` itself posts the terminal state from the exit status of the job it
+  supervised (`success`, otherwise `failure`), through the same command. Crow 6.4
+  provides no pipeline-status variable to steps, so the result never travels
+  through the scheduler, and the reporter's credentials stay with the supervising
+  process: checks never see them;
+* the `native-status-failure` step (`when: status: [failure]`) posts `failure`
+  literally, which covers a job that never reached its own report (a failed tool
+  check, a killed step).
+
+The command verifies the reporter (`CCID_STATUS_BINARY`
 against `CCID_STATUS_BINARY_SHA256`), posts `ccid/<job>`, and, for a gating job,
 records the job's state per repository and commit under
 `$CFRG_STATUS_STATE_DIR/ccid-verdict/<owner>/<name>/<commit>.json` (locked,
@@ -43,13 +55,15 @@ Jobs running in separate pipelines therefore contribute to one verdict; a rerun
 reopens it (`pending`), a rerun that passes closes it again. Without a shared
 state directory only a lone gating job can decide; with several the verdict stays
 `pending` rather than guessing. A reporter failure fails the status step, so a
-missing verdict is visible.
+missing verdict is visible: a green job whose terminal report failed ends red.
 
 ## Rolling it out
 
 1. Provision the status reporter on the Crow agent (`CCID_STATUS_BINARY`,
    `CCID_STATUS_BINARY_SHA256`, `CCID_STATUS_CONFIG`, `CFRG_STATUS_STATE_DIR` on
-   persistent storage) as declared infrastructure.
+   persistent storage) as declared infrastructure. The switch itself,
+   `CCID_STATUS_CONFIG`, is read by Crow from the server's pipeline environment,
+   substituted into the rendered workflow and handed to the job step.
 2. Move the repository's adapter pin to a ccid revision that contains
    `ccid verdict` and run `ccid render`.
 3. Only then change the repository's land policy `contexts` from `ci/crow/*` to

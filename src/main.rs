@@ -230,7 +230,20 @@ fn main() -> ExitCode {
                 }
             } else {
                 return match supervision::execute() {
-                    Ok(status) => ExitCode::from(status.code().unwrap_or(2) as u8),
+                    Ok(status) => {
+                        // The job's own result becomes the commit's terminal
+                        // status; a missing report must be visible, so a green
+                        // job whose report failed ends red.
+                        let reported = ccid::verdict::report_terminal(&request, status.success());
+                        if let Err(error) = &reported {
+                            eprintln!("ccid: cannot report the job's result: {error}");
+                        }
+                        if status.success() && reported.is_err() {
+                            ExitCode::from(2)
+                        } else {
+                            ExitCode::from(status.code().unwrap_or(2) as u8)
+                        }
+                    }
                     Err(error) => {
                         eprintln!("ccid: cannot supervise job: {error}");
                         ExitCode::from(2)

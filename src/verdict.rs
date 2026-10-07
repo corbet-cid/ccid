@@ -10,6 +10,11 @@
 //!   the manifest, default `verify`) has succeeded for this exact commit,
 //!   `failure` as soon as one failed, and `pending` otherwise.
 //!
+//! The pending state is posted by a generated adapter step. The terminal state
+//! is posted by `execute-job` itself ([`report_terminal`]) from the exit status
+//! of the job it supervised: Crow provides no pipeline-status variable to
+//! steps, so the result never travels through the scheduler.
+//!
 //! Statuses are posted through the operator's status reporter (cfrg's status
 //! procedure); this command never talks to a forge itself. Per-job results are
 //! recorded per repository and commit in the reporter's shared state directory
@@ -240,6 +245,54 @@ pub fn run(options: &Options) -> Result<()> {
     post(options, VERDICT_CONTEXT, verdict)?;
     println!("{VERDICT_CONTEXT} {}", verdict.as_str());
     Ok(())
+}
+
+/// Options of the job's own terminal report, from the step environment the
+/// adapter provides, or `None` when the operator did not enable reporting
+/// (`CCID_STATUS_CONFIG` empty or absent), exactly like the pending step.
+pub fn terminal_options(
+    commit: &str,
+    job: &str,
+    state: State,
+    environment: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<Options>> {
+    let value = |name: &str| environment(name).filter(|v| !v.is_empty());
+    if value("CCID_STATUS_CONFIG").is_none() {
+        return Ok(None);
+    }
+    let required =
+        |name: &str| value(name).ok_or_else(|| failure(format!("Status reporting needs {name}")));
+    Ok(Some(Options {
+        commit: commit.to_owned(),
+        job: job.to_owned(),
+        gating: value("CCID_VERDICT_JOBS").unwrap_or_default(),
+        state,
+        url: required("CI_PIPELINE_URL")?,
+        started: required("CI_PIPELINE_CREATED")?
+            .parse()
+            .map_err(|_| failure("CI_PIPELINE_CREATED must be Unix seconds"))?,
+        binary: PathBuf::from(required("CCID_STATUS_BINARY")?),
+        binary_sha256: required("CCID_STATUS_BINARY_SHA256")?,
+        state_dir: value("CFRG_STATUS_STATE_DIR").map(PathBuf::from),
+        repo: value("CI_REPO"),
+    }))
+}
+
+/// Report the terminal state of the job whose request is in `request`: success
+/// when its supervised execution succeeded, failure otherwise. Does nothing
+/// unless reporting is enabled; a reporter failure is an error.
+pub fn report_terminal(request: &Path, succeeded: bool) -> Result<()> {
+    let request: crate::jobs::Request = serde_json::from_slice(&fs::read(request)?)?;
+    let state = if succeeded {
+        State::Success
+    } else {
+        State::Failure
+    };
+    let environment = |name: &str| std::env::var(name).ok();
+    match terminal_options(&request.commit, &request.job, state, &environment)? {
+        Some(options) => run(&options),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

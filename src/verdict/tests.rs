@@ -257,3 +257,98 @@ fn malformed_input_is_rejected_before_any_post() {
     assert!(repository_path("owner/name") && repository_path("group/sub/name"));
     assert!(!repository_path("name") && !repository_path("../x/y") && !repository_path("a//b"));
 }
+
+/// The step environment a generated adapter gives `execute-job`.
+fn step_environment(status: &Reporter, extra: &[(&str, &str)]) -> BTreeMap<String, String> {
+    let mut environment: BTreeMap<String, String> = [
+        ("CCID_STATUS_CONFIG", "/etc/status".to_owned()),
+        ("CCID_VERDICT_JOBS", "verify".to_owned()),
+        (
+            "CI_PIPELINE_URL",
+            "https://ci.example.invalid/run/7".to_owned(),
+        ),
+        ("CI_PIPELINE_CREATED", "5".to_owned()),
+        (
+            "CCID_STATUS_BINARY",
+            status.dir.path().join("status").display().to_string(),
+        ),
+        ("CCID_STATUS_BINARY_SHA256", status.sha.clone()),
+        ("CI_REPO", "owner/project".to_owned()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_owned(), v))
+    .collect();
+    for (key, value) in extra {
+        environment.insert((*key).to_owned(), (*value).to_owned());
+    }
+    environment
+}
+
+#[test]
+fn the_terminal_report_is_off_unless_the_operator_enabled_reporting() {
+    let status = reporter(0);
+    for extra in [None, Some("")] {
+        let mut environment = step_environment(&status, &[]);
+        match extra {
+            None => environment.remove("CCID_STATUS_CONFIG"),
+            Some(value) => environment.insert("CCID_STATUS_CONFIG".into(), value.into()),
+        };
+        let lookup = |name: &str| environment.get(name).cloned();
+        assert!(terminal_options(COMMIT, "verify", State::Success, &lookup)
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[test]
+fn a_green_job_ends_with_a_success_verdict_and_a_red_one_with_failure() {
+    for (state, expected) in [(State::Success, "success"), (State::Failure, "failure")] {
+        let status = reporter(0);
+        let environment = step_environment(&status, &[]);
+        let lookup = |name: &str| environment.get(name).cloned();
+        let options = terminal_options(COMMIT, "verify", state, &lookup)
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.gating, "verify");
+        assert_eq!(options.repo.as_deref(), Some("owner/project"));
+        run(&options).unwrap();
+        let calls = status.calls();
+        assert!(calls[0].contains("--name ccid/verify"), "{calls:?}");
+        assert!(
+            calls[0].ends_with(&format!("--state {expected}")),
+            "{calls:?}"
+        );
+        assert_eq!(status.last_verdict().as_deref(), Some(expected));
+    }
+}
+
+#[test]
+fn the_terminal_report_needs_its_whole_environment() {
+    let status = reporter(0);
+    for missing in [
+        "CI_PIPELINE_URL",
+        "CI_PIPELINE_CREATED",
+        "CCID_STATUS_BINARY",
+        "CCID_STATUS_BINARY_SHA256",
+    ] {
+        let mut environment = step_environment(&status, &[]);
+        environment.remove(missing);
+        let lookup = |name: &str| environment.get(name).cloned();
+        let error = terminal_options(COMMIT, "verify", State::Success, &lookup)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains(missing), "{error}");
+    }
+    let environment = step_environment(&status, &[("CI_PIPELINE_CREATED", "yesterday")]);
+    let lookup = |name: &str| environment.get(name).cloned();
+    assert!(terminal_options(COMMIT, "verify", State::Success, &lookup).is_err());
+    // No gating declared: the job context is still reported, no verdict.
+    let environment = step_environment(&status, &[("CCID_VERDICT_JOBS", "")]);
+    let lookup = |name: &str| environment.get(name).cloned();
+    let options = terminal_options(COMMIT, "release", State::Success, &lookup)
+        .unwrap()
+        .unwrap();
+    run(&options).unwrap();
+    assert_eq!(status.last_verdict(), None);
+}
