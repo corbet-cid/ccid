@@ -35,6 +35,7 @@ mod source;
 pub mod tor;
 pub(crate) mod tor_inputs;
 pub mod typescript_cache;
+pub mod verdict;
 
 use budget::positive;
 pub use budget::{budget, Budget};
@@ -123,6 +124,16 @@ struct Manifest {
     /// adapters. Optional; push adapter rendering requires it.
     #[serde(default)]
     repository: Option<String>,
+    /// Which jobs gate landing (see `verdict`). Absent: `verify`, if declared.
+    #[serde(default)]
+    verdict: Option<Verdict>,
+}
+/// The jobs whose success is the commit's aggregated verdict; every other job
+/// (release, publish, scheduled gates) reports under its own non-gating context.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Verdict {
+    jobs: Vec<String>,
 }
 #[derive(Debug, Deserialize, serde::Serialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -151,7 +162,12 @@ pub struct Check {
     cache_commit: bool,
     cache_inputs: Option<Vec<String>>,
     cache: Option<bool>,
-    cache_pure: bool,
+    /// Deterministic checks are pure by default; `false` opts a check that
+    /// observes the network or the clock out of result caching. It decides
+    /// whether a result is cached, never what the result is, so it is not
+    /// serialized into any key.
+    #[serde(skip_serializing)]
+    cache_pure: Option<bool>,
 }
 /// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
 fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
@@ -351,7 +367,7 @@ fn run_checks_inner(
             } else {
                 bypassed.push(name.clone());
                 event(
-                    json!({"event":"cache-bypass","check":name,"reason":"no complete pure-result contract"}),
+                    json!({"event":"cache-bypass","check":name,"reason":"check opts out of result caching or its kind is not cacheable"}),
                 );
                 let mut direct = environment.clone();
                 direct.remove(std::ffi::OsStr::new("CCID_RESULT_CACHE"));

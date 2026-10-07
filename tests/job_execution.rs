@@ -68,6 +68,8 @@ fn archived_job_preserves_exact_source_and_rejects_tampered_history() {
     let run = |request: &serde_json::Value, expected: &str| {
         fs::write(&input, serde_json::to_vec(request).unwrap()).unwrap();
         Command::new(env!("CARGO_BIN_EXE_ccid"))
+            .env_remove("CCID_RESULT_CACHE")
+            .env_remove("CCID_REMOTE_CACHE")
             .args(["execute-job", "--request"])
             .arg(&input)
             .args(["--expect-commit", expected])

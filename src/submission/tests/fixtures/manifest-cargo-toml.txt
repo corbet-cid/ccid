@@ -1,0 +1,19 @@
+server = ["client-http", "dep:cmty", "dep:clbs", "dep:ed25519-dalek", "dep:cpsd", "dep:crlt", "dep:csgn", "dep:cgbl", "dep:ckyh", "dep:cthl", "dep:axum", "dep:tower-http", "dep:utoipa", "dep:clap", "dep:rmcp", "dep:tokio", "dep:uuid", "dep:chrono", "dep:rand", "dep:subtle"]
+client = ["dep:jsonschema"]
+client-http = ["client", "dep:reqwest"]
+development-gate = ["server", "cgbl/development-gate"]
+
+[dependencies]
+jsonschema = { version = "0.58", default-features = false, optional = true }
+cmty = { git = "https://legacy.example.invalid/example-libs/cmty", branch = "main", optional = true }
+clbs = { git = "https://legacy.example.invalid/example-foss/clbs", branch = "main", optional = true }
+ed25519-dalek = { version = "2.2", optional = true }
+cpsd = { git = "https://legacy.example.invalid/example-foss/cpsd", branch = "main", default-features = false, features = ["storage"], optional = true }
+crlt = { git = "https://legacy.example.invalid/example-foss/crlt", branch = "main", optional = true }
+csgn = { git = "https://legacy.example.invalid/example-foss/csgn", branch = "main", features = ["libsql"], optional = true }
+cgbl = { git = "https://forge.example.invalid/example-libs/cgbl.git", rev = "6e99d662f5620d69362ae4b17a3bd17293289dc6", optional = true }
+ckyh = { git = "https://legacy.example.invalid/example-foss/ckyh", branch = "main", optional = true }
+cthl = { git = "https://legacy.example.invalid/example-foss/cthl", branch = "main", optional = true }
+axum = { version = "0.8.9", optional = true }
+tower-http = { version = "0.6.11", features = ["cors"], optional = true }
+utoipa = { version = "6.0.0", optional = true }

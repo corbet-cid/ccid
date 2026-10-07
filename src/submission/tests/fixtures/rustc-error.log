@@ -1,0 +1,22 @@
+    Checking cfyr v0.0.0 (https://forge.example.invalid/example/cfyr.git?branch=v01#7144ba47)
+    Checking cvlt v0.0.0 (https://forge.example.invalid/example/cvlt.git?branch=v01#7f0234ba)
+    Checking cbrd v0.1.0 (https://forge.example.invalid/example/cbrd.git?branch=v01#92ead1b2)
+    Checking cnbx v0.1.0 (https://forge.example.invalid/example/cnbx.git?branch=v01#2e7eee79)
+    Checking cmsg v0.2.0 (/tmp/job/source)
+error[E0562]: `impl Trait` is not allowed in the return type of `Fn` trait bounds
+   --> src/door/../../tests/support/native_composition.rs:137:24
+    |
+137 | ) -> impl FnOnce() -> (impl std::future::Future<Output = Result<(Door, Box<dyn VaultComposer>)>> + 'static)
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `impl Trait` is only allowed in arguments and return types of functions and methods
+    = note: see issue #99697 <https://github.com/rust-lang/rust/issues/99697> for more information
+
+For more information about this error, try `rustc --explain E0562`.
+error: could not compile `cmsg` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+{"event":"command","executable":"bash","exit_code":101,"seconds":285.822403109}
+ccid: bash failed: exit status: 101
+{"event":"command","executable":"bash","exit_code":2,"seconds":286.284983219}
+ccid: bash failed: exit status: 2
+

@@ -1,0 +1,91 @@
+error: this function has a `#[must_use]` attribute with no message, but returns a type already considered as `#[must_use]`
+    --> /ci/path:2819:19
+     |
+2819 |       #[async_trait]
+     |  ___________________^
+2820 | |     pub trait TerminalService: std::marker::Send + std::marker::Sync + 'static {
+2821 | |         /// Connection Management
+2822 | |         async fn handshake(
+     | |________^
+     |
+note: the return type is pinned boxed `std::future::Future` trait object
+    --> /ci/path:2819:5
+     |
+2819 |     #[async_trait]
+     |     ^^^^^^^^^^^^^^
+help: remove `must_use`
+    --> /ci/path:2819:5
+     |
+2819 |     #[async_trait]
+     |     ^^^^^^^^^^^^^^
+     = note: alternatively, you may add an explicit reason to the `must_use` attribute
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#double_must_use
+     = note: `-D clippy::double-must-use` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::double_must_use)]`
+     = note: this error originates in the attribute macro `async_trait` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: this function has a `#[must_use]` attribute with no message, but returns a type already considered as `#[must_use]`
+    --> /ci/path:2819:19
+     |
+2819 |       #[async_trait]
+     |  ___________________^
+2820 | |     pub trait TerminalService: std::marker::Send + std::marker::Sync + 'static {
+2821 | |         /// Connection Management
+2822 | |         async fn handshake(
+...    |
+2829 | |         /// Session Management
+2830 | |         async fn create_session(
+     | |________^
+     |
+note: the return type is pinned boxed `std::future::Future` trait object
+    --> /ci/path:2819:5
+     |
+2819 |     #[async_trait]
+     |     ^^^^^^^^^^^^^^
+help: remove `must_use`
+    --> /ci/path:2819:5
+     |
+2819 |     #[async_trait]
+     |     ^^^^^^^^^^^^^^
+     = note: alternatively, you may add an explicit reason to the `must_use` attribute
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#double_must_use
+     = note: this error originates in the attribute macro `async_trait` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: this function has a `#[must_use]` attribute with no message, but returns a type already considered as `#[must_use]`
+    --> /ci/path:2819:19
+     |
+2819 |       #[async_trait]
+     |  ___________________^
+2820 | |     pub trait TerminalService: std::marker::Send + std::marker::Sync + 'static {
+2821 | |         /// Connection Management
+2822 | |         async fn handshake(
+...    |
+2836 | |         >;
+2837 | |         async fn list_sessions(
+     | |________^
+     |
+note: the return type is pinned boxed `std::future::Future` trait object
+    --> /ci/path:2819:5
+     |
+2819 |     #[async_trait]
+     |     ^^^^^^^^^^^^^^
+help: remove `must_use`
+    --> /ci/path:2819:5
+     |
+2819 |     #[async_trait]
+     |     ^^^^^^^^^^^^^^
+     = note: alternatively, you may add an explicit reason to the `must_use` attribute
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#double_must_use
+     = note: this error originates in the attribute macro `async_trait` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+
+    Checking filetime v0.2.27
+    Checking cvt v0.1.2
+    Checking pathdiff v0.2.3
+error: could not compile `cterm-proto` (lib) due to 33 previous errors
+warning: build failed, waiting for other jobs to finish...
+{"event":"command","executable":"bash","exit_code":101,"seconds":77.264013019}
+▮▮▮▮ cterm:linux (1m 17s 286ms, 60fad819)
+{"event":"command","executable":"moon","exit_code":1,"seconds":77.922911926}
+{"event":"command","executable":"bash","exit_code":2,"seconds":78.281626854}
+ccid: bash failed: exit status: 2

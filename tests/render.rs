@@ -401,3 +401,78 @@ fn resolver_token_secret_preserves_auxiliary_source_variables() {
     let job_idx = keyed.find("repository-job").unwrap();
     assert!(!keyed[status_idx..job_idx].contains("CFRG_RESOLVER_FORGEJO_TOKEN"));
 }
+
+fn rendered_workflow(root: &tempfile::TempDir) -> String {
+    fs::read_to_string(root.path().join(".crow/verify.yaml")).unwrap()
+}
+
+#[test]
+fn status_steps_report_the_verdict_with_verify_gating_by_default() {
+    let root = repository();
+    render(root.path(), false).unwrap();
+    let yaml = rendered_workflow(&root);
+    assert_eq!(yaml.matches("CCID_VERDICT_JOBS: 'verify'").count(), 2);
+    assert_eq!(
+        yaml.matches("\"$CI_TOOL_BINARY\" verdict --commit").count(),
+        2
+    );
+    assert!(yaml.contains("--gating \"$CCID_VERDICT_JOBS\""));
+    assert!(!yaml.contains("CCID_GATING_JOBS"));
+    // The reporter is verified through the same verified tool, never skipped.
+    assert_eq!(
+        yaml.matches("sha256sum --check --strict").count(),
+        3,
+        "tool check in both status steps and the job step"
+    );
+}
+
+#[test]
+fn a_manifest_declares_which_jobs_gate_and_side_jobs_stay_out() {
+    let root = repository();
+    let config = root.path().join(".ci/ccid.toml");
+    let declared = format!(
+        "{}[verdict]\njobs=['verify','alternate']\n",
+        manifest("verify", "crow")
+    );
+    fs::write(&config, declared).unwrap();
+    render(root.path(), false).unwrap();
+    assert_eq!(
+        rendered_workflow(&root)
+            .matches("CCID_VERDICT_JOBS: 'verify,alternate'")
+            .count(),
+        2
+    );
+    let side_only = format!("{}[verdict]\njobs=['verify']\n", manifest("verify", "crow"));
+    fs::write(&config, side_only).unwrap();
+    render(root.path(), false).unwrap();
+    assert_eq!(
+        rendered_workflow(&root)
+            .matches("CCID_VERDICT_JOBS: 'verify'")
+            .count(),
+        2
+    );
+    assert!(!rendered_workflow(&root).contains("alternate"));
+}
+
+#[test]
+fn verdict_declarations_are_validated_and_absent_gating_posts_no_verdict() {
+    let root = repository();
+    let config = root.path().join(".ci/ccid.toml");
+    for bad in [
+        "[verdict]\njobs=['missing']\n",
+        "[verdict]\njobs=['verify','verify']\n",
+        "[verdict]\njobs=['verify']\nextra=1\n",
+    ] {
+        fs::write(&config, format!("{}{bad}", manifest("verify", "crow"))).unwrap();
+        assert!(render(root.path(), false).is_err(), "{bad}");
+    }
+    let no_verify = manifest("verify", "crow").replace("[jobs.verify]", "[jobs.release]");
+    fs::write(&config, no_verify).unwrap();
+    render(root.path(), false).unwrap();
+    assert_eq!(
+        rendered_workflow(&root)
+            .matches("CCID_VERDICT_JOBS: ''")
+            .count(),
+        2
+    );
+}

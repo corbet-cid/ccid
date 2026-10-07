@@ -252,6 +252,9 @@ fn live_inputs(repo: &Path) -> Result<BTreeMap<String, PinnedSource>> {
     Ok(sources)
 }
 
+/// Placeholder for the comma-separated gating jobs in generated status steps.
+const GATING_PLACEHOLDER: &str = "CCID_GATING_JOBS";
+
 /// Render one workflow adapter, appending declared auxiliary variables that
 /// apply to it. Output is byte-identical to the plain template when none apply.
 fn workflow_adapter(
@@ -420,14 +423,18 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         }
     }
     let mut outputs = BTreeMap::new();
+    let gating = gating_jobs(&parsed)?;
     for name in parsed.jobs.keys() {
         let plan = jobs::plan(repo, manifest, name, None)?;
         outputs.insert(
             PathBuf::from(format!(".crow/{}.yaml", plan.workflow)),
-            inject_resolver_token(
-                workflow_adapter(&config.tool_revision, &plan.workflow, &sources)?,
-                &config.tool_revision,
-                config.resolver_token_secret.as_deref(),
+            inject_gating(
+                inject_resolver_token(
+                    workflow_adapter(&config.tool_revision, &plan.workflow, &sources)?,
+                    &config.tool_revision,
+                    config.resolver_token_secret.as_deref(),
+                )?,
+                &gating,
             )?,
         );
         inventory.jobs.insert(name.clone(), plan);
@@ -689,6 +696,42 @@ fn validate_consumer(entry: &PushConsumer) -> Result<PushConsumer> {
 /// `CFRG_RESOLVER_FORGEJO_TOKEN: { from_secret: <quoted> }` entry to the
 /// repository-job environment; native-status steps are untouched. The secret
 /// name is quoted with `serde_json` (valid YAML), never interpreted raw.
+/// The jobs that gate landing: the manifest's `[verdict] jobs`, else `verify`
+/// when the repository declares such a job, else none (no verdict is posted).
+fn gating_jobs(parsed: &crate::Manifest) -> Result<Vec<String>> {
+    let jobs: Vec<String> = match &parsed.verdict {
+        Some(verdict) => verdict.jobs.clone(),
+        None if parsed.jobs.contains_key("verify") => vec!["verify".to_owned()],
+        None => vec![],
+    };
+    for job in &jobs {
+        if !parsed.jobs.contains_key(job) {
+            return Err(failure(format!("[verdict] names undeclared job: {job}")));
+        }
+        if !job
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        {
+            return Err(failure("[verdict] jobs must be plain job names"));
+        }
+    }
+    let mut unique = jobs.clone();
+    unique.sort();
+    unique.dedup();
+    if unique.len() != jobs.len() {
+        return Err(failure("[verdict] jobs must be unique"));
+    }
+    Ok(jobs)
+}
+
+/// Bake the gating jobs into the status steps of a rendered adapter.
+fn inject_gating(base: String, gating: &[String]) -> Result<String> {
+    if base.matches(GATING_PLACEHOLDER).count() != 2 {
+        return Err(failure("Render template lost its verdict placeholders"));
+    }
+    Ok(base.replace(GATING_PLACEHOLDER, &gating.join(",")))
+}
+
 fn inject_resolver_token(
     base: String,
     tool_revision: &str,

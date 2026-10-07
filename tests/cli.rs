@@ -16,18 +16,14 @@ fn cached_is_optional_and_never_hides_product_failures() {
     // Invoke by absolute path like current execute-job adapters, without
     // manually putting the tested runtime on PATH.
     let path = std::env::var_os("PATH").unwrap();
-    // Exercise a complete pure contract without storage, and a legacy contract
-    // with storage. Neither case requires moon or fabricates a cache hit.
-    for (storage, pure, success) in [
-        (false, true, true),
-        (true, false, true),
+    // Exercise a default-pure check without storage, an explicit opt-out with
+    // storage, and a failing check. None requires moon or fabricates a cache hit.
+    for (storage, volatile, success) in [
+        (false, false, true),
+        (true, true, true),
         (false, false, false),
     ] {
-        let contract = if pure {
-            "cache_pure=true\ncache_inputs=['ccid.toml']\ncache_tools=[['git','--version']]\n"
-        } else {
-            ""
-        };
+        let contract = if volatile { "cache_pure=false\n" } else { "" };
         let action = if success {
             "commands=[['git','config','--file','marker','check.ran','yes']]"
         } else {
@@ -80,6 +76,8 @@ fn cached_is_optional_and_never_hides_product_failures() {
 #[test]
 fn source_revision_is_embedded_without_a_repository() {
     let output = Command::new(env!("CARGO_BIN_EXE_ccid"))
+        .env_remove("CCID_RESULT_CACHE")
+        .env_remove("CCID_REMOTE_CACHE")
         .arg("source-revision")
         .current_dir(TempDir::new().unwrap().path())
         .output()
@@ -118,6 +116,9 @@ fn invalid_later_checks_fail_before_planning_or_executing_the_selection() {
         .unwrap();
         for plan in [false, true] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_ccid"));
+            command
+                .env_remove("CCID_RESULT_CACHE")
+                .env_remove("CCID_REMOTE_CACHE");
             command
                 .args([
                     "check",
@@ -162,6 +163,8 @@ fn command_arguments_preserve_intentional_empty_strings() {
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_ccid"))
+        .env_remove("CCID_RESULT_CACHE")
+        .env_remove("CCID_REMOTE_CACHE")
         .args([
             "check",
             "--manifest",
@@ -212,6 +215,8 @@ fn check_preserves_explicit_package_and_target_roots_and_cleans_its_scratch() {
     )
     .unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_ccid"))
+        .env_remove("CCID_RESULT_CACHE")
+        .env_remove("CCID_REMOTE_CACHE")
         .args([
             "check",
             "--manifest",
@@ -295,6 +300,10 @@ fn cancellation_releases_owned_resources(signal: &str) {
         .env("CI_TIMEOUT", "30")
         .env("CI_JOBS", "1")
         .env("CI_NIX_JOBS", "1")
+        // These tests assert the direct executor's own cleanup; an ambient
+        // result cache would route the check through moon instead.
+        .env_remove("CCID_RESULT_CACHE")
+        .env_remove("CCID_REMOTE_CACHE")
         .env_remove("CI_MEMORY_MB")
         .env_remove("CI_MEMORY_PER_JOB_MB")
         .env_remove("CI_MIN_AVAILABLE_MB")

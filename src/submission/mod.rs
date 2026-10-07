@@ -5,8 +5,12 @@ mod adapter;
 mod archive;
 mod cli;
 mod core;
+mod dependents;
+mod digest;
+mod forge_scan;
 mod github;
 mod jobs;
+mod log_digest;
 mod pinned;
 mod probe;
 mod routing;
@@ -46,12 +50,20 @@ pub struct Config {
     pub argo_namespace: String,
     pub argo_template: String,
     pub github_tool_repository: Option<String>,
+    /// Optional command printing a forge API token (private repositories).
+    #[serde(default)]
+    pub forge_token_command: Vec<String>,
+    /// Hosts whose dependency references match a repository by name only
+    /// (legacy mirrors of the forge), for `check-dependents`.
+    #[serde(default)]
+    pub legacy_hosts: Vec<String>,
 }
 
 impl Config {
-    pub fn load(path: Option<&Path>) -> Result<Self> {
-        let path = path
-            .map(PathBuf::from)
+    /// The declared configuration file: explicit path, environment, a file
+    /// beside the executable, then the user configuration directory.
+    pub fn locate(path: Option<&Path>) -> Result<PathBuf> {
+        path.map(PathBuf::from)
             .or_else(|| std::env::var_os("CCID_SUBMISSION_CONFIG").map(PathBuf::from))
             .or_else(|| {
                 let argument = PathBuf::from(std::env::args_os().next()?);
@@ -76,7 +88,12 @@ impl Config {
                 let path = directory.join("ccid/submission.json");
                 path.is_file().then_some(path)
             })
-            .ok_or("Set CCID_SUBMISSION_CONFIG to the declared submission configuration")?;
+            .ok_or_else(|| {
+                "Set CCID_SUBMISSION_CONFIG to the declared submission configuration".into()
+            })
+    }
+    pub fn load(path: Option<&Path>) -> Result<Self> {
+        let path = Self::locate(path)?;
         let config: Self = serde_json::from_slice(&fs::read(path)?)?;
         let api = url::Url::parse(&config.api)?;
         if api.scheme() != "https"

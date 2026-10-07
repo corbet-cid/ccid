@@ -1,0 +1,33 @@
+trap 'rm -f -- "$request_file"' EXIT
+printf '%s\n' "$CCID_JOB_REQUEST" > "$request_file"
+"$CI_TOOL_BINARY" execute-job --request "$request_file" --expect-commit "$CI_COMMIT_SHA"
+
+/ci/path: OK
+{"event":"io-admission","full_avg10":0.86,"maximum":10.0}
+{"allocation_mb":8192,"available_mb":52001,"event":"memory-admission","reserve_mb":8192}
+{"commit":"bb97a003f1fc8f0639addba347dc69bf768eddd0","event":"source","files":123,"sha256":"ce1eb24838333d8b20e7f05a6e2930b670abea55e738f6a44249a1adbd9751b8"}
+{"event":"io-admission","full_avg10":0.86,"maximum":10.0}
+{"allocation_mb":8192,"available_mb":51959,"event":"memory-admission","reserve_mb":8192}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021088055}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.041216217}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021089398}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.061236203}
+error:
+       … while evaluating a branch condition
+         at «github:NixOS/nixpkgs/b7c2ada»/pkgs/top-level/aliases.nix:26:5:
+           25|     alias:
+           26|     if alias.recurseForDerivations or false then
+             |     ^
+           27|       lib.removeAttrs alias [ "recurseForDerivations" ]
+
+       … while calling the 'throw' builtin
+         at «github:NixOS/nixpkgs/b7c2ada»/pkgs/top-level/aliases.nix:1957:19:
+         1956|   pop-gtk-theme = throw "'pop-gtk-theme' has been removed because it depended on 'gtk-engine-murrine', which was removed because it was unmaintained upstream and depended on GTK 2."; # Added 2026-07-22
+         1957|   poppler_utils = throw "'poppler_utils' has been renamed to/replaced by 'poppler-utils'"; # Converted to throw 2025-10-27
+             |                   ^
+         1958|   popura = throw "'popura' is abandoned upstream and in nixpkgs and has been removed"; # Added 2026-01-15
+
+       error: 'poppler_utils' has been renamed to/replaced by 'poppler-utils'
+{"event":"command","executable":"bash","exit_code":1,"seconds":0.364311537}
+ccid: bash failed: exit status: 1
+

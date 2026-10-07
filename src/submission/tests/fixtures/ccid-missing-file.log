@@ -1,0 +1,24 @@
++ set -eu
+printf '%s  %s\n' "$CI_TOOL_BINARY_SHA256" "$CI_TOOL_BINARY" | sha256sum --check --strict
+test "$("$CI_TOOL_BINARY" source-revision)" = "$CCID_REVISION"
+request_file=$(mktemp)
+trap 'rm -f -- "$request_file"' EXIT
+printf '%s\n' "$CCID_JOB_REQUEST" > "$request_file"
+"$CI_TOOL_BINARY" execute-job --request "$request_file" --expect-commit "$CI_COMMIT_SHA"
+
+/ci/path: OK
+{"event":"io-admission","full_avg10":2.56,"maximum":10.0}
+{"allocation_mb":8192,"available_mb":42027,"event":"memory-admission","reserve_mb":8192}
+{"commit":"f6a902f299f822f4c79b87dae3e63087b58a39ee","event":"source","files":26,"sha256":"19ed2087ab90f7440578279628d5017de1e59377f93ce4f646b5560dd17c8013"}
+{"event":"io-admission","full_avg10":2.56,"maximum":10.0}
+{"allocation_mb":8192,"available_mb":42027,"event":"memory-admission","reserve_mb":8192}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021240245}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021172185}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021250164}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021029032}
+{"checked":true,"files":[".ci/jobs.json",".crow/repository-jobs.yaml"],"removed":[]}
+{"checks":["test"],"event":"cached-plan","force":false,"manifest_sha256":"1a86c48a0e807e9048338c9bd602a7cc435109e3578a4ffdad1f0b2209be1bec","project":"cmnp","remote_cache":true,"source_commit":"f6a902f299f822f4c79b87dae3e63087b58a39ee","tool_revision":"3caf43366cf4dd751e5283c246e4b9d6f0e3f8cd"}
+ccid: No such file or directory (os error 2)
+{"event":"command","executable":"bash","exit_code":2,"seconds":0.04111518}
+ccid: bash failed: exit status: 2
+

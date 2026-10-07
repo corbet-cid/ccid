@@ -64,6 +64,9 @@ mod linux {
         let output_dir = root.join("evidence");
         let mut command = Command::new(env!("CARGO_BIN_EXE_ccid"));
         command
+            .env_remove("CCID_RESULT_CACHE")
+            .env_remove("CCID_REMOTE_CACHE");
+        command
             .args(["cargo-resolve", "--repo"])
             .arg(&source)
             .arg("--output-dir")

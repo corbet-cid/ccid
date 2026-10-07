@@ -25,6 +25,32 @@ pub struct SubmitArgs {
     #[arg(long)]
     pub cached_rerun: bool,
 }
+#[derive(Clone, Debug, Args)]
+pub struct DependentsArgs {
+    /// Checkout of the repository that just landed (its origin names the identity).
+    #[arg(long, default_value = ".")]
+    pub repo: PathBuf,
+    #[arg(long, default_value = "main")]
+    pub branch: String,
+    /// Landed commit; defaults to the published branch head.
+    #[arg(long)]
+    pub commit: Option<String>,
+    /// Repository job submitted for every dependent.
+    #[arg(long, default_value = "verify")]
+    pub job: String,
+    /// Runs in flight at once; never more than the eight Crow slots.
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(1..=8))]
+    pub slots: u8,
+    /// Seconds a worker waits for host admission instead of failing.
+    #[arg(long, default_value_t = 900)]
+    pub admission_wait: u64,
+    /// Overall seconds to wait for results before reporting timeouts.
+    #[arg(long, default_value_t = 5400)]
+    pub wait: u64,
+    /// Only list the dependents; submit nothing.
+    #[arg(long)]
+    pub plan: bool,
+}
 #[derive(Subcommand)]
 pub enum Action {
     /// Explicit process-cleanup probe; requires external cancellation evidence.
@@ -67,6 +93,19 @@ pub enum Action {
         repo_id: u64,
         number: u64,
         step_id: u64,
+    },
+    /// After a landing: submit every dependent's job on its main and print one line each.
+    CheckDependents(DependentsArgs),
+    /// Read a result: one line when green, otherwise the errors of each failed step.
+    Digest {
+        repo_id: u64,
+        number: u64,
+        /// Cap for the whole output.
+        #[arg(long, default_value_t = 120)]
+        max_lines: usize,
+        /// Last log lines kept per failed step.
+        #[arg(long, default_value_t = 30)]
+        tail: usize,
     },
     Cancel {
         repo_id: u64,
@@ -156,7 +195,7 @@ pub fn run(action: Action, path: Option<&Path>) -> Result<()> {
             );
         }
         Action::Receive { target, sha256 } => {
-            return transport::receive(&target, &sha256, std::io::stdin().lock())
+            return transport::receive(&target, &sha256, std::io::stdin().lock());
         }
         Action::BinaryReceipt {
             root,
@@ -169,6 +208,7 @@ pub fn run(action: Action, path: Option<&Path>) -> Result<()> {
     match action {
         Action::Plan(args) => routing::route(&config, &args, true),
         Action::Run(args) => routing::route(&config, &args, false),
+        Action::CheckDependents(args) => dependents::run(&config, &Config::locate(path)?, &args),
         Action::Resolve {
             repo,
             branch,
@@ -233,6 +273,24 @@ pub fn run(action: Action, path: Option<&Path>) -> Result<()> {
                         &format!("/repos/{repo_id}/pipelines/{number}"),
                         None,
                     )?))
+                }
+                Action::Digest {
+                    repo_id,
+                    number,
+                    max_lines,
+                    tail,
+                } => {
+                    let redact = |text: &str| api.redact(text).unwrap_or_default();
+                    for line in digest::digest(
+                        &api,
+                        &redact,
+                        repo_id,
+                        number,
+                        digest::Options { max_lines, tail },
+                    )? {
+                        println!("{line}");
+                    }
+                    Ok(())
                 }
                 Action::Logs {
                     repo_id,

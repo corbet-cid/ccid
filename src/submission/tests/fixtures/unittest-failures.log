@@ -1,0 +1,55 @@
+{"allocation_mb":8192,"available_mb":53606,"event":"memory-admission","reserve_mb":8192}
+{"budget":{"jobs":4,"memory_mb":8192,"nix_cores":4,"nix_jobs":1,"test_threads":2,"timeout":2700},"event":"allocation"}
+{"check":"ci-config","event":"check-start"}
+.........
+----------------------------------------------------------------------
+Ran 9 tests in 0.003s
+
+======================================================================
+FAIL: test_rejects_orphaned_and_duplicate_admitted_local_scopes (scripts.test_variant_matrix.VariantMatrixTests.test_rejects_orphaned_and_duplicate_admitted_local_scopes)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/job/source/scripts/test_variant_matrix.py", line 161, in test_rejects_orphaned_and_duplicate_admitted_local_scopes
+    self.assert_refused(changed, "no release package")
+  File "/tmp/job/source/scripts/test_variant_matrix.py", line 73, in assert_refused
+    self.assertIn(message, result.stderr)
+AssertionError: 'no release package' not found in 'release matrix refused: local package URL is not exact content-addressed cfetch release data\n'
+
+======================================================================
+FAIL: test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes (scripts.test_variant_matrix.VariantMatrixTests.test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes) (scope_ids=['scope-npu', 'scope-gpu', 'unknown'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/job/source/scripts/test_variant_matrix.py", line 146, in test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes
+    self.assert_refused(changed, message)
+  File "/tmp/job/source/scripts/test_variant_matrix.py", line 73, in assert_refused
+    self.assertIn(message, result.stderr)
+AssertionError: 'unadmitted scope' not found in 'release matrix refused: local package URL is not exact content-addressed cfetch release data\n'
+
+======================================================================
+FAIL: test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes (scripts.test_variant_matrix.VariantMatrixTests.test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes) (scope_ids=['scope-npu', 'scope-gpu'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/job/source/scripts/test_variant_matrix.py", line 146, in test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes
+    self.assert_refused(changed, message)
+  File "/tmp/job/source/scripts/test_variant_matrix.py", line 73, in assert_refused
+    self.assertIn(message, result.stderr)
+AssertionError: 'ordered NPU/GPU/CPU' not found in 'release matrix refused: local package URL is not exact content-addressed cfetch release data\n'
+
+======================================================================
+FAIL: test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes (scripts.test_variant_matrix.VariantMatrixTests.test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes) (scope_ids=['scope-cpu', 'scope-gpu', 'scope-npu'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/job/source/scripts/test_variant_matrix.py", line 146, in test_rejects_unadmitted_unaccelerated_remote_or_unordered_local_scopes
+    self.assert_refused(changed, message)
+  File "/tmp/job/source/scripts/test_variant_matrix.py", line 73, in assert_refused
+    self.assertIn(message, result.stderr)
+AssertionError: 'ordered NPU/GPU/CPU' not found in 'release matrix refused: local package URL is not exact content-addressed cfetch release data\n'
+
+
+FAILED (failures=10)
+{"event":"command","executable":"bash","exit_code":1,"seconds":2.16808526}
+▮▮▮▮ cfetch:catalog (2s 191ms, 6f532c48)
+{"event":"command","executable":"moon","exit_code":1,"seconds":2.428698701}
+{"event":"command","executable":"bash","exit_code":2,"seconds":5.158677123}
+ccid: bash failed: exit status: 2
+

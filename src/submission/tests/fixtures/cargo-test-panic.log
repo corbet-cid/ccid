@@ -1,0 +1,29 @@
+   Compiling url v2.5.8
+   Compiling toml v0.8.23
+   Compiling regex v1.13.1
+   Compiling clap v4.6.7
+   Compiling cqlt v0.1.0 (https://forge.example.invalid/example/cqlt?rev=e6275c5373954ca7f3b4fc680ffaccc149dc32f6#e6275c53)
+   Compiling base64 v0.22.1
+    Finished `release` profile [optimized] target(s) in 34.50s
+     Running tests/cache_acceptance.rs (/ci/cache)
+
+running 1 test
+
+thread 'unchanged_docs_and_concurrent_jobs' (102280) panicked at tests/cache_acceptance.rs:149:65:
+preinstalled moon binary
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test unchanged_docs_and_concurrent_jobs ... FAILED
+
+failures:
+
+failures:
+    unchanged_docs_and_concurrent_jobs
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test cache_acceptance`
+{"event":"command","executable":"cargo","exit_code":101,"seconds":34.548276458}
+ccid: cargo failed: exit status: 101
+{"event":"command","executable":"bash","exit_code":2,"seconds":34.587023086}
+ccid: bash failed: exit status: 2
+

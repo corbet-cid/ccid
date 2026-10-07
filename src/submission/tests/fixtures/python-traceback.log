@@ -1,0 +1,10 @@
++ sh ci/bakeoff/fanout-worker.sh $MODE $SCEN
+Traceback (most recent call last):
+  File "/ci/path", line 169, in <module>
+    prep() if sys.argv[1] == 'prep' else main(sys.argv[1], sys.argv[2])
+    ~~~~^^
+  File "/ci/path", line 32, in prep
+    assert nu and np_, 'no CI_NETRC credentials in the step environment'
+           ^^^^^^^^^^
+AssertionError: no CI_NETRC credentials in the step environment
+

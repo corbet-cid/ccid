@@ -49,6 +49,8 @@ enum Action {
         #[arg(long)]
         check: bool,
     },
+    /// Report a job's commit status and the commit's aggregated verdict context.
+    Verdict(ccid::verdict::Options),
     /// Plan a repository job for Crow or Argo; adapters submit the returned command.
     Job {
         #[arg(long, default_value = ".")]
@@ -258,6 +260,7 @@ fn main() -> ExitCode {
             println!("{}", serde_json::to_string(&report)?);
             Ok(())
         }),
+        Action::Verdict(options) => ccid::verdict::run(&options),
         Action::Job {
             repo,
             manifest,

@@ -1,0 +1,34 @@
+[INFO]: :-) Your wasm pkg is ready to publish at /tmp/job/source/.extension-wasm.
+[1m[92m   Compiling[0m cblc v0.0.0 (/tmp/job/source)
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 1.86s
+▮▮▮▮ cblc:verify (running for 300s)
+▮▮▮▮ cblc:verify (running for 330s)
+Generated proof for circuit with 345 public inputs and 458 fields.
+Generated and verified genesis
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+AssertionError [ERR_ASSERTION]: Issuer init: CryptoProvider
+
+false !== true
+
+    at call (file:///tmp/job/source/tests/extensions-proof.mjs:56:10)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async file:///tmp/job/source/tests/extensions-proof.mjs:136:3 {
+  generatedMessage: false,
+  code: 'ERR_ASSERTION',
+  actual: false,
+  expected: true,
+  operator: 'strictEqual',
+  diff: 'simple'
+}
+
+Node.js v24.18.1
+CBLC-DIAG last_gate=proof exit=1
+{"event":"command","executable":"bash","exit_code":1,"seconds":350.640051866}
+▮▮▮▮ cblc:verify (5m 50s 681ms, d3c9d96d)
+{"event":"command","executable":"moon","exit_code":1,"seconds":351.284768289}
+{"event":"command","executable":"bash","exit_code":2,"seconds":354.253813048}
+ccid: bash failed: exit status: 2
+

@@ -321,17 +321,20 @@ pub(crate) fn validate_cached_contract(check: &Check) -> Result<()> {
     Ok(())
 }
 
+/// Deterministic checks are cacheable by default; `cache = false` and
+/// `cache_pure = false` are the explicit opt-outs. Recognised use of the network
+/// or the clock, and every condition that prevents keying a check, are decided
+/// by the cache runtime and degrade to an uncached run with a receipt.
 pub(crate) fn cache_eligible(check: &Check) -> bool {
-    if check.cache == Some(false) || validate_cached_contract(check).is_err() {
+    if check.cache == Some(false)
+        || check.cache_pure == Some(false)
+        || validate_cached_contract(check).is_err()
+    {
         return false;
     }
     match check.kind.as_str() {
-        "cargo" => true,
+        "cargo" | "nix" | "commands" => true,
         "javascript" => check.install != Some(false),
-        "nix" => check.cache_pure,
-        "commands" => {
-            check.cache_pure && check.cache_inputs.is_some() && !check.cache_tools.is_empty()
-        }
         _ => false,
     }
 }
@@ -383,5 +386,71 @@ mod tests {
         uncached.cache_commit = true;
         uncached.cache_env = vec!["CI_COMMIT_SHA".into()];
         assert!(validate_check(&uncached).is_ok());
+    }
+
+    #[test]
+    fn deterministic_kinds_are_cacheable_without_any_declaration() {
+        for kind in ["cargo", "javascript", "nix", "commands"] {
+            let check = Check {
+                kind: kind.into(),
+                ..Check::default()
+            };
+            assert!(cache_eligible(&check), "{kind}");
+        }
+        let unknown = Check {
+            kind: "other".into(),
+            ..Check::default()
+        };
+        assert!(!cache_eligible(&unknown));
+    }
+
+    #[test]
+    fn explicit_opt_outs_and_unlockable_installs_are_never_cacheable() {
+        for kind in ["cargo", "javascript", "nix", "commands"] {
+            for (cache, pure) in [
+                (Some(false), None),
+                (None, Some(false)),
+                (Some(false), Some(true)),
+            ] {
+                let check = Check {
+                    kind: kind.into(),
+                    cache,
+                    cache_pure: pure,
+                    ..Check::default()
+                };
+                assert!(!cache_eligible(&check), "{kind} {cache:?} {pure:?}");
+            }
+            let declared = Check {
+                kind: kind.into(),
+                cache_pure: Some(true),
+                ..Check::default()
+            };
+            assert!(cache_eligible(&declared));
+        }
+        let ambient = Check {
+            kind: "javascript".into(),
+            install: Some(false),
+            ..Check::default()
+        };
+        assert!(!cache_eligible(&ambient));
+        let commit = Check {
+            kind: "commands".into(),
+            cache_commit: true,
+            ..Check::default()
+        };
+        assert!(!cache_eligible(&commit));
+    }
+
+    #[test]
+    fn the_purity_declaration_is_not_part_of_the_serialized_check() {
+        let check = Check {
+            kind: "commands".into(),
+            cache_pure: Some(true),
+            ..Check::default()
+        };
+        let encoded = serde_json::to_value(&check).unwrap();
+        assert!(encoded.get("cache_pure").is_none());
+        let parsed: Check = toml::from_str("kind = 'commands'\ncache_pure = false").unwrap();
+        assert_eq!(parsed.cache_pure, Some(false));
     }
 }

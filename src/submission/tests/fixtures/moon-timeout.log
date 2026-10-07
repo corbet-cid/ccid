@@ -1,0 +1,24 @@
+[1m[92m   Compiling[0m const-oid v0.10.2
+[1m[92m   Compiling[0m target-lexicon v0.12.16
+[1m[92m   Compiling[0m adler2 v2.0.1
+[1m[92m   Compiling[0m simdutf8 v0.1.5
+[1m[92m   Compiling[0m digest v0.11.3
+[1m[92m   Compiling[0m darling_macro v0.21.3
+[1m[92m   Compiling[0m crlt v0.0.0 (https://github.com/example/crlt?branch=main#ad4aaaa8)
+[1m[92m   Compiling[0m rancor v0.1.3
+[1m[92m   Compiling[0m der v0.7.10
+▮▮▮▮ cmbr:verify (running for 1200s)
+[1m[92m   Compiling[0m hashbrown v0.14.5
+[1m[92m   Compiling[0m bytecheck_derive v0.8.3
+[1m[92m   Compiling[0m curve25519-dalek-derive v0.1.1
+[1m[92m   Compiling[0m linux-raw-sys v0.12.1
+[1m[92m   Compiling[0m cranelift-isle v0.110.2
+[1m[92m   Compiling[0m vcpkg v0.2.15
+ccid: Check interrupted or timed out; its owned process group/job was terminated
+ccid: Check interrupted or timed out; its owned process group/job was terminated
+▮▮▮▮ cmbr:verify (20m 11s 539ms, aa458fa7)
+
+Tasks: 1 skipped
+ Time: 20m 11s 592ms (interrupted)
+
+

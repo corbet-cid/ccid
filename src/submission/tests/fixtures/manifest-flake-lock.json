@@ -1,0 +1,54 @@
+{
+  "root": "root",
+  "version": 7,
+  "nodes": {
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "nixscroll": "nixscroll"
+      }
+    },
+    "nixhost": {
+      "inputs": {
+        "nixpkgs": [
+          "nixscroll",
+          "nixpkgs"
+        ],
+        "system-manager": "system-manager"
+      },
+      "locked": {
+        "allRefs": true,
+        "lastModified": 1785465092,
+        "narHash": "sha256-p4X1w2Ru1xXAkgxdAfX+Hde879o86rjG/sD0rXprAmM=",
+        "rev": "50be92e4fd8367e76033aed1189b80e3683ba77a",
+        "type": "git",
+        "url": "https://forge.example.invalid/example-nix/nixhost.git"
+      },
+      "original": {
+        "allRefs": true,
+        "type": "git",
+        "url": "https://forge.example.invalid/example-nix/nixhost.git"
+      }
+    },
+    "nixscroll": {
+      "inputs": {
+        "nixhost": "nixhost",
+        "nixpkgs": "nixpkgs_2",
+        "scroll-flake": "scroll-flake"
+      },
+      "locked": {
+        "allRefs": true,
+        "lastModified": 1786685288,
+        "narHash": "sha256-iRBq8BbiHhDbLG/40gxvOUsx60dpZzOkQfasBnJjCXc=",
+        "rev": "8c1310a20c83d78610dc13f925b16f743f13077a",
+        "type": "git",
+        "url": "https://forge.example.invalid/example-nix/nixscroll.git"
+      },
+      "original": {
+        "allRefs": true,
+        "type": "git",
+        "url": "https://forge.example.invalid/example-nix/nixscroll.git"
+      }
+    }
+  }
+}

@@ -1,0 +1,110 @@
++ set -eu
+printf '%s  %s\n' "$CI_TOOL_BINARY_SHA256" "$CI_TOOL_BINARY" | sha256sum --check --strict
+test "$("$CI_TOOL_BINARY" source-revision)" = "$CCID_REVISION"
+request_file=$(mktemp)
+trap 'rm -f -- "$request_file"' EXIT
+printf '%s\n' "$CCID_JOB_REQUEST" > "$request_file"
+"$CI_TOOL_BINARY" execute-job --request "$request_file" --expect-commit "$CI_COMMIT_SHA"
+
+/ci/path: OK
+{"event":"io-admission","full_avg10":0.26,"maximum":10.0}
+{"allocation_mb":8192,"available_mb":45506,"event":"memory-admission","reserve_mb":8192}
+{"commit":"57f075790058f7fbacb1b69c6dd5c466388ccb70","event":"source","files":26,"sha256":"567bf45c54d4285f6ea5f67ce892154a3f76623c26864d0bd98e3f5d28f850e9"}
+{"event":"io-admission","full_avg10":0.26,"maximum":10.0}
+{"allocation_mb":8192,"available_mb":45500,"event":"memory-admission","reserve_mb":8192}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021241446}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021344413}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021110066}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.020948539}
+{"checked":true,"files":[".ci/jobs.json",".crow/repository-jobs.yaml"],"removed":[]}
+{"checks":["test"],"event":"cached-plan","force":false,"manifest_sha256":"23b9ee41240c5077da492e102d7598d27c2c94297671f7dc091a31ef78d35b5e","project":"cmnp","remote_cache":true,"source_commit":"57f075790058f7fbacb1b69c6dd5c466388ccb70","tool_revision":"4d9e4280e3c9ad8db2e3263ed61301d1c8c7dcb9"}
+{"event":"command","executable":"ccid","exit_code":0,"seconds":0.020828921}
+{"event":"command","executable":"cargo","exit_code":0,"seconds":0.021175551}
+{"event":"command","executable":"rustc","exit_code":0,"seconds":0.041253803}
+{"event":"command","executable":"rustc","exit_code":0,"seconds":0.04132543}
+{"event":"command","executable":"nix-store","exit_code":0,"seconds":0.201916518}
+{"event":"command","executable":"nix-store","exit_code":0,"seconds":0.162022184}
+{"event":"command","executable":"moon","exit_code":0,"seconds":0.201184355}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021387916}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.097180646}
+{"event":"command","executable":"nix-store","exit_code":0,"seconds":0.375645034}
+{"event":"command","executable":"nix-store","exit_code":0,"seconds":0.203621308}
+cmnp:test | {"budget":{"jobs":2,"memory_mb":8192,"nix_cores":2,"nix_jobs":1,"test_threads":8,"timeout":2697},"checks":["test"],"event":"plan","linker_request":"system","manifest_sha256":"23b9ee41240c5077da492e102d7598d27c2c94297671f7dc091a31ef78d35b5e","project":"cmnp","repository":"forge.example.invalid/example/cmnp","source_commit":null,"target_directory":"/ci/cache","tool_revision":"4d9e4280e3c9ad8db2e3263ed61301d1c8c7dcb9"}
+cmnp:test | {"allocation_mb":8192,"available_mb":43046,"event":"memory-admission","reserve_mb":8192}
+cmnp:test | {"budget":{"jobs":2,"memory_mb":8192,"nix_cores":2,"nix_jobs":1,"test_threads":8,"timeout":2697},"event":"allocation"}
+cmnp:test | {"event":"stable-source","path":"/ci/cache"}
+cmnp:test | {"event":"source-freshness","reused_inputs":17,"total_inputs":23}
+cmnp:test | {"event":"command","executable":"cc","exit_code":0,"seconds":0.020511105}
+cmnp:test | {"event":"command","executable":"c++","exit_code":0,"seconds":0.020936024}
+cmnp:test | {"backend":"ccache","compilers":["c++","cc","g++","gcc"],"event":"compile-cache","language":"c/c++","path_remapping":true}
+cmnp:test | {"check":"test","event":"check-start"}
+cmnp:test | rustc 1.98.1 (48a229cea 2026-09-01) (built from a source tarball)
+cmnp:test | {"event":"command","executable":"rustc","exit_code":0,"seconds":0.041135538}
+cmnp:test | {"event":"command","executable":"cargo","exit_code":0,"seconds":0.241480377}
+cmnp:test | 
+cmnp:test | running 32 tests
+cmnp:test | test content_key::tests::expired_start_deadline_cannot_publish_a_running_record ... ok
+cmnp:test | test content_key::tests::invalid_keys_and_roots_are_rejected ... ok
+cmnp:test | test content_key::tests::malformed_mismatch_and_symlink_records_fail_closed ... ok
+cmnp:test | test content_key::tests::commands_validate_executable_and_nul_but_allow_empty_flags ... ok
+cmnp:test | test content_key::tests::config_object_key_order_irrelevant_but_content_matters ... ok
+cmnp:test | test content_key::tests::every_content_field_changes_the_key ... ok
+cmnp:test | test content_key::tests::unknown_provenance_fields_rejected_at_deserialize ... ok
+cmnp:test | test content_key::tests::failure_retry_requires_explicit_begin_and_counts ... ok
+cmnp:test | test content_key::tests::same_content_built_in_different_order_shares_key ... ok
+cmnp:test | test executor::shared_cache::tests::cached_action_with_passed_target_did_not_compute ... ok
+cmnp:test | test content_key::tests::tool_role_swap_changes_key ... ok
+cmnp:test | test executor::tests::current_and_legacy_moon_versions_are_supported ... ok
+cmnp:test | test content_key::tests::pristine_acquire_drop_leaves_no_tombstone_but_start_does ... ok
+cmnp:test | test executor::tests::narrow_inputs_preserve_exclusions_and_check_identity ... ok
+cmnp:test | test executor::tests::project_ids_drop_dots ... ok
+cmnp:test | test executor::tests::task_ids_follow_moon_rules ... ok
+cmnp:test | test executor::tests::remote_cache_comes_from_environment_only ... ok
+cmnp:test | test executor::tests::tasks_wrap_tool_check_with_receipt_output ... ok
+cmnp:test | test executor::tests::workspace_is_independent_of_remote_transport ... ok
+cmnp:test | test executor::tests::generated_files_never_overwrite_foreign_configuration ... ok
+cmnp:test | test content_key::tests::publish_requires_begin_and_begin_rejects_repeats_and_hits ... ok
+cmnp:test | test content_key::tests::waiter_blocks_until_owner_finishes_and_sees_one_attempt ... ok
+cmnp:test | test inputs::tests::native_cache_locations_are_forwarded_without_invalidating_results ... ok
+cmnp:test | test inputs::tests::semantic_env_is_hashed_and_unknown_ambient_env_is_not_forwarded ... ok
+cmnp:test | test inputs::tests::semantic_environment_preserves_present_empty_flags ... ok
+cmnp:test | test content_key::tests::lock_timeout_changes_no_state_bytes ... ok
+cmnp:test | test inputs::tests::conservative_defaults_include_readmes_and_reject_external_links ... ok
+cmnp:test | test inputs::tests::archive_keys_ignore_location_and_force_lock_inputs ... ok
+cmnp:test | test inputs::tests::custom_commands_cannot_hide_dependency_locks_with_narrow_inputs ... ok
+cmnp:test | test executor::tests::commit_sensitive_check_does_not_poison_other_check_identities ... ok
+cmnp:test | test executor::tests::commits_and_branches_do_not_invalidate_content_checks ... ok
+cmnp:test | test executor::tests::tool_versions_linker_and_check_definition_remain_inputs ... ok
+cmnp:test | 
+cmnp:test | test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.78s
+cmnp:test | 
+cmnp:test | 
+cmnp:test | running 0 tests
+cmnp:test | 
+cmnp:test | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+cmnp:test | 
+cmnp:test | {"event":"command","executable":"cargo","exit_code":0,"seconds":7.543315912}
+cmnp:test | {"event":"command","executable":"cargo","exit_code":0,"seconds":0.301805597}
+cmnp:test | {"check":"test","event":"check-success","seconds":8.128910444}
+cmnp:test | Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+cmnp:test |      Running unittests src/lib.rs (/ci/cache)
+cmnp:test |    Doc-tests cmnp
+cmnp:test |     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+▮▮▮▮ cmnp:test (cached, 2ms, 5d1ce1a3)
+
+Tasks: 1 completed (1 cached)
+ Time: 14ms ❯❯❯❯ to the moon
+
+▮▮▮▮ There's a new version of moon available, 2.6.0 (currently on 2.5.4)!
+▮▮▮▮ Task cleanup/wait deps, new task options, OTEL metrics, Pkl types, and more!
+▮▮▮▮ Learn more: https://moonrepo.dev/blog/moon-v2.6
+▮▮▮▮ Install with: https://moonrepo.dev/docs/install
+{"event":"command","executable":"time","exit_code":0,"seconds":0.912630596}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021255093}
+{"event":"command","executable":"git","exit_code":0,"seconds":0.021186402}
+{"check":"test","computed":0,"cpu_seconds":{"system":0.2,"user":0.09},"duplicate_computations":0,"event":"cache-check","key":"7dfdb506f16cd6f15ac0dfd25c8fcc516f180287c44fa40d2e4467ca19449d65","native_hash":"5d1ce1a3d30870788fb5c0e001a8fe1c03a2caa088ce777f4c72bff8a66aede5","status":"cached","wait_seconds":0.001730966}
+{"checks":[{"check":"test","computed":0,"cpu_seconds":{"system":0.2,"user":0.09},"duplicate_computations":0,"event":"cache-check","key":"7dfdb506f16cd6f15ac0dfd25c8fcc516f180287c44fa40d2e4467ca19449d65","native_hash":"5d1ce1a3d30870788fb5c0e001a8fe1c03a2caa088ce777f4c72bff8a66aede5","status":"cached","wait_seconds":0.001730966}],"compile":null,"event":"cache-run","fetch":null,"nix_eval":null,"result":{"hit_rate":1.0,"hits":1,"requests":1},"seconds":1.7037315130000001}
+{"bypassed":[],"checks":[{"check":"test","computed":0,"cpu_seconds":{"system":0.2,"user":0.09},"duplicate_computations":0,"event":"cache-check","key":"7dfdb506f16cd6f15ac0dfd25c8fcc516f180287c44fa40d2e4467ca19449d65","native_hash":"5d1ce1a3d30870788fb5c0e001a8fe1c03a2caa088ce777f4c72bff8a66aede5","status":"cached","wait_seconds":0.001730966}],"compile":null,"event":"cache-run","fetch":null,"nix_eval":null,"result":{"hit_rate":1.0,"hits":1,"requests":1}}
+{"bypassed":[],"checks":[{"check":"test","computed":0,"cpu_seconds":{"system":0.2,"user":0.09},"duplicate_computations":0,"event":"cache-check","key":"7dfdb506f16cd6f15ac0dfd25c8fcc516f180287c44fa40d2e4467ca19449d65","native_hash":"5d1ce1a3d30870788fb5c0e001a8fe1c03a2caa088ce777f4c72bff8a66aede5","status":"cached","wait_seconds":0.001730966}],"compile":null,"event":"cache-selection","fetch":null,"nix_eval":null,"result":{"hit_rate":1.0,"hits":1,"requests":1}}
+{"event":"command","executable":"bash","exit_code":0,"seconds":2.495068204}
+

@@ -66,6 +66,18 @@ which a schedule should do periodically: a cache cannot detect flaky tests or
 undeclared external inputs. `commands` checks bring their own tool pins (for
 example `.prototools`), which are hashed as repository inputs.
 
+Deterministic checks (format, lint, build, tests, docs) are cached by default; no
+purity declaration is needed, whatever their kind. A check whose result depends on
+the network or the clock opts out with `cache_pure = false` (or `cache = false`):
+advisory databases, scenarios that fetch, Tor, wall-clock assertions. A command or
+first-level script that visibly uses such tools (`cargo deny`, `git fetch`, an unverified
+`curl`, `nix flake update`, ...) or reads run metadata and credentials runs uncached by
+itself unless it says `cache_pure = true`.
+The key covers the source tree, lock, check declaration, semantic environment,
+platform and tool identity; without `cache_tools` a `commands` check is keyed by the
+executables it names and by the directories on `PATH`. Anything that cannot be keyed
+degrades to an ordinary uncached run with a receipt, never a failure.
+
 Declare `cache_tools = [["go", "version"], ["git", "--version"]]` on custom
 checks to hash the actual installed tools, and `cache_env = ["CGO_ENABLED"]`
 for environment settings that affect their results. These identities are per check;
@@ -91,6 +103,9 @@ Declare produced files with
 Output paths are relative to the repository. The remote endpoint is passed to
 moon through its environment, so changing the cache address does not rewrite
 the workspace configuration or partition otherwise identical work.
+
+Landing gates on one aggregated context per commit, `ccid/verdict`; side jobs report
+under their own `ccid/<job>` contexts. See [docs/commit-verdict.md](docs/commit-verdict.md).
 
 ## Scheduler selection
 

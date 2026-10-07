@@ -1,0 +1,18 @@
++ case "$(git log -1 --format=%s)" in
+  *'[grammar-parity]'*)
+    echo "grammar parity was proved by fleet-build; no rendered commit exists to publish"
+    exit 0
+    ;;
+esac
+
++ trap 'rm -rf -- "$PWD/.ci-credentials"' EXIT
++ install -m700 -d "$PWD/.ci-credentials"
++ printf '%s\n' "$FORGE_TOKEN" > "$PWD/.ci-credentials/forge-token" && chmod 600 "$PWD/.ci-credentials/forge-token"
++ printf '%s\n' "$DEPLOY_KEY" > "$PWD/.ci-credentials/deploy" && chmod 600 "$PWD/.ci-credentials/deploy"
++ echo "== fleet-render on the warm Crow agent (nixidy switch both envs, push gitops/rendered if drifted) =="
+== fleet-render on the warm Crow agent (nixidy switch both envs, push gitops/rendered if drifted) ==
++ bash kubernetes/ops/scripts/fleet-render.sh
+== cloning infra (Forgejo) ==
+Cloning into '/tmp/render'...
+fatal: unable to access 'https://forge.example.invalid/example/infra.git/': The requested URL returned error: 429
+

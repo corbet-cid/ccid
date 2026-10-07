@@ -1,0 +1,49 @@
+test plans_then_copies_all_heads_and_exact_tag_objects_without_touching_other_locations ... ok
+test secondary_http_redirect_cannot_route_requests_to_a_different_location ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.57s
+
+     Running tests/pr_bridge_cli.rs (/ci/cache)
+
+running 1 test
+test bridge_is_inert_without_feature_flag_or_ci_confirmation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/resolve_lookup.rs (/ci/cache)
+
+running 11 tests
+test anonymous_public_probes_hit_without_auth ... ok
+test non_forgejo_location_stays_pointer_despite_secondary ... ok
+test declared_placement_routes_primary_and_preserves_foreign_pins ... FAILED
+test forgejo_primary_routes_moving_ref ... ok
+test supplied_token_reaches_only_the_intended_store ... ok
+test dead_pointer_takes_the_emergency_fallback_only_when_declared ... ok
+test changed_primary_between_jobs_is_observed ... ok
+test pinned_repos_skip_lookup_and_policy_primary_wins ... ok
+test lookup_failures_fall_back_to_pointer ... ok
+test anonymous_private_is_denied_and_malformed_token_fails_closed ... ok
+test non_unicode_token_fails_closed_without_probe ... ok
+
+failures:
+
+---- declared_placement_routes_primary_and_preserves_foreign_pins stdout ----
+
+thread 'declared_placement_routes_primary_and_preserves_foreign_pins' (330654) panicked at cfrg-cli/tests/resolve_lookup.rs:695:9:
+assertion `left == right` failed
+  left: String("canonical-pointer")
+ right: "pointer"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    declared_placement_routes_primary_and_preserves_foreign_pins
+
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.10s
+
+error: test failed, to rerun pass `-p cfrg-cli --test resolve_lookup`
+{"event":"command","executable":"cargo","exit_code":101,"seconds":40.67552307}
+ccid: cargo failed: exit status: 101
+{"event":"command","executable":"bash","exit_code":2,"seconds":41.478433603}
+ccid: bash failed: exit status: 2
+
