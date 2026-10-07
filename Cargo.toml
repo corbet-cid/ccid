@@ -6,14 +6,14 @@ edition = "2021"
 rust-version = "1.89"
 license-file = "LICENSE.md"
 description = "Shared check commands invoked by Crow"
-repository = "https://github.com/corbet-libs/ccid"
+repository = "https://git.corbet.ch/corbet-cid/ccid"
 
 [features]
 windows-experimental = []
 
 [dependencies]
-cqlt = { git = "https://git.corbet.ch/corbet-foss/cqlt", rev = "e6275c5373954ca7f3b4fc680ffaccc149dc32f6" }
-cmnp = { git = "https://git.corbet.ch/corbet-foss/cmnp.git", rev = "2ad0603df25125bf33b0314c5c6adbc20cc71ab7" }
+cqlt = { git = "https://git.corbet.ch/corbet-cid/cqlt", rev = "e6275c5373954ca7f3b4fc680ffaccc149dc32f6" }
+cmnp = { git = "https://git.corbet.ch/corbet-cid/cmnp.git", rev = "2ad0603df25125bf33b0314c5c6adbc20cc71ab7" }
 clap = { version = "4.5", features = ["derive", "env"] }
 ctrlc = { version = "3.5", features = ["termination"] }
 process-wrap = { version = "10.0", default-features = false, features = ["std", "process-group", "job-object"] }

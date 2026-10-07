@@ -9,7 +9,7 @@ publish releases. The optional [registry publisher resource](adapters/registry-p
 provides explicit, separately invoked uploads of already-verified archives.
 
 ccid never talks to a forge. Everything that does goes through
-[cfrg](https://git.corbet.ch/corbet-libs/cfrg): placement and exact cloning,
+[cfrg](https://git.corbet.ch/corbet-cid/cfrg): placement and exact cloning,
 reconciliation, status reporting, landing, releases, evidence collection, access
 mirroring, and the reads behind `check-dependents` and `rollout-verdict`
 (`cfrg contents`, `cfrg observe`).
@@ -48,7 +48,7 @@ to manufacture a new green badge.
 
 `ccid cached --check test,clippy` runs the selected checks through
 [moon](https://moonrepo.dev), executed by the
-[cmnp](https://git.corbet.ch/corbet-foss/cmnp) library: each check becomes one moon task whose command is
+[cmnp](https://git.corbet.ch/corbet-cid/cmnp) library: each check becomes one moon task whose command is
 the ordinary `ccid check` for that check. moon hashes the repository inputs plus a
 tool identity (this ccid revision, the linker request and the toolchain versions
 of each check) and skips checks whose exact inputs already passed. With

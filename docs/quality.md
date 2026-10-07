@@ -1,9 +1,9 @@
 # Forge quality checks
 
 `ccid quality` evaluates saved forge evidence through the separate
-[cqlt](https://github.com/corbet-foss/cqlt) Rust library. The same policy
+[cqlt](https://git.corbet.ch/corbet-cid/cqlt) Rust library. The same policy
 works for GitHub and Forgejo. Evidence is collected with
-[`cfrg collect`](https://git.corbet.ch/corbet-libs/cfrg); network collection
+[`cfrg collect`](https://git.corbet.ch/corbet-cid/cfrg); network collection
 is separate from deterministic evaluation, so saved evidence can be reviewed
 and checked offline.
 
@@ -16,7 +16,7 @@ ccid quality check --snapshot github.json --policy quality-policy.json --fail-on
 
 ## Policy and CI
 
-The [cqlt rule catalogue](https://github.com/corbet-foss/cqlt#presentation-rules-v1)
+The [cqlt rule catalogue](https://git.corbet.ch/corbet-cid/cqlt#presentation-rules-v1)
 defines presentation rules, default severities and applicability. Reports contain
 every check, source and policy hashes, rule IDs, evidence and remedies. The
 same snapshot and policy produce identical JSON. Exit statuses are:
@@ -83,7 +83,7 @@ including missing Vale, timeout or malformed backend output. Input is limited to
 subprocess timeout is 120 seconds. The private temporary workspace is removed
 after execution. Reports can contain private text excerpts: retain them privately.
 
-See [cqlt's prose contract](https://github.com/corbet-foss/cqlt/blob/main/docs/prose.md)
+See [cqlt's prose contract](https://git.corbet.ch/corbet-cid/cqlt/src/branch/main/docs/prose.md)
 for deterministic replay, rule meanings and their limits. Prose findings assess
 style; factual consistency and audience fit require separate editorial review.
 
@@ -128,7 +128,7 @@ each with its full probability distribution. Missing evidence yields `unknown`;
 other outcomes require `review`. There is
 no combined score or automatic failure threshold. These model judgments are
 unverified until evaluated against reviewed, held-out examples. See
-[cqlt's semantic contract](https://github.com/corbet-foss/cqlt/blob/main/docs/semantic.md).
+[cqlt's semantic contract](https://git.corbet.ch/corbet-cid/cqlt/src/branch/main/docs/semantic.md).
 
 ### Other checks
 
