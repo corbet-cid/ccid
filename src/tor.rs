@@ -1444,6 +1444,16 @@ fn v01_tor_live_inner(
             "Tor job diag discovery-lib must pin src/tor_discovery.rs",
         ));
     }
+    // Second pinned target: the frozen ctrn Arti transport, so an onion
+    // connect failure names Arti's error kind and the listener reports its
+    // admission and lifetime decisions.
+    let transport = manifest
+        .diag
+        .get("transport-lib")
+        .ok_or_else(|| failure("Tor job live manifest declares no diag transport-lib pin"))?;
+    if transport.file != "src/arti.rs" {
+        return Err(failure("Tor job diag transport-lib must pin src/arti.rs"));
+    }
     let manifest_inputs = v01_inputs(&manifest, &["v01-tor-live"])?;
     let mut resolved: BTreeMap<String, String> = BTreeMap::new();
     let mut root_commit = String::new();
@@ -1547,10 +1557,9 @@ fn v01_tor_live_inner(
         .ok_or_else(|| failure("Tor job live tools declare no python"))?;
     let target = target_subdir(base, "v01-tor-live")?;
     // Compiler-wrapper diagnostic binary: a copy of this verified tool
-    // inside job-private scratch, so the workspace-wrapper path is unique
-    // per attempt (isolating filename-hashed artifacts) while dependency
-    // caches stay shared. A preexisting workspace wrapper is never
-    // overridden or disabled: its presence fails clearly instead.
+    // inside job-private scratch, so the wrapper path is unique per attempt
+    // while dependency caches stay shared. A preexisting workspace wrapper
+    // is never overridden or disabled: its presence fails clearly instead.
     if base
         .get(&OsString::from("RUSTC_WORKSPACE_WRAPPER"))
         .and_then(|value| value.to_str())
@@ -1582,6 +1591,18 @@ fn v01_tor_live_inner(
         }
     }
     let wrapper_receipt = evidence.join("compiler-diagnostic.jsonl");
+    // The outer compile wrapper the job would otherwise use (env first, then
+    // cargo's environment form of build.rustc-wrapper); empty when none.
+    let outer_wrapper = ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"]
+        .into_iter()
+        .filter_map(|key| {
+            base.get(&OsString::from(key))
+                .and_then(|value| value.to_str())
+        })
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_owned();
     let mut driver_env = vec![
         (
             "V01_EVIDENCE_DIR".to_owned(),
@@ -1612,20 +1633,27 @@ fn v01_tor_live_inner(
         ("CI_PIPELINE_NUMBER".to_owned(), pipeline),
         ("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned()),
         ("PYTHONNOUSERSITE".to_owned(), "1".to_owned()),
-        // Compiler-wrapper diagnostic: workspace members build through the
-        // staged copy above (unique per attempt); the wrapper instruments
-        // only the pinned frozen library and restores it afterwards.
-        // Plain RUSTC_WRAPPER, if set, stays untouched for cargo to nest.
+        // Compiler-wrapper diagnostic: every unit builds through the staged
+        // copy above (unique per attempt) as RUSTC_WRAPPER, because the
+        // frozen ctrn is a path dependency, not a workspace member. It
+        // instruments only the pinned frozen libraries and restores them
+        // afterwards; a pre-existing outer wrapper (compile cache) is
+        // chained by the wrapper instead of by cargo.
         (
-            "RUSTC_WORKSPACE_WRAPPER".to_owned(),
+            "RUSTC_WRAPPER".to_owned(),
             wrapper.to_string_lossy().into_owned(),
         ),
+        ("CCID_DIAG_NEXT_WRAPPER".to_owned(), outer_wrapper),
         ("CCID_RUSTC_DIAG".to_owned(), "1".to_owned()),
         (
             "CCID_DIAG_ROOT".to_owned(),
             scratch.path().to_string_lossy().into_owned(),
         ),
         ("CCID_DIAG_ORIGINAL_SHA256".to_owned(), diag.sha256.clone()),
+        (
+            "CCID_DIAG_TRANSPORT_SHA256".to_owned(),
+            transport.sha256.clone(),
+        ),
         (
             "CCID_DIAG_RECEIPT".to_owned(),
             wrapper_receipt.to_string_lossy().into_owned(),
@@ -1723,20 +1751,38 @@ fn v01_tor_live_inner(
             "Tor job compiler diagnostic receipt empty; refusing uninstrumented pass",
         ));
     }
+    let mut instrumented = std::collections::BTreeSet::new();
     for line in &wrapper_lines {
         let entry: Value = serde_json::from_str(line)
             .map_err(|_| failure("Tor job compiler diagnostic receipt is not JSON".to_owned()))?;
-        let approved = entry.get("crate_name").and_then(Value::as_str) == Some("cmsh")
-            && entry.get("compiler_exit").and_then(Value::as_u64) == Some(0)
+        let crate_name = entry.get("crate_name").and_then(Value::as_str);
+        let pin = match crate_name {
+            Some("cmsh") => diag,
+            Some("ctrn") => transport,
+            _ => {
+                return Err(failure(
+                    "Tor job compiler diagnostic receipt names an unpinned crate",
+                ));
+            }
+        };
+        let approved = entry.get("compiler_exit").and_then(Value::as_u64) == Some(0)
             && entry.get("restored").and_then(Value::as_bool) == Some(true)
-            && entry.get("original_sha256").and_then(Value::as_str) == Some(diag.sha256.as_str())
+            && entry.get("file").and_then(Value::as_str) == Some(pin.file.as_str())
+            && entry.get("original_sha256").and_then(Value::as_str) == Some(pin.sha256.as_str())
             && entry.get("diagnostic_sha256").and_then(Value::as_str)
-                == Some(diag.diagnostic_sha256.as_str());
+                == Some(pin.diagnostic_sha256.as_str());
         if !approved {
             return Err(failure(
                 "Tor job compiler diagnostic receipt does not record a clean instrumented compile",
             ));
         }
+        instrumented.insert(pin.file.as_str());
+    }
+    // Both pinned libraries must have compiled instrumented at least once.
+    if instrumented.len() != 2 {
+        return Err(failure(
+            "Tor job compiler diagnostic receipt misses a pinned library; refusing uninstrumented pass",
+        ));
     }
     Ok(json!({
         "inputs": manifest_inputs
@@ -1757,6 +1803,9 @@ fn v01_tor_live_inner(
             "library": diag.file.as_str(),
             "original_sha256": diag.sha256.as_str(),
             "diagnostic_sha256": diag.diagnostic_sha256.as_str(),
+            "transport_library": transport.file.as_str(),
+            "transport_original_sha256": transport.sha256.as_str(),
+            "transport_diagnostic_sha256": transport.diagnostic_sha256.as_str(),
             "wrapper_receipt": wrapper_receipt.to_string_lossy(),
             "compiler_runs": wrapper_lines.len(),
             "note": "Executed library bytes were diagnostic, not original; probe sources and assertions stay original.",
@@ -3039,7 +3088,11 @@ sha256 = "61ce675fface73dbbf431603767a3aa7f05bf9d6995d0555855fa5e4ead667e6"
 [diag.discovery-lib]
 file = "src/tor_discovery.rs"
 sha256 = "fc6c8db74254e6246bb6da69228e4afe2c17ff42575133bb3ab1b530d2c30041"
-diagnostic_sha256 = "f67ec53ed7f19e9bf7293eca631a24687b14fc2558109269edcbd901fade91d7"
+diagnostic_sha256 = "42dc2e7df8f7e134a0a385587176bb0d2713954a12ca1e217e98e150d8f79785"
+[diag.transport-lib]
+file = "src/arti.rs"
+sha256 = "7da044e96dd6bd4583e807a42ed174565a50e3d317b51ba0964dc38c1ae36557"
+diagnostic_sha256 = "b184d1d2e79599088565ae3f244ccdb03d8207fc1143f468fd51ad4dedd2ef16"
 [live-drivers.harness]
 file = ".ci/v01-tor-live.py"
 sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"

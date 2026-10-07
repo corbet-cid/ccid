@@ -1,12 +1,14 @@
-//! Hidden compiler-wrapper diagnostic for one frozen library build.
+//! Hidden compiler-wrapper diagnostic for frozen library builds.
 //!
-//! Cargo invokes this binary as `RUSTC_WORKSPACE_WRAPPER` (selected by the
+//! Cargo invokes this binary as `RUSTC_WRAPPER` (selected by the
 //! `CCID_RUSTC_DIAG` environment marker) with the real compiler path as
-//! the first argument followed by rustc arguments. Only the exact cmsh
-//! library unit is instrumented: crate name `cmsh`, manifest beneath the
-//! job-owned frozen-source root, and `src/tor_discovery.rs` matching its
-//! committed digest. Every other invocation passes through to the real
-//! compiler (or a composed outer wrapper) untouched.
+//! the first argument followed by rustc arguments; a pre-existing outer
+//! wrapper (a compile cache) is chained explicitly instead of by Cargo.
+//! Only the exact library units of the target table are instrumented:
+//! crate `cmsh` with `src/tor_discovery.rs` and crate `ctrn` with
+//! `src/arti.rs`, each with its manifest beneath the job-owned frozen-source
+//! root and its file matching a committed digest. Every other invocation
+//! passes through to the real compiler (or the chained wrapper) untouched.
 //!
 //! The transform inserts static-stage `eprintln!` diagnostics (error enum
 //! variant or a transport error's static kind and context only, never peer IDs,
@@ -34,11 +36,17 @@ pub const MODE_ENV: &str = "CCID_RUSTC_DIAG";
 pub(crate) const ROOT_ENV: &str = "CCID_DIAG_ROOT";
 /// Committed SHA-256 of the exact frozen `src/tor_discovery.rs`.
 pub(crate) const ORIGINAL_ENV: &str = "CCID_DIAG_ORIGINAL_SHA256";
+/// Committed SHA-256 of the exact frozen ctrn `src/arti.rs`.
+pub(crate) const TRANSPORT_ENV: &str = "CCID_DIAG_TRANSPORT_SHA256";
+/// Pre-existing outer compiler wrapper (for example a compile cache) that
+/// this wrapper runs in front of the compiler, since it occupies
+/// `RUSTC_WRAPPER` itself. Empty or absent: no outer wrapper.
+pub(crate) const NEXT_ENV: &str = "CCID_DIAG_NEXT_WRAPPER";
 /// Receipt JSON path inside job-owned evidence.
 pub(crate) const RECEIPT_ENV: &str = "CCID_DIAG_RECEIPT";
-/// Crate selected for instrumentation. Nothing else is ever touched.
+/// Discovery crate selected for instrumentation.
 pub(crate) const TARGET_CRATE: &str = "cmsh";
-/// Instrumented file relative to the crate manifest directory.
+/// Instrumented discovery file relative to the crate manifest directory.
 pub(crate) const TARGET_FILE: &str = "src/tor_discovery.rs";
 /// Lock sibling bounding concurrent transforms of one source file.
 pub(crate) const LOCK_SUFFIX: &str = ".ccid-diag.lock";
@@ -51,6 +59,37 @@ struct Site {
     anchor: &'static str,
     replacement: &'static str,
 }
+
+/// One instrumented library file. Nothing outside this table is touched.
+pub(crate) struct Target {
+    /// Manifest `[diag.<name>]` entry pinning this file.
+    pub(crate) name: &'static str,
+    pub(crate) crate_name: &'static str,
+    pub(crate) file: &'static str,
+    digest_env: &'static str,
+    sites: fn() -> Vec<Site>,
+}
+
+/// cmsh discovery: RPC outcomes, lookup results and transport errors.
+pub(crate) const DISCOVERY: Target = Target {
+    name: "discovery-lib",
+    crate_name: TARGET_CRATE,
+    file: TARGET_FILE,
+    digest_env: ORIGINAL_ENV,
+    sites,
+};
+
+/// ctrn Arti transport: the onion connect failure kind and the listener's
+/// admission and lifetime decisions.
+pub(crate) const TRANSPORT: Target = Target {
+    name: "transport-lib",
+    crate_name: "ctrn",
+    file: "src/arti.rs",
+    digest_env: TRANSPORT_ENV,
+    sites: transport_sites,
+};
+
+const TARGETS: [&Target; 2] = [&DISCOVERY, &TRANSPORT];
 
 fn sites() -> Vec<Site> {
     vec![
@@ -98,11 +137,89 @@ fn sites() -> Vec<Site> {
     ]
 }
 
+/// ctrn `src/arti.rs` sites. Printed values are Arti's fieldless error kind
+/// (`arti_client::HasKind`), static labels and circuit counts only.
+fn transport_sites() -> Vec<Site> {
+    vec![
+        Site {
+            name: "onion connect failure",
+            anchor: r#"            .map_err(|_| crate::Error::new(crate::ErrorKind::Unreachable, "onion unavailable"))?;"#,
+            replacement: r#"            .map_err(|error| {
+                eprintln!("ccid-diag arti-connect-error: {:?}", arti_client::HasKind::kind(&error));
+                crate::Error::new(crate::ErrorKind::Unreachable, "onion unavailable")
+            })?;"#,
+        },
+        Site {
+            name: "listener service stopped",
+            anchor: r#"        } else {
+            Err(Error::new(
+                crate::ErrorKind::Closed,
+                "Tor onion service stopped",
+            ))"#,
+            replacement: r#"        } else {
+            eprintln!("ccid-diag listener-service-stopped");
+            Err(Error::new(
+                crate::ErrorKind::Closed,
+                "Tor onion service stopped",
+            ))"#,
+        },
+        Site {
+            name: "listener admission full",
+            anchor: r#"        if self.circuits.len() >= 32 {
+            return false;
+        }"#,
+            replacement: r#"        if self.circuits.len() >= 32 {
+            eprintln!("ccid-diag listener-admission-full: circuits={}", self.circuits.len());
+            return false;
+        }"#,
+        },
+        Site {
+            name: "listener rendezvous failure",
+            anchor: r#"        let Some(requests) = self.client_request(handshake).await else {
+            return false;
+        };
+        self.circuits.push(Box::pin(requests));"#,
+            replacement: r#"        let Some(requests) = self.client_request(handshake).await else {
+            eprintln!("ccid-diag listener-rendezvous-failed: circuits={}", self.circuits.len());
+            return false;
+        };
+        self.circuits.push(Box::pin(requests));
+        eprintln!("ccid-diag listener-admitted: circuits={}", self.circuits.len());"#,
+        },
+        Site {
+            name: "listener requests closed",
+            anchor: r#"                        "Tor onion requests closed",
+                    ))?;"#,
+            replacement: r#"                        "Tor onion requests closed",
+                    ))
+                    .inspect_err(|_| eprintln!("ccid-diag listener-requests-closed"))?;"#,
+        },
+        Site {
+            name: "listener event bound",
+            anchor: r#"                return Ok(Box::new(stream));
+            }
+        }
+        Err(LIMIT)"#,
+            replacement: r#"                return Ok(Box::new(stream));
+            }
+        }
+        eprintln!("ccid-diag listener-event-bound: circuits={}", self.circuits.len());
+        Err(LIMIT)"#,
+        },
+    ]
+}
+
 /// Apply every site exactly once. Any missing or duplicated anchor fails
 /// closed so a changed source is never compiled half-instrumented.
-pub(crate) fn transform(original: &str) -> Result<String> {
+/// Discovery table only; the wrapper selects its table per target.
+#[cfg(test)]
+fn transform(original: &str) -> Result<String> {
+    transform_with(sites(), original)
+}
+
+fn transform_with(sites: Vec<Site>, original: &str) -> Result<String> {
     let mut text = original.to_owned();
-    for site in sites() {
+    for site in sites {
         if text.matches(site.anchor).count() != 1 {
             return Err(failure(format!(
                 "Compiler diagnostic patch site changed: {}",
@@ -155,26 +272,25 @@ fn rustc_inputs(args: &[OsString]) -> Result<Vec<PathBuf>> {
     Ok(inputs)
 }
 
-/// Decide whether this invocation is the instrumented target and, if so,
-/// resolve its canonical paths. Anything but the exact crate passes
-/// through before touching paths; a claimed target with bad config or
-/// paths fails instead of passing through silently.
-/// Decide whether this invocation is the instrumented target and, if so,
-/// resolve its canonical source path: crate name matches, the manifest
-/// sits beneath the job root, the actual rustc input is exactly the
-/// crate-root `src/lib.rs`, and the target file stays beneath the manifest.
-/// Anything but the exact crate passes through before touching paths; a
-/// claimed target with bad config or paths fails instead of passing
-/// through silently.
+/// Decide whether this invocation is an instrumented target and, if so,
+/// resolve its canonical source path: crate name is in the target table,
+/// the manifest sits beneath the job root, the actual rustc input is
+/// exactly the crate-root `src/lib.rs`, and the target file stays beneath
+/// the manifest. Anything but a table crate passes through before touching
+/// paths; a claimed target with bad config or paths fails instead of
+/// passing through silently.
 fn resolve_target(
     crate_name: Option<&str>,
     manifest_dir: Option<&Path>,
     args: &[OsString],
     root: &Path,
-) -> Result<Option<PathBuf>> {
-    if crate_name != Some(TARGET_CRATE) {
+) -> Result<Option<(&'static Target, PathBuf)>> {
+    let Some(target) = TARGETS
+        .into_iter()
+        .find(|target| crate_name == Some(target.crate_name))
+    else {
         return Ok(None);
-    }
+    };
     let Some(manifest) = manifest_dir else {
         return Err(failure(
             "Compiler diagnostic target crate has no manifest directory",
@@ -223,7 +339,7 @@ fn resolve_target(
             "Compiler diagnostic rustc input is not the crate root",
         ));
     }
-    let source = manifest.join(TARGET_FILE);
+    let source = manifest.join(target.file);
     let source = source
         .canonicalize()
         .map_err(|_| failure("Compiler diagnostic cannot resolve instrumented source"))?;
@@ -232,7 +348,7 @@ fn resolve_target(
             "Compiler diagnostic source escapes the manifest directory",
         ));
     }
-    Ok(Some(source))
+    Ok(Some((target, source)))
 }
 
 fn crate_name_of(args: &[String]) -> Option<String> {
@@ -351,7 +467,20 @@ fn write_receipt(path: &Path, value: serde_json::Value) -> Result<()> {
 struct DiagConfig {
     root: PathBuf,
     original_sha256: String,
+    transport_sha256: String,
     receipt: PathBuf,
+    next: Option<OsString>,
+}
+
+impl DiagConfig {
+    /// Committed original digest of one table target.
+    fn expected(&self, target: &Target) -> &str {
+        if target.digest_env == TRANSPORT_ENV {
+            &self.transport_sha256
+        } else {
+            &self.original_sha256
+        }
+    }
 }
 
 fn config_from_env() -> Result<DiagConfig> {
@@ -360,8 +489,9 @@ fn config_from_env() -> Result<DiagConfig> {
 
 /// Load mandatory wrapper configuration from an explicit lookup, so unit
 /// tests exercise every branch without touching process-global state.
-/// In wrapper mode all three values are mandatory: an unconfigured
-/// invocation fails instead of silently qualifying uninstrumented code.
+/// In wrapper mode the root, both target digests and the receipt are
+/// mandatory: an unconfigured invocation fails instead of silently
+/// qualifying uninstrumented code. The outer wrapper is optional.
 fn config_from_map(get: &dyn Fn(&str) -> Option<OsString>) -> Result<DiagConfig> {
     let root = match get(ROOT_ENV) {
         Some(root) if !root.is_empty() => PathBuf::from(root),
@@ -379,6 +509,14 @@ fn config_from_map(get: &dyn Fn(&str) -> Option<OsString>) -> Result<DiagConfig>
             ));
         }
     };
+    let transport_sha256 = match get(TRANSPORT_ENV).and_then(|value| value.into_string().ok()) {
+        Some(value) if !value.is_empty() => value,
+        _ => {
+            return Err(failure(
+                "Compiler diagnostic needs CCID_DIAG_TRANSPORT_SHA256 in wrapper mode",
+            ));
+        }
+    };
     let receipt = match get(RECEIPT_ENV) {
         Some(receipt) if !receipt.is_empty() => PathBuf::from(receipt),
         _ => {
@@ -387,22 +525,35 @@ fn config_from_map(get: &dyn Fn(&str) -> Option<OsString>) -> Result<DiagConfig>
             ));
         }
     };
+    let next = get(NEXT_ENV).filter(|value| !value.is_empty());
     Ok(DiagConfig {
         root,
         original_sha256,
+        transport_sha256,
         receipt,
+        next,
     })
 }
 
-/// Cargo composes the outer cache wrapper natively. Invoke its supplied
-/// compiler directly, refusing recursion into this executable.
-fn resolve_compiler(compiler: &str) -> Result<Vec<OsString>> {
+/// Invoke the supplied compiler, behind the chained outer wrapper when one
+/// was configured, refusing recursion into this executable either way.
+fn resolve_compiler(compiler: &str, next: Option<&OsString>) -> Result<Vec<OsString>> {
     if is_self(Path::new(compiler)) {
         return Err(failure(
             "Compiler diagnostic refers to itself; refusing to recurse",
         ));
     }
-    Ok(vec![OsString::from(compiler)])
+    let mut command = Vec::new();
+    if let Some(next) = next {
+        if is_self(Path::new(next)) {
+            return Err(failure(
+                "Compiler diagnostic outer wrapper refers to itself; refusing to recurse",
+            ));
+        }
+        command.push(next.clone());
+    }
+    command.push(OsString::from(compiler));
+    Ok(command)
 }
 
 /// Entry point for wrapper mode: argv[0] is this binary, argv[1] is the
@@ -417,10 +568,11 @@ pub fn run_wrapped() -> Result<ExitCode> {
     }
     let compiler = argv[1].to_string_lossy().into_owned();
     let rest: Vec<OsString> = argv[2..].to_vec();
+    let config = config_from_env()?;
     let passthrough = || -> Result<ExitCode> {
         // Non-target invocations run the real (or chained) compiler
         // unchanged and leave no receipt: silence, not spam.
-        let mut command = resolve_compiler(&compiler)?;
+        let mut command = resolve_compiler(&compiler, config.next.as_ref())?;
         command.extend(rest.iter().cloned());
         let status = Command::new(&command[0])
             .args(&command[1..])
@@ -430,21 +582,21 @@ pub fn run_wrapped() -> Result<ExitCode> {
             })?;
         Ok(code_of(status.code()))
     };
-    let config = config_from_env()?;
     let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
     let rest_strings: Vec<String> = rest
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    let source = match resolve_target(
+    let (target, source) = match resolve_target(
         crate_name_of(&rest_strings).as_deref(),
         manifest_dir.as_deref(),
         &rest,
         &config.root,
     )? {
-        Some(source) => source,
+        Some(resolved) => resolved,
         None => return passthrough(),
     };
+    let expected = config.expected(target).to_owned();
     let mut lock = acquire_lock(&source)?;
     let original = fs::read(&source).map_err(|_| {
         failure(format!(
@@ -452,15 +604,16 @@ pub fn run_wrapped() -> Result<ExitCode> {
             source.display()
         ))
     })?;
-    if sha256_hex(&original) != config.original_sha256 {
+    if sha256_hex(&original) != expected {
         return Err(failure(
             "Compiler diagnostic source digest mismatch; refusing changed bytes",
         ));
     }
-    let mut invocation = resolve_compiler(&compiler)?;
+    let mut invocation = resolve_compiler(&compiler, config.next.as_ref())?;
     invocation.extend(rest.iter().cloned());
     lock.arm(original.clone());
-    let diagnostic = transform(
+    let diagnostic = transform_with(
+        (target.sites)(),
         std::str::from_utf8(&original)
             .map_err(|_| failure("Compiler diagnostic source is not valid UTF-8"))?,
     )?;
@@ -472,10 +625,11 @@ pub fn run_wrapped() -> Result<ExitCode> {
         ))
     })?;
     let exit = execute_guarded(
+        target,
         || run_compiler(&invocation),
         &source,
         &original,
-        &config.original_sha256,
+        &expected,
         &diagnostic_sha256,
         &config.receipt,
     )?;
@@ -501,6 +655,7 @@ fn run_compiler(invocation: &[OsString]) -> Result<i32> {
 /// the compiler outcome. The `invoke` closure keeps this unit-testable
 /// without spawning real compilers.
 fn execute_guarded(
+    target: &Target,
     invoke: impl FnOnce() -> Result<i32>,
     source: &Path,
     original: &[u8],
@@ -511,10 +666,12 @@ fn execute_guarded(
     let outcome = invoke();
     let restored = restore_source(source, original, expected_sha256).unwrap_or(false);
     let receipt = json!({
-        "crate_name": TARGET_CRATE,
+        "target": target.name,
+        "crate_name": target.crate_name,
+        "file": target.file,
         "original_sha256": expected_sha256,
         "diagnostic_sha256": diagnostic_sha256,
-        "transformations": sites().iter().map(|site| site.name).collect::<Vec<_>>(),
+        "transformations": (target.sites)().iter().map(|site| site.name).collect::<Vec<_>>(),
         "compiler_exit": outcome.as_ref().ok().copied(),
         "restored": restored,
     });
@@ -1243,7 +1400,8 @@ impl<I: TorNodeIdentity, V: Verifier> TorDiscovery<I, V> {
         let resolved = resolve_target(Some("cmsh"), Some(&manifest), &unit_argv(&lib), root.path())
             .unwrap()
             .expect("exact target resolves");
-        assert_eq!(resolved, target.canonicalize().unwrap());
+        assert_eq!(resolved.0.name, DISCOVERY.name);
+        assert_eq!(resolved.1, target.canonicalize().unwrap());
         // Anything but the exact crate passes through before touching paths.
         assert!(
             resolve_target(Some("cdht"), Some(&manifest), &unit_argv(&lib), root.path())
@@ -1296,9 +1454,61 @@ impl<I: TorNodeIdentity, V: Verifier> TorDiscovery<I, V> {
 
     #[test]
     fn resolve_compiler_composes_chain_without_recursion() {
-        let resolved = resolve_compiler("/bin/true").unwrap();
+        let resolved = resolve_compiler("/bin/true", None).unwrap();
         assert_eq!(resolved, vec![OsString::from("/bin/true")]);
         assert!(!is_self(Path::new("/bin/true")));
+        // A configured outer wrapper (compile cache) runs in front of the compiler.
+        let next = OsString::from("/bin/echo");
+        let chained = resolve_compiler("/bin/true", Some(&next)).unwrap();
+        assert_eq!(chained, vec![next.clone(), OsString::from("/bin/true")]);
+        // Neither the compiler nor the outer wrapper may be this executable.
+        let own = std::env::current_exe().unwrap();
+        assert!(resolve_compiler(&own.to_string_lossy(), None).is_err());
+        assert!(resolve_compiler("/bin/true", Some(&own.into_os_string())).is_err());
+    }
+
+    /// Every transport tag appears exactly once after the transform, the
+    /// table fails closed on missing or doubled anchors, and the exact
+    /// original bytes come back on restore.
+    #[test]
+    fn transport_table_applies_once_and_restores() {
+        const TAGS: [&str; 7] = [
+            "ccid-diag arti-connect-error",
+            "ccid-diag listener-service-stopped",
+            "ccid-diag listener-admission-full",
+            "ccid-diag listener-rendezvous-failed",
+            "ccid-diag listener-admitted",
+            "ccid-diag listener-requests-closed",
+            "ccid-diag listener-event-bound",
+        ];
+        let original: String = transport_sites()
+            .iter()
+            .map(|site| format!("// before {}\n{}\n", site.name, site.anchor))
+            .collect();
+        let transformed = transform_with(transport_sites(), &original).unwrap();
+        for tag in TAGS {
+            let hits = transformed
+                .match_indices(tag)
+                .filter(|(index, _)| {
+                    matches!(
+                        transformed[index + tag.len()..].chars().next(),
+                        Some(':') | Some('"')
+                    )
+                })
+                .count();
+            assert_eq!(hits, 1, "{tag}");
+        }
+        let mut restored = transformed.clone();
+        for site in transport_sites().into_iter().rev() {
+            restored = restored.replacen(site.replacement, site.anchor, 1);
+        }
+        assert_eq!(restored, original);
+        assert!(transform_with(transport_sites(), "no anchors here").is_err());
+        let doubled = format!("{original}{original}");
+        assert!(transform_with(transport_sites(), &doubled).is_err());
+        // The table selects the transport target by crate name only.
+        assert_eq!(TRANSPORT.crate_name, "ctrn");
+        assert_eq!(TRANSPORT.file, "src/arti.rs");
     }
 
     #[test]
@@ -1342,6 +1552,7 @@ impl<I: TorNodeIdentity, V: Verifier> TorDiscovery<I, V> {
         let (_directory, source, original, expected, receipt) = guarded_fixture();
         fs::write(&source, b"diagnostic bytes").unwrap();
         let exit = execute_guarded(
+            &DISCOVERY,
             || Ok(0),
             &source,
             &original,
@@ -1367,6 +1578,7 @@ impl<I: TorNodeIdentity, V: Verifier> TorDiscovery<I, V> {
         let (_directory, source, original, expected, receipt) = guarded_fixture();
         fs::write(&source, b"diagnostic bytes").unwrap();
         let exit = execute_guarded(
+            &DISCOVERY,
             || Ok(1),
             &source,
             &original,
@@ -1384,6 +1596,7 @@ impl<I: TorNodeIdentity, V: Verifier> TorDiscovery<I, V> {
         let (_directory, source, original, expected, receipt) = guarded_fixture();
         fs::write(&source, b"diagnostic bytes").unwrap();
         let error = execute_guarded(
+            &DISCOVERY,
             || Err(failure("spawn failed")),
             &source,
             &original,
@@ -1408,6 +1621,7 @@ impl<I: TorNodeIdentity, V: Verifier> TorDiscovery<I, V> {
         fs::write(&blocker, b"not a directory").unwrap();
         let bad_receipt = blocker.join("receipt.json");
         let error = execute_guarded(
+            &DISCOVERY,
             || Ok(0),
             &source,
             &original,

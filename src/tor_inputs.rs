@@ -316,7 +316,11 @@ sha256 = "64796854b4d018d455b06d3ac67db5cc78a3058440c758a1161fb52d7f7e7e0a"
 [diag.discovery-lib]
 file = "src/tor_discovery.rs"
 sha256 = "fc6c8db74254e6246bb6da69228e4afe2c17ff42575133bb3ab1b530d2c30041"
-diagnostic_sha256 = "f67ec53ed7f19e9bf7293eca631a24687b14fc2558109269edcbd901fade91d7"
+diagnostic_sha256 = "42dc2e7df8f7e134a0a385587176bb0d2713954a12ca1e217e98e150d8f79785"
+[diag.transport-lib]
+file = "src/arti.rs"
+sha256 = "7da044e96dd6bd4583e807a42ed174565a50e3d317b51ba0964dc38c1ae36557"
+diagnostic_sha256 = "b184d1d2e79599088565ae3f244ccdb03d8207fc1143f468fd51ad4dedd2ef16"
 "#;
 
     fn manifest(text: &str) -> Manifest {
@@ -332,11 +336,12 @@ diagnostic_sha256 = "f67ec53ed7f19e9bf7293eca631a24687b14fc2558109269edcbd901fad
         assert_eq!(parsed.live_inputs.len(), 3);
         assert_eq!(parsed.live_tools.len(), 12);
         assert_eq!(parsed.live_drivers.len(), 3);
-        assert_eq!(parsed.diag.len(), 1);
+        assert_eq!(parsed.diag.len(), 2);
         assert_eq!(
             parsed.diag["discovery-lib"].sha256,
             "fc6c8db74254e6246bb6da69228e4afe2c17ff42575133bb3ab1b530d2c30041"
         );
+        assert_eq!(parsed.diag["transport-lib"].file, "src/arti.rs");
         assert!(parsed.live_inputs["v01-source-bundle"]
             .digest_variable
             .ends_with("_BUNDLE_SHA256"));
