@@ -158,9 +158,18 @@ pub(super) struct Crow {
 }
 impl Crow {
     pub fn new(config: &Config) -> Result<Self> {
-        let token = String::from_utf8(output(&config.token_command, None, None)?)?
-            .trim()
-            .to_owned();
+        let token = match &config.token_file {
+            Some(path) => {
+                let meta = fs::metadata(path)?;
+                if !meta.is_file() || meta.len() > 4096 {
+                    return Err("Crow token file must be a small regular file".into());
+                }
+                String::from_utf8(fs::read(path)?)?.trim().to_owned()
+            }
+            None => String::from_utf8(output(&config.token_command, None, None)?)?
+                .trim()
+                .to_owned(),
+        };
         if token.is_empty() || token.contains(['\r', '\n']) {
             return Err("Invalid Crow credential".into());
         }

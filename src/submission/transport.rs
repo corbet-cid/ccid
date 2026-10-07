@@ -164,10 +164,18 @@ pub(super) fn stage(
         "--sha256".into(),
         expected.into(),
     ];
-    let (program, args) = config.ssh.split_first().ok_or("SSH transport missing")?;
-    let result = Command::new(program)
-        .args(args)
-        .arg(argv.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" "))
+    let mut command = if let Some((program, args)) = config.ssh.split_first() {
+        let mut ssh = Command::new(program);
+        ssh.args(args)
+            .arg(argv.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" "));
+        ssh
+    } else {
+        // Pod-local mode: receive straight into the mounted source store.
+        let mut local = Command::new(&argv[0]);
+        local.args(&argv[1..]);
+        local
+    };
+    let result = command
         .stdin(File::open(archive)?)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

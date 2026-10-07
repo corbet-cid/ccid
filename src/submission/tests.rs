@@ -6,6 +6,7 @@ mod archives;
 mod contracts;
 mod dependent_checks;
 mod failure_digest;
+mod pod_local;
 mod provider_routes;
 mod providers;
 mod resolution;
@@ -32,6 +33,7 @@ fn config(root: &Path) -> Config {
         argo_namespace: "ci-fixture".into(),
         argo_template: "ccid-job".into(),
         github_tool_repository: Some("owner/ccid".into()),
+        token_file: None,
         forge_token_command: vec![],
         legacy_hosts: vec![],
     }

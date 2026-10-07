@@ -35,7 +35,16 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub api: String,
+    /// Command printing the Crow token. Alternative: `token_file`.
+    #[serde(default)]
     pub token_command: Vec<String>,
+    /// File holding the Crow token (a mounted secret). Pod-local mode.
+    #[serde(default)]
+    pub token_file: Option<PathBuf>,
+    /// Transport to the worker host. Empty (pod-local mode): the source
+    /// stores and pinned tools are mounted at `host_sources`/`host_tools`
+    /// and commands run locally, with no root ssh.
+    #[serde(default)]
     pub ssh: Vec<String>,
     pub state_root: PathBuf,
     pub host_sources: String,
@@ -104,12 +113,13 @@ impl Config {
         {
             return Err("Submission API must be an uncredentialed HTTPS endpoint".into());
         }
-        if config.ssh.is_empty()
-            || config.token_command.is_empty()
+        if (config.token_command.is_empty() && config.token_file.is_none())
+            || (!config.token_command.is_empty() && config.token_file.is_some())
+            || config.token_file.as_ref().is_some_and(|p| !p.is_absolute())
             || !config.state_root.is_absolute()
         {
             return Err(
-                "Submission configuration requires transport commands and an absolute state root"
+                "Submission configuration requires exactly one credential source (token_command or an absolute token_file) and an absolute state root"
                     .into(),
             );
         }
@@ -127,6 +137,10 @@ impl Config {
         )
     }
     fn ssh(&self, args: &[String], input: Option<&[u8]>) -> Result<Vec<u8>> {
+        if self.ssh.is_empty() {
+            // Pod-local mode: the worker stores are mounted here.
+            return output(args, None, input);
+        }
         let mut command = self.ssh.clone();
         command.push(args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" "));
         output(&command, None, input)
