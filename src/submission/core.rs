@@ -116,16 +116,17 @@ pub(super) fn pick(value: &Value, keys: &[&str]) -> Value {
         .map(|k| ((*k).to_string(), value[*k].clone()))
         .collect()
 }
-pub(super) fn assess(snapshot: &str, minimum: u64) -> Result<Value> {
+pub(super) fn assess(snapshot: &str, arcstats: &str, minimum: u64) -> Result<Value> {
     let re = regex::Regex::new(r"(?m)^MemAvailable:\s+(\d+)\s+kB$")?;
     let available: u64 = re
         .captures(snapshot)
         .ok_or("Cannot establish host memory headroom")?[1]
         .parse::<u64>()?
-        / 1024;
+        / 1024
+        + crate::admission::reclaimable_arc_mb(arcstats);
     if available < minimum {
         return Err(format!(
-            "Host has {available} MiB available; {minimum} MiB required before new CI"
+            "Host has {available} MiB available (MemAvailable plus reclaimable ZFS ARC); {minimum} MiB required before new CI"
         )
         .into());
     }
@@ -145,6 +146,12 @@ pub(super) fn admission(config: &Config) -> Result<Value> {
             &strings(&["cat", "/proc/meminfo", "/proc/pressure/memory"]),
             None,
         )?)?,
+        // Absent arcstats (no ZFS) or an unreadable file add nothing.
+        &config
+            .ssh(&strings(&["cat", "/proc/spl/kstat/zfs/arcstats"]), None)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default(),
         8192,
     )
 }

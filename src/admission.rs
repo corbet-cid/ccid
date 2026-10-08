@@ -21,7 +21,32 @@ fn refused(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Syn
     Box::new(Refused(message.into()))
 }
 
-fn available_mb(meminfo: &str, limit: Option<u64>, current: Option<u64>) -> Result<u64> {
+/// Reclaimable ZFS ARC in MiB: `size - c_min` from a `arcstats` kstat dump. The
+/// kernel counts ARC as used, but the shrinker releases it under pressure down
+/// to `c_min`. Missing, malformed or inverted values add nothing.
+pub(crate) fn reclaimable_arc_mb(arcstats: &str) -> u64 {
+    let field = |name: &str| {
+        arcstats.lines().find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some(name))
+                .then(|| fields.nth(1)?.parse::<u64>().ok())
+                .flatten()
+        })
+    };
+    match (field("size"), field("c_min")) {
+        (Some(size), Some(min)) if min > 0 && size > min => (size - min) / (1024 * 1024),
+        _ => 0,
+    }
+}
+
+const ARCSTATS: &str = "/proc/spl/kstat/zfs/arcstats";
+
+fn available_mb(
+    meminfo: &str,
+    arcstats: &str,
+    limit: Option<u64>,
+    current: Option<u64>,
+) -> Result<u64> {
     let available = meminfo
         .lines()
         .find_map(|line| {
@@ -31,7 +56,8 @@ fn available_mb(meminfo: &str, limit: Option<u64>, current: Option<u64>) -> Resu
                 .flatten()
         })
         .ok_or_else(|| failure("Cannot read MemAvailable for configured memory admission"))?
-        / 1024;
+        / 1024
+        + reclaimable_arc_mb(arcstats);
     Ok(match (limit, current) {
         (Some(limit), Some(current)) => {
             available.min(limit.saturating_sub(current) / (1024 * 1024))
@@ -136,7 +162,12 @@ fn admit_once(env: &mut Environment) -> Result<()> {
         };
         apply(
             env,
-            available_mb(&fs::read_to_string("/proc/meminfo")?, limit, current)?,
+            available_mb(
+                &fs::read_to_string("/proc/meminfo")?,
+                &fs::read_to_string(ARCSTATS).unwrap_or_default(),
+                limit,
+                current,
+            )?,
             reserve,
         )
     }
@@ -206,6 +237,7 @@ mod tests {
         assert_eq!(
             available_mb(
                 "MemAvailable: 65536000 kB\nSwapFree: 0 kB",
+                "",
                 Some(16384 * mib),
                 Some(12288 * mib)
             )
@@ -215,11 +247,45 @@ mod tests {
         assert_eq!(
             available_mb(
                 "MemAvailable: 2097152 kB",
+                "",
                 Some(16384 * mib),
                 Some(12288 * mib)
             )
             .unwrap(),
             2048
+        );
+    }
+    const ARC: &str = "13 1 0x01 98 4704 1 2\nname type data\nc_min 4 1073741824\nc_max 4 68719476736\nsize 4 11811160064\n";
+    #[test]
+    fn reclaimable_arc_is_size_above_c_min_and_degrades_to_zero() {
+        assert_eq!(reclaimable_arc_mb(ARC), 10240);
+        assert_eq!(reclaimable_arc_mb(""), 0);
+        assert_eq!(reclaimable_arc_mb("size 4 100\nc_min 4 200\n"), 0);
+        assert_eq!(reclaimable_arc_mb("size 4 9999999999\n"), 0);
+        assert_eq!(reclaimable_arc_mb("size 4 x\nc_min 4 1\n"), 0);
+        assert_eq!(reclaimable_arc_mb("size 4 5\nc_min 4 0\n"), 0);
+    }
+    #[test]
+    fn arc_adds_to_available_memory_and_cgroup_headroom_still_caps() {
+        let mib = 1024 * 1024;
+        // 481 MiB MemAvailable plus 10240 MiB reclaimable ARC.
+        assert_eq!(
+            available_mb("MemAvailable: 492544 kB\n", ARC, None, None).unwrap(),
+            10721
+        );
+        assert_eq!(
+            available_mb("MemAvailable: 492544 kB\n", "", None, None).unwrap(),
+            481
+        );
+        assert_eq!(
+            available_mb(
+                "MemAvailable: 492544 kB\n",
+                ARC,
+                Some(16384 * mib),
+                Some(12288 * mib)
+            )
+            .unwrap(),
+            4096
         );
     }
     #[test]

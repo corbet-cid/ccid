@@ -456,6 +456,7 @@ fn cold_full_swap_does_not_reject_available_memory() {
     assert_eq!(
         core::assess(
             "MemAvailable: 16777216 kB\nSwapFree: 0 kB\nfull avg10=0.00\n",
+            "",
             8192
         )
         .unwrap()["available_mb"],
@@ -469,8 +470,17 @@ fn low_headroom_pressure_and_missing_measurement_fail_closed() {
         "SwapFree: 10000 kB\n",
         "MemAvailable: 16777216 kB\nfull avg10=5.00\n",
     ] {
-        assert!(core::assess(snapshot, 8192).is_err());
+        assert!(core::assess(snapshot, "", 8192).is_err());
     }
+}
+
+#[test]
+fn reclaimable_arc_lifts_low_mem_available_but_not_pressure() {
+    let arc = "c_min 4 1073741824\nsize 4 11811160064\n";
+    let low = "MemAvailable: 492544 kB\nfull avg10=0.00\n";
+    assert!(core::assess(low, "", 8192).is_err());
+    assert_eq!(core::assess(low, arc, 8192).unwrap()["available_mb"], 10721);
+    assert!(core::assess("MemAvailable: 492544 kB\nfull avg10=5.00\n", arc, 8192).is_err());
 }
 
 struct Pages {
