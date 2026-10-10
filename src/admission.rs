@@ -1,6 +1,6 @@
 //! A bounded worker admission check, not a scheduler or a swap-occupancy rule.
 use super::*;
-use std::thread;
+use std::{path::PathBuf, thread};
 
 /// How often a job held back by resource pressure checks again.
 const ADMISSION_POLL: Duration = Duration::from_secs(10);
@@ -39,6 +39,19 @@ pub(crate) fn reclaimable_arc_mb(arcstats: &str) -> u64 {
     }
 }
 
+/// A `/proc/meminfo` field in MiB.
+fn meminfo_mb(meminfo: &str, name: &str) -> Option<u64> {
+    meminfo
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some(name))
+                .then(|| fields.next()?.parse::<u64>().ok())
+                .flatten()
+        })
+        .map(|kib| kib / 1024)
+}
+
 const ARCSTATS: &str = "/proc/spl/kstat/zfs/arcstats";
 
 fn available_mb(
@@ -47,16 +60,8 @@ fn available_mb(
     limit: Option<u64>,
     current: Option<u64>,
 ) -> Result<u64> {
-    let available = meminfo
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split_whitespace();
-            (fields.next() == Some("MemAvailable:"))
-                .then(|| fields.next()?.parse::<u64>().ok())
-                .flatten()
-        })
+    let available = meminfo_mb(meminfo, "MemAvailable:")
         .ok_or_else(|| failure("Cannot read MemAvailable for configured memory admission"))?
-        / 1024
         + reclaimable_arc_mb(arcstats);
     Ok(match (limit, current) {
         (Some(limit), Some(current)) => {
@@ -66,7 +71,7 @@ fn available_mb(
     })
 }
 
-fn apply(env: &mut Environment, available: u64, reserve: u64) -> Result<()> {
+fn apply(env: &mut Environment, available: u64, reserve: u64, ceiling: Option<u64>) -> Result<()> {
     if available <= reserve {
         return Err(refused(format!(
             "Memory admission refused: {available} MiB available, {reserve} MiB reserve required"
@@ -76,11 +81,131 @@ fn apply(env: &mut Environment, available: u64, reserve: u64) -> Result<()> {
     let requested = value(env, "CI_MEMORY_MB")
         .map(|v| positive(&v, "CI_MEMORY_MB"))
         .transpose()?;
-    let allocation = requested.map_or(usable, |requested| requested.min(usable));
+    let minimum = value(env, "CI_MEMORY_PER_JOB_MB")
+        .map(|v| positive(&v, "CI_MEMORY_PER_JOB_MB"))
+        .transpose()?;
+    let bound = ceiling.map_or(usable, |ceiling| usable.min(ceiling));
+    let allocation = requested.map_or(bound, |requested| requested.min(bound));
+    // A job that cannot get one job's share waits; a request below one job is a
+    // configuration error that the budget reports.
+    if let Some(minimum) = minimum {
+        if allocation < minimum && requested.is_none_or(|requested| requested >= minimum) {
+            return Err(refused(format!(
+                "Memory admission refused: {allocation} MiB allocatable ({usable} MiB free, {} MiB unreserved), {minimum} MiB per job required",
+                ceiling.map_or_else(|| "n/a".to_owned(), |c| c.to_string())
+            )));
+        }
+    }
     set(env, "CI_MEMORY_MB", allocation.to_string());
     event(
-        json!({"event":"memory-admission", "available_mb":available, "reserve_mb":reserve, "allocation_mb":allocation}),
+        json!({"event":"memory-admission", "available_mb":available, "reserve_mb":reserve, "unreserved_mb":ceiling, "allocation_mb":allocation}),
     );
+    Ok(())
+}
+
+/// Memory promised to running jobs of one cgroup. Every admitted process holds
+/// an exclusively locked `<pid>.job` file with its allocation in MiB for as long
+/// as it lives; the kernel drops the lock when it dies, so a crashed job never
+/// leaves a reservation behind. A short-lived `.gate` lock serialises the
+/// check-and-reserve step so concurrent starts cannot all pass the same check.
+const LEDGER_HELD_ENV: &str = "CCID_ADMISSION_HELD";
+static HELD: std::sync::Mutex<Option<fs::File>> = std::sync::Mutex::new(None);
+
+fn ledger_dir(env: &Environment) -> PathBuf {
+    value(env, "CI_ADMISSION_DIR").map_or_else(
+        || std::env::temp_dir().join("ccid-admission"),
+        PathBuf::from,
+    )
+}
+
+fn is_live(path: &Path) -> bool {
+    // The holder keeps the file exclusively locked; a lock we can take is stale.
+    fs::File::open(path).is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+}
+
+/// Sum of the allocations whose holders are alive; stale entries are removed.
+fn outstanding_mb(dir: &Path) -> io::Result<u64> {
+    let mut total = 0;
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "job") {
+            continue;
+        }
+        if is_live(&path) {
+            total += fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+    }
+    Ok(total)
+}
+
+/// An enclosing ccid process (or this one) already reserves memory for the job.
+fn holds_reservation(env: &Environment, dir: &Path) -> bool {
+    HELD.lock().is_ok_and(|held| held.is_some())
+        || value(env, LEDGER_HELD_ENV).is_some_and(|pid| {
+            pid.bytes().all(|b| b.is_ascii_digit()) && is_live(&dir.join(format!("{pid}.job")))
+        })
+}
+
+/// Check and reserve in one step: the entry `<name>.job` stays locked while the
+/// returned file lives. Without a usable ledger directory the check degrades to
+/// the state-only rule (no entry) instead of failing the job.
+fn reserve_in(
+    env: &mut Environment,
+    dir: &Path,
+    name: &str,
+    available: u64,
+    reserve: u64,
+    capacity: u64,
+) -> Result<Option<fs::File>> {
+    let Ok(gate) = fs::create_dir_all(dir).and_then(|()| {
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(".gate"))
+    }) else {
+        apply(env, available, reserve, None)?;
+        return Ok(None);
+    };
+    gate.lock()?;
+    let Ok(outstanding) = outstanding_mb(dir) else {
+        apply(env, available, reserve, None)?;
+        return Ok(None);
+    };
+    let unreserved = capacity.saturating_sub(reserve).saturating_sub(outstanding);
+    apply(env, available, reserve, Some(unreserved))?;
+    let path = dir.join(format!("{name}.job"));
+    let allocation = value(env, "CI_MEMORY_MB").unwrap_or_default();
+    let entry = fs::write(&path, allocation)
+        .and_then(|()| fs::File::open(&path))
+        .and_then(|file| file.lock().map(|()| file));
+    drop(gate);
+    match entry {
+        Ok(file) => Ok(Some(file)),
+        Err(error) => {
+            event(json!({"event":"admission-ledger-unavailable","error":error.to_string()}));
+            Ok(None)
+        }
+    }
+}
+
+fn admit_memory(env: &mut Environment, available: u64, reserve: u64, capacity: u64) -> Result<()> {
+    let dir = ledger_dir(env);
+    if holds_reservation(env, &dir) {
+        return apply(env, available, reserve, None);
+    }
+    let id = std::process::id();
+    if let Some(file) = reserve_in(env, &dir, &id.to_string(), available, reserve, capacity)? {
+        if let Ok(mut held) = HELD.lock() {
+            *held = Some(file);
+        }
+        set(env, LEDGER_HELD_ENV, id.to_string());
+    }
     Ok(())
 }
 
@@ -160,16 +285,20 @@ fn admit_once(env: &mut Environment) -> Result<()> {
         } else {
             None
         };
-        apply(
-            env,
-            available_mb(
-                &fs::read_to_string("/proc/meminfo")?,
-                &fs::read_to_string(ARCSTATS).unwrap_or_default(),
-                limit,
-                current,
-            )?,
-            reserve,
-        )
+        let meminfo = fs::read_to_string("/proc/meminfo")?;
+        let available = available_mb(
+            &meminfo,
+            &fs::read_to_string(ARCSTATS).unwrap_or_default(),
+            limit,
+            current,
+        )?;
+        let capacity = limit
+            .map(|bytes| bytes / (1024 * 1024))
+            .or_else(|| meminfo_mb(&meminfo, "MemTotal:"));
+        match capacity {
+            Some(capacity) => admit_memory(env, available, reserve, capacity),
+            None => apply(env, available, reserve, None),
+        }
     }
 }
 
@@ -295,8 +424,106 @@ mod tests {
             ("CI_MEMORY_PER_JOB_MB".into(), "2048".into()),
             ("CI_JOBS".into(), "8".into()),
         ]);
-        assert!(apply(&mut env, 8192, 8192).unwrap_err().is::<Refused>());
-        apply(&mut env, 12288, 8192).unwrap();
+        assert!(apply(&mut env, 8192, 8192, None)
+            .unwrap_err()
+            .is::<Refused>());
+        apply(&mut env, 12288, 8192, None).unwrap();
         assert_eq!(budget(&env).unwrap().jobs, 2);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ccid-admission-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+    fn job_env() -> Environment {
+        Environment::from([
+            ("CI_MEMORY_MB".into(), "8192".into()),
+            ("CI_MEMORY_PER_JOB_MB".into(), "2048".into()),
+        ])
+    }
+    #[test]
+    fn concurrent_starts_reserve_instead_of_all_passing_the_same_check() {
+        let dir = scratch("reserve");
+        // 40 GiB cgroup, 8 GiB reserve, everything free: room for exactly four 8 GiB jobs.
+        let mut held = Vec::new();
+        for n in 0..4 {
+            let mut env = job_env();
+            let file = reserve_in(&mut env, &dir, &format!("job{n}"), 40960, 8192, 40960)
+                .unwrap()
+                .unwrap();
+            assert_eq!(value(&env, "CI_MEMORY_MB").unwrap(), "8192");
+            held.push(file);
+        }
+        assert_eq!(outstanding_mb(&dir).unwrap(), 4 * 8192);
+        // The fifth waits (Refused), not fails and not a silent overcommit.
+        let mut env = job_env();
+        let error = reserve_in(&mut env, &dir, "job4", 40960, 8192, 40960).unwrap_err();
+        assert!(error.is::<Refused>());
+        // A job ending releases its share: the fifth is admitted.
+        held.pop();
+        let mut env = job_env();
+        assert!(reserve_in(&mut env, &dir, "job4", 40960, 8192, 40960)
+            .unwrap()
+            .is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn remaining_unreserved_share_bounds_the_allocation_down_to_one_job() {
+        let dir = scratch("share");
+        let mut first = job_env();
+        let _a = reserve_in(&mut first, &dir, "a", 40960, 8192, 40960)
+            .unwrap()
+            .unwrap();
+        // 32768 usable, 8192 held: the next request of 30000 is cut to 24576.
+        let mut env = job_env();
+        env.insert("CI_MEMORY_MB".into(), "30000".into());
+        let _b = reserve_in(&mut env, &dir, "b", 40960, 8192, 40960)
+            .unwrap()
+            .unwrap();
+        assert_eq!(value(&env, "CI_MEMORY_MB").unwrap(), "24576");
+        // 0 MiB left: below one job's 2048, so it waits.
+        let mut env = job_env();
+        assert!(reserve_in(&mut env, &dir, "c", 40960, 8192, 40960)
+            .unwrap_err()
+            .is::<Refused>());
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn dead_holders_leave_no_reservation() {
+        let dir = scratch("stale");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("999999.job"), "30000").unwrap(); // no process holds its lock
+        assert_eq!(outstanding_mb(&dir).unwrap(), 0);
+        assert!(!dir.join("999999.job").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn enclosing_reservation_is_not_counted_twice() {
+        let dir = scratch("nested");
+        let mut parent = job_env();
+        let _held = reserve_in(&mut parent, &dir, "4242", 40960, 8192, 40960)
+            .unwrap()
+            .unwrap();
+        let mut child = job_env();
+        child.insert(LEDGER_HELD_ENV.into(), "4242".into());
+        assert!(holds_reservation(&child, &dir));
+        child.insert(LEDGER_HELD_ENV.into(), "../4242".into());
+        assert!(!holds_reservation(&child, &dir));
+        child.insert(LEDGER_HELD_ENV.into(), "4243".into());
+        assert!(!holds_reservation(&child, &dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn unusable_ledger_degrades_to_the_state_check() {
+        let blocked = scratch("blocked");
+        fs::write(&blocked, "a file, not a directory").unwrap();
+        let mut env = job_env();
+        assert!(reserve_in(&mut env, &blocked, "x", 40960, 8192, 40960)
+            .unwrap()
+            .is_none());
+        assert_eq!(value(&env, "CI_MEMORY_MB").unwrap(), "8192");
+        let _ = fs::remove_file(&blocked);
     }
 }
