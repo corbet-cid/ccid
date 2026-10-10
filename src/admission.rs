@@ -120,7 +120,8 @@ fn ledger_dir(env: &Environment) -> PathBuf {
 
 fn is_live(path: &Path) -> bool {
     // The holder keeps the file exclusively locked; a lock we can take is stale.
-    fs::File::open(path).is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+    fs::File::open(path)
+        .is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 /// Sum of the allocations whose holders are alive; stale entries are removed.
