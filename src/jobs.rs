@@ -54,6 +54,10 @@ pub struct Job {
     /// workflow filters by path only when every job in it declares paths.
     #[serde(default)]
     paths: Vec<String>,
+    /// Forgejo jobs only: the events that start the workflow, a subset of
+    /// `push`, `pull_request` and `manual`. Empty (the default) means all three.
+    #[serde(default)]
+    events: Vec<String>,
 }
 
 /// Manifest-owned newest-head refresh scope: update every first-party git
@@ -101,6 +105,9 @@ pub struct Plan {
     /// Forgejo push path filters; skipped when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// Forgejo trigger events; skipped when empty (all of them).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<String>,
     /// Declared secret variables this job must not see; `execute` strips them.
     #[serde(skip)]
     pub withheld: Vec<String>,
@@ -319,8 +326,8 @@ pub fn plan(
     let effective = scheduler.unwrap_or(job.scheduler);
     if effective == Scheduler::Forgejo {
         validate_forgejo_job(job)?;
-    } else if job.runs_on.is_some() || !job.paths.is_empty() {
-        return Err(failure("runs_on and paths belong to Forgejo jobs"));
+    } else if job.runs_on.is_some() || !job.paths.is_empty() || !job.events.is_empty() {
+        return Err(failure("runs_on, paths and events belong to Forgejo jobs"));
     }
     Ok(Plan {
         job: name.into(),
@@ -334,6 +341,7 @@ pub fn plan(
         secrets: job.secrets.clone(),
         runs_on: job.runs_on.clone(),
         paths: job.paths.clone(),
+        events: job.events.clone(),
         withheld,
     })
 }
@@ -364,6 +372,11 @@ fn validate_forgejo_job(job: &Job) -> Result<()> {
     if let Some(label) = &job.runs_on {
         if !plain_token(label, b"") {
             return Err(failure("Job runs_on must be a plain runner label"));
+        }
+    }
+    for event in &job.events {
+        if !["push", "pull_request", "manual"].contains(&event.as_str()) {
+            return Err(failure("Job events must be push, pull_request or manual"));
         }
     }
     for glob in &job.paths {

@@ -547,6 +547,11 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         }
     }
     for (workflow, plans) in &forgejo {
+        if plans.iter().any(|plan| plan.events != plans[0].events) {
+            return Err(failure(format!(
+                "Forgejo jobs of workflow {workflow} must declare the same events"
+            )));
+        }
         outputs.insert(
             PathBuf::from(format!("{FORGEJO_DIRECTORY}/{workflow}.yml")),
             forgejo_workflow(&config.tool_revision, workflow, plans),
@@ -642,28 +647,37 @@ fn forgejo_workflow(tool_revision: &str, workflow: &str, plans: &[&jobs::Plan]) 
     if branches.is_empty() {
         branches.push("main");
     }
+    // Jobs of one workflow share its triggers (checked by the caller), so the first job speaks for all.
+    let events = &plans[0].events;
+    let wants = |event: &str| events.is_empty() || events.iter().any(|e| e == event);
     let mut out = String::from(CROW_MARKER);
-    out.push_str(
-        "# Forgejo Actions adapter: push, pull request and manual runs of the declared checks.\n",
-    );
+    out.push_str("# Forgejo Actions adapter: runs of the declared checks.\n");
     out.push_str("# A newer run of the same ref cancels the older one.\n");
-    out.push_str(&format!(
-        "name: {workflow}\non:\n  push:\n    branches: [{}]\n",
-        branches.join(", ")
-    ));
-    if plans.iter().all(|plan| !plan.paths.is_empty()) {
-        let mut paths: Vec<&str> = plans
-            .iter()
-            .flat_map(|plan| plan.paths.iter().map(String::as_str))
-            .collect();
-        paths.sort_unstable();
-        paths.dedup();
-        out.push_str("    paths:\n");
-        for path in paths {
-            out.push_str(&format!("      - \"{path}\"\n"));
+    out.push_str(&format!("name: {workflow}\non:\n"));
+    if wants("push") {
+        out.push_str(&format!(
+            "  push:\n    branches: [{}]\n",
+            branches.join(", ")
+        ));
+        if plans.iter().all(|plan| !plan.paths.is_empty()) {
+            let mut paths: Vec<&str> = plans
+                .iter()
+                .flat_map(|plan| plan.paths.iter().map(String::as_str))
+                .collect();
+            paths.sort_unstable();
+            paths.dedup();
+            out.push_str("    paths:\n");
+            for path in paths {
+                out.push_str(&format!("      - \"{path}\"\n"));
+            }
         }
     }
-    out.push_str("  pull_request:\n  workflow_dispatch:\n");
+    if wants("pull_request") {
+        out.push_str("  pull_request:\n");
+    }
+    if wants("manual") {
+        out.push_str("  workflow_dispatch:\n");
+    }
     out.push_str(&format!(
         "concurrency:\n  group: ccid-{workflow}-${{{{ github.ref }}}}\n  cancel-in-progress: true\n"
     ));

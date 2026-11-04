@@ -672,3 +672,20 @@ fn switching_a_job_to_forgejo_removes_only_the_owned_crow_adapter() {
     assert!(root.path().join(".crow/handwritten.yaml").exists());
     assert!(root.path().join(".forgejo/workflows/ci.yml").exists());
 }
+
+#[test]
+fn forgejo_events_select_the_triggers_and_must_agree_within_a_workflow() {
+    let manual = forgejo_manifest("events=['manual']\n")
+        .replace("[jobs.docs]\n", "[jobs.docs]\nevents=['manual']\n");
+    let root = forgejo_repository(&manual);
+    render(root.path(), false).unwrap();
+    let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert!(text.contains("on:\n  workflow_dispatch:\nconcurrency:"));
+    assert!(!text.contains("push:") && !text.contains("pull_request:"));
+    let split = forgejo_manifest("events=['manual']\n");
+    let root = forgejo_repository(&split);
+    assert!(render(root.path(), false).is_err());
+    let unknown = forgejo_manifest("events=['schedule']\n");
+    let root = forgejo_repository(&unknown);
+    assert!(render(root.path(), false).is_err());
+}
