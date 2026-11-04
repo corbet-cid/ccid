@@ -629,10 +629,9 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
 /// Render one Forgejo Actions workflow for the jobs that share a workflow name.
 ///
 /// The workflow carries no operator facts: the runner provides the tool root
-/// (`CCID_TOOL_ROOT`, one directory per pinned revision holding `ccid`), an
-/// optional provisioning command (`CCID_TOOL_PROVISION`) and every cache
-/// endpoint through its own environment. A missing tool fails the job; a check
-/// never installs a tool and never skips.
+/// (`CCID_TOOL_ROOT`, laid out `<root>/ccid/<revision>/<triple>/ccid`) and every
+/// cache endpoint through its own environment. A missing tool fails the job; a
+/// check never installs a tool and never skips.
 fn forgejo_workflow(tool_revision: &str, workflow: &str, plans: &[&jobs::Plan]) -> String {
     let mut branches: Vec<&str> = plans
         .iter()

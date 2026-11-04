@@ -15,10 +15,8 @@
         run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
-          tool="$CCID_TOOL_ROOT/$CCID_REVISION/ccid"
-          if [ ! -x "$tool" ] && [ -n "${CCID_TOOL_PROVISION:-}" ]; then
-            $CCID_TOOL_PROVISION "$CCID_REVISION"
-          fi
+          triple="${CCID_TOOL_TRIPLE:-$(uname -m)-unknown-linux-gnu}"
+          tool="$CCID_TOOL_ROOT/ccid/$CCID_REVISION/$triple/ccid"
           test -x "$tool" || { echo "ccid $CCID_REVISION is not provisioned at $tool" >&2; exit 2; }
           test "$("$tool" source-revision)" = "$CCID_REVISION"
           export CCID_SOURCE_REVISION="${{ github.sha }}"
