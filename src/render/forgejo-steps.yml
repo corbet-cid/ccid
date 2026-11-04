@@ -6,7 +6,9 @@
           git init --quiet .
           git remote remove origin 2>/dev/null || true
           git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
-          git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" fetch --quiet --depth 1 origin "${{ github.sha }}"
+          fetch() { git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" fetch --quiet --depth 1 origin "${{ github.sha }}"; }
+          # A runner may route the fetch to a local copy of the repository (its own git configuration); that copy can lag the push by seconds. Then ask the forge itself.
+          fetch || { echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2; GIT_CONFIG_COUNT=0 fetch; }
           git checkout --quiet --force --detach FETCH_HEAD
           git clean --quiet -ffdx
       - name: Run the declared checks
