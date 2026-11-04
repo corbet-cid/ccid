@@ -1,0 +1,26 @@
+      - name: Fetch the exact commit
+        env:
+          CCID_FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git init --quiet .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
+          git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" fetch --quiet --depth 1 origin "${{ github.sha }}"
+          git checkout --quiet --force --detach FETCH_HEAD
+          git clean --quiet -ffdx
+      - name: Run the declared checks
+        env:
+          CCID_REVISION: CCID_TOOL_REVISION
+        run: |
+          set -eu
+          : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
+          tool="$CCID_TOOL_ROOT/$CCID_REVISION/ccid"
+          if [ ! -x "$tool" ] && [ -n "${CCID_TOOL_PROVISION:-}" ]; then
+            $CCID_TOOL_PROVISION "$CCID_REVISION"
+          fi
+          test -x "$tool" || { echo "ccid $CCID_REVISION is not provisioned at $tool" >&2; exit 2; }
+          test "$("$tool" source-revision)" = "$CCID_REVISION"
+          export CCID_SOURCE_REVISION="${{ github.sha }}"
+          "$tool" render --repo "$PWD" --check
+          exec "$tool" check --repo "$PWD"CCID_CHECK_ARGUMENTS

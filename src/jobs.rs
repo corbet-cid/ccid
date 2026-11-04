@@ -13,6 +13,9 @@ pub enum Scheduler {
     #[default]
     Crow,
     Argo,
+    /// Forgejo Actions: rendered as `.forgejo/workflows/<workflow>.yml`, run
+    /// natively on push, pull request and manual dispatch.
+    Forgejo,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +46,14 @@ pub struct Job {
     /// list is withheld from it. Crow jobs only.
     #[serde(default)]
     secrets: Vec<String>,
+    /// Forgejo jobs only: the runner label the job asks for. Absent selects
+    /// the forge's lightweight default label.
+    #[serde(default)]
+    runs_on: Option<String>,
+    /// Forgejo jobs only: path globs that start the workflow on push. A
+    /// workflow filters by path only when every job in it declares paths.
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 /// Manifest-owned newest-head refresh scope: update every first-party git
@@ -84,6 +95,12 @@ pub struct Plan {
     /// Declared secret variables this job may see; skipped when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+    /// Forgejo runner label; skipped when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs_on: Option<String>,
+    /// Forgejo push path filters; skipped when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
     /// Declared secret variables this job must not see; `execute` strips them.
     #[serde(skip)]
     pub withheld: Vec<String>,
@@ -299,9 +316,15 @@ pub fn plan(
             "Push jobs require explicit ccid:run-declared-checks command; arbitrary commands are refused",
         ));
     }
+    let effective = scheduler.unwrap_or(job.scheduler);
+    if effective == Scheduler::Forgejo {
+        validate_forgejo_job(job)?;
+    } else if job.runs_on.is_some() || !job.paths.is_empty() {
+        return Err(failure("runs_on and paths belong to Forgejo jobs"));
+    }
     Ok(Plan {
         job: name.into(),
-        scheduler: scheduler.unwrap_or(job.scheduler),
+        scheduler: effective,
         checks,
         workflow: job.workflow.clone(),
         command: job.command.clone(),
@@ -309,8 +332,46 @@ pub fn plan(
         refresh: manifest.jobs[name].refresh.clone(),
         environment: manifest.jobs[name].environment.clone(),
         secrets: job.secrets.clone(),
+        runs_on: job.runs_on.clone(),
+        paths: job.paths.clone(),
         withheld,
     })
+}
+
+/// A plain runner label or workflow path glob: nothing the YAML renderer
+/// would have to quote or that could reintroduce a placeholder.
+fn plain_token(value: &str, extra: &[u8]) -> bool {
+    !value.is_empty()
+        && !value.contains("CCID")
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-.".contains(&c) || extra.contains(&c))
+}
+
+/// Forgejo jobs run the declared checks directly (`ccid check`), so they
+/// take the declared-checks command and none of the Crow-only machinery.
+fn validate_forgejo_job(job: &Job) -> Result<()> {
+    if !is_self_checks_command(&job.command) {
+        return Err(failure(
+            "Forgejo jobs require the ccid:run-declared-checks command",
+        ));
+    }
+    if !job.secrets.is_empty() || !job.environment.is_empty() || job.refresh.is_some() {
+        return Err(failure(
+            "Forgejo jobs take no secrets, environment or refresh scope",
+        ));
+    }
+    if let Some(label) = &job.runs_on {
+        if !plain_token(label, b"") {
+            return Err(failure("Job runs_on must be a plain runner label"));
+        }
+    }
+    for glob in &job.paths {
+        if !plain_token(glob, b"/*") {
+            return Err(failure("Job paths must be plain path globs"));
+        }
+    }
+    Ok(())
 }
 
 /// Manifest-owned newest-head refresh scope, shared by planning and the
