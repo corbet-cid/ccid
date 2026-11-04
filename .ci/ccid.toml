@@ -2,7 +2,7 @@ schema = 1
 project = "ccid"
 
 [render]
-tool_revision = "78a4e05b4e1cb25aaeba3966951564d74277bcbd"
+tool_revision = "659469fdbc89b4fb18c31036bd2a54465e481d69"
 
 # Formatting, Clippy with warnings denied and the full test suite, on the
 # release profile the compile job and the shipped binary share.
@@ -33,35 +33,42 @@ kind = "commands"
 commands = [["cargo", "test", "--release", "--locked", "--test", "cache_acceptance", "--", "--ignored", "--nocapture"]]
 
 [jobs.cache-acceptance]
-scheduler = "crow"
+scheduler = "forgejo"
+runs_on = "heavy"
 checks = ["cache-acceptance"]
-workflow = "repository-jobs"
-command = ["bash", ".ci/run-job.sh"]
+workflow = "acceptance"
+command = ["ccid:run-declared-checks"]
+events = ["manual"]
 
 [jobs.verify]
-scheduler = "crow"
+scheduler = "forgejo"
+runs_on = "heavy"
 checks = ["test", "registry-publisher"]
-workflow = "repository-jobs"
-command = ["bash", ".ci/run-job.sh"]
+workflow = "ci"
+command = ["ccid:run-declared-checks"]
 
 [jobs.compile]
-scheduler = "crow"
+scheduler = "forgejo"
+runs_on = "heavy"
 checks = ["compile"]
-workflow = "repository-jobs"
-command = ["bash", ".ci/run-job.sh"]
+workflow = "ci"
+command = ["ccid:run-declared-checks"]
 
 [checks.native-compile-cache]
 kind = "commands"
 commands = [["cargo", "test", "--release", "--locked", "--test", "native_compile_cache", "--", "--ignored", "--nocapture"]]
 
 [jobs.build]
-scheduler = "crow"
+scheduler = "forgejo"
+runs_on = "heavy"
 checks = ["build"]
-workflow = "repository-jobs"
-command = ["bash", ".ci/run-job.sh"]
+workflow = "ci"
+command = ["ccid:run-declared-checks"]
 
 [jobs.native-compile-cache]
-scheduler = "crow"
+scheduler = "forgejo"
+runs_on = "heavy"
 checks = ["native-compile-cache"]
-workflow = "repository-jobs"
-command = ["bash", ".ci/run-job.sh"]
+workflow = "acceptance"
+command = ["ccid:run-declared-checks"]
+events = ["manual"]

@@ -57,7 +57,7 @@ secret_environment = { PUBLISH_TOKEN = "publish_token" }
 [jobs.release]
 checks = ["publish"]
 workflow = "repository-jobs"
-command = ["bash", ".ci/run-job.sh"]
+command = ["bash", ".ci/run.sh"]
 secrets = ["PUBLISH_TOKEN"]
 ```
 
@@ -81,3 +81,34 @@ Native platform and release workflows stay separately maintained.
 Commit the manifest, inventory and generated adapters together. Rendered files
 are deterministic for the manifest and renderer version; the tool pin should
 refer to a worker-validated build that supports this adapter contract.
+
+## Forgejo Actions
+
+A job with `scheduler = "forgejo"` renders to a native Forgejo Actions workflow,
+`.forgejo/workflows/<workflow>.yml`, instead of a Crow adapter. Jobs that share a
+workflow name share one file; each job becomes a job of that workflow.
+
+```toml
+[jobs.verify]
+scheduler = "forgejo"
+runs_on = "heavy"                       # runner label; default "light"
+checks = ["test"]
+workflow = "ci"
+command = ["ccid:run-declared-checks"]  # the only command a Forgejo job takes
+paths = ["src/**", "Cargo.toml"]        # optional push path filter (all jobs of the workflow)
+events = ["push", "pull_request"]       # optional; default push, pull_request and manual
+push_branches = ["main"]                # optional; default main
+```
+
+The workflow runs on push, pull request and manual dispatch, cancels a
+superseded run of the same ref, and fetches the exact commit with the job token.
+It then runs `ccid check` from the pinned `tool_revision`. The CI speed profile
+is part of the workflow: no incremental state and no debug information.
+
+The runner, not the repository, owns every operator fact: `CCID_TOOL_ROOT` names
+the directory that holds the pinned tools as
+`<root>/ccid/<revision>/<triple>/ccid` (`CCID_TOOL_TRIPLE` overrides the host
+triple), and cache endpoints arrive through the runner environment. A missing or
+mismatched tool fails the job; a check never installs a tool. Jobs of one
+workflow must agree on `events`. Forgejo jobs take no secrets, environment or
+refresh scope; switching a job from Crow removes the owned Crow adapter.

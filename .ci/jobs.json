@@ -1,69 +1,75 @@
 {
   "schema": 1,
   "generator": "ccid render v1",
-  "tool_revision": "78a4e05b4e1cb25aaeba3966951564d74277bcbd",
-  "manifest_sha256": "2fd30bf5194808938645197641e0aab8265f78bb9a5e6b968cb999afa5dd0fa9",
+  "tool_revision": "659469fdbc89b4fb18c31036bd2a54465e481d69",
+  "manifest_sha256": "06609af838444dd5ae48a9924153f4ad2da36478db521b110595190a725b7c95",
   "jobs": {
     "build": {
       "job": "build",
-      "scheduler": "crow",
+      "scheduler": "forgejo",
       "checks": [
         "build"
       ],
-      "workflow": "repository-jobs",
+      "workflow": "ci",
       "command": [
-        "bash",
-        ".ci/run-job.sh"
-      ]
+        "ccid:run-declared-checks"
+      ],
+      "runs_on": "heavy"
     },
     "cache-acceptance": {
       "job": "cache-acceptance",
-      "scheduler": "crow",
+      "scheduler": "forgejo",
       "checks": [
         "cache-acceptance"
       ],
-      "workflow": "repository-jobs",
+      "workflow": "acceptance",
       "command": [
-        "bash",
-        ".ci/run-job.sh"
+        "ccid:run-declared-checks"
+      ],
+      "runs_on": "heavy",
+      "events": [
+        "manual"
       ]
     },
     "compile": {
       "job": "compile",
-      "scheduler": "crow",
+      "scheduler": "forgejo",
       "checks": [
         "compile"
       ],
-      "workflow": "repository-jobs",
+      "workflow": "ci",
       "command": [
-        "bash",
-        ".ci/run-job.sh"
-      ]
+        "ccid:run-declared-checks"
+      ],
+      "runs_on": "heavy"
     },
     "native-compile-cache": {
       "job": "native-compile-cache",
-      "scheduler": "crow",
+      "scheduler": "forgejo",
       "checks": [
         "native-compile-cache"
       ],
-      "workflow": "repository-jobs",
+      "workflow": "acceptance",
       "command": [
-        "bash",
-        ".ci/run-job.sh"
+        "ccid:run-declared-checks"
+      ],
+      "runs_on": "heavy",
+      "events": [
+        "manual"
       ]
     },
     "verify": {
       "job": "verify",
-      "scheduler": "crow",
+      "scheduler": "forgejo",
       "checks": [
         "test",
         "registry-publisher"
       ],
-      "workflow": "repository-jobs",
+      "workflow": "ci",
       "command": [
-        "bash",
-        ".ci/run-job.sh"
-      ]
+        "ccid:run-declared-checks"
+      ],
+      "runs_on": "heavy"
     }
   }
 }
