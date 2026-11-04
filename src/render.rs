@@ -684,10 +684,22 @@ fn forgejo_workflow(tool_revision: &str, workflow: &str, plans: &[&jobs::Plan]) 
     out.push_str("# The speed profile every CI compile shares: no incremental state, no debug information.\n");
     out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
     for plan in plans {
-        let mut checks = String::new();
-        for check in &plan.checks {
-            checks.push_str(&format!(" --check '{check}'"));
-        }
+        let run = if jobs::is_self_checks_command(&plan.command) {
+            let mut run = String::from("exec \"$tool\" check --repo \"$PWD\"");
+            for check in &plan.checks {
+                run.push_str(&format!(" --check '{check}'"));
+            }
+            run
+        } else {
+            // The repository's own script, with the contract the scheduler adapters give it.
+            let quote = |word: &str| format!("'{}'", word.replace('\'', "'\\''"));
+            let words: Vec<String> = plan.command.iter().map(|word| quote(word)).collect();
+            format!(
+                "export CCID_BIN=\"$tool\" CI_COMMIT_SHA=\"${{{{ github.sha }}}}\" CI_REPOSITORY_URL=\"${{{{ github.server_url }}}}/${{{{ github.repository }}}}\" CHECKS={}\n          exec {}",
+                quote(&plan.checks.join(",")),
+                words.join(" ")
+            )
+        };
         out.push_str(&format!(
             "  {}:\n    runs-on: {}\n    steps:\n",
             plan.job,
@@ -696,7 +708,7 @@ fn forgejo_workflow(tool_revision: &str, workflow: &str, plans: &[&jobs::Plan]) 
         out.push_str(
             &FORGEJO_STEPS
                 .replace("CCID_TOOL_REVISION", tool_revision)
-                .replace("CCID_CHECK_ARGUMENTS", &checks),
+                .replace("CCID_RUN", &run),
         );
     }
     out

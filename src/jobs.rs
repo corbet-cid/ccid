@@ -317,13 +317,13 @@ pub fn plan(
     // execution. Arbitrary commands are refused here (fail closed) so push
     // can never silently ignore jobs.command. Manual-only jobs (no push
     // branches, no refresh scope) skip this check and stay byte stable.
+    let effective = scheduler.unwrap_or(job.scheduler);
     let push_enabled = !job.push_branches.is_empty() || job.refresh.is_some();
-    if push_enabled && !is_self_checks_command(&job.command) {
+    if push_enabled && effective != Scheduler::Forgejo && !is_self_checks_command(&job.command) {
         return Err(failure(
             "Push jobs require explicit ccid:run-declared-checks command; arbitrary commands are refused",
         ));
     }
-    let effective = scheduler.unwrap_or(job.scheduler);
     if effective == Scheduler::Forgejo {
         validate_forgejo_job(job)?;
     } else if job.runs_on.is_some() || !job.paths.is_empty() || !job.events.is_empty() {
@@ -356,14 +356,11 @@ fn plain_token(value: &str, extra: &[u8]) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"_-.".contains(&c) || extra.contains(&c))
 }
 
-/// Forgejo jobs run the declared checks directly (`ccid check`), so they
-/// take the declared-checks command and none of the Crow-only machinery.
+/// Forgejo jobs run either the declared checks directly (`ccid check`, the
+/// `ccid:run-declared-checks` command) or the repository's own script, which
+/// receives the verified tool, commit, repository and check selection in its
+/// environment. None of the Crow-only machinery applies.
 fn validate_forgejo_job(job: &Job) -> Result<()> {
-    if !is_self_checks_command(&job.command) {
-        return Err(failure(
-            "Forgejo jobs require the ccid:run-declared-checks command",
-        ));
-    }
     if !job.secrets.is_empty() || !job.environment.is_empty() || job.refresh.is_some() {
         return Err(failure(
             "Forgejo jobs take no secrets, environment or refresh scope",

@@ -642,12 +642,6 @@ fn forgejo_jobs_refuse_crow_only_features_and_unsafe_values() {
         assert!(render(root.path(), false).is_err(), "{extra}");
         assert!(!root.path().join(".forgejo").exists(), "{extra}");
     }
-    let wrong_command = forgejo_manifest("").replace(
-        "command=['ccid:run-declared-checks']",
-        "command=['sh','x.sh']",
-    );
-    let root = forgejo_repository(&wrong_command);
-    assert!(render(root.path(), false).is_err());
     // Non-Forgejo jobs cannot carry Forgejo keys.
     let root = forgejo_repository(&manifest("verify", "crow").replace(
         "command=['sh','.ci/run.sh']\n[jobs.alternate]",
@@ -688,4 +682,21 @@ fn forgejo_events_select_the_triggers_and_must_agree_within_a_workflow() {
     let unknown = forgejo_manifest("events=['schedule']\n");
     let root = forgejo_repository(&unknown);
     assert!(render(root.path(), false).is_err());
+}
+
+#[test]
+fn forgejo_jobs_may_run_a_repository_script_with_the_adapter_contract() {
+    let manifest = forgejo_manifest("").replace(
+        "[jobs.docs]\nscheduler='forgejo'\nchecks=['lint']\nworkflow='ci'\ncommand=['ccid:run-declared-checks']",
+        "[jobs.docs]\nscheduler='forgejo'\nchecks=['lint','test']\nworkflow='ci'\ncommand=['bash',\"it's.sh\"]",
+    );
+    let root = forgejo_repository(&manifest);
+    render(root.path(), false).unwrap();
+    let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert!(text.contains(
+        "export CCID_BIN=\"$tool\" CI_COMMIT_SHA=\"${{ github.sha }}\" CI_REPOSITORY_URL=\"${{ github.server_url }}/${{ github.repository }}\" CHECKS='lint,test'\n          exec 'bash' 'it'\\''s.sh'\n"
+    ));
+    // The declared-checks job in the same workflow still runs ccid check itself.
+    assert!(text.contains("exec \"$tool\" check --repo \"$PWD\" --check 'test' --check 'lint'\n"));
+    assert!(!text.contains("CCID_RUN"));
 }

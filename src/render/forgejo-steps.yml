@@ -21,4 +21,4 @@
           test "$("$tool" source-revision)" = "$CCID_REVISION"
           export CCID_SOURCE_REVISION="${{ github.sha }}"
           "$tool" render --repo "$PWD" --check
-          exec "$tool" check --repo "$PWD"CCID_CHECK_ARGUMENTS
+          CCID_RUN
