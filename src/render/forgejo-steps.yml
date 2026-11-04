@@ -12,11 +12,19 @@
       - name: Run the declared checks
         env:
           CCID_REVISION: CCID_TOOL_REVISION
-        run: |
+CCID_TOOL_SHA_LINE        run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
           triple="${CCID_TOOL_TRIPLE:-$(uname -m)-unknown-linux-gnu}"
           tool="$CCID_TOOL_ROOT/ccid/$CCID_REVISION/$triple/ccid"
+          # A runner without the declared tool fetches the pinned release by hash: CCID_TOOL_URL (runner environment) is the package base, the digest comes from the manifest.
+          if [ ! -x "$tool" ] && [ -n "${CCID_TOOL_URL:-}" ] && [ -n "${CCID_TOOL_SHA256:-}" ]; then
+            mkdir -p "$(dirname "$tool")"
+            curl --fail --silent --show-error --location "$CCID_TOOL_URL/$CCID_REVISION/ccid-$triple" --output "$tool.part"
+            echo "$CCID_TOOL_SHA256  $tool.part" | sha256sum --check --strict
+            chmod 0555 "$tool.part"
+            mv "$tool.part" "$tool"
+          fi
           test -x "$tool" || { echo "ccid $CCID_REVISION is not provisioned at $tool" >&2; exit 2; }
           test "$("$tool" source-revision)" = "$CCID_REVISION"
           export CCID_SOURCE_REVISION="${{ github.sha }}"

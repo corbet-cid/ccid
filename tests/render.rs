@@ -700,3 +700,24 @@ fn forgejo_jobs_may_run_a_repository_script_with_the_adapter_contract() {
     assert!(text.contains("exec \"$tool\" check --repo \"$PWD\" --check 'test' --check 'lint'\n"));
     assert!(!text.contains("CCID_RUN"));
 }
+
+#[test]
+fn forgejo_tool_digest_is_validated_and_rendered_for_the_hash_checked_fetch() {
+    let digest = "ab".repeat(32);
+    let manifest = forgejo_manifest("").replace(
+        &format!("tool_revision='{PIN}'\n"),
+        &format!("tool_revision='{PIN}'\ntool_sha256='{digest}'\n"),
+    );
+    let root = forgejo_repository(&manifest);
+    render(root.path(), false).unwrap();
+    let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert!(text.contains(&format!("          CCID_TOOL_SHA256: {digest}\n")));
+    assert!(text.contains("sha256sum --check --strict"));
+    assert!(!text.contains("CCID_TOOL_SHA_LINE"));
+    let bad = forgejo_manifest("").replace(
+        &format!("tool_revision='{PIN}'\n"),
+        &format!("tool_revision='{PIN}'\ntool_sha256='XYZ'\n"),
+    );
+    let root = forgejo_repository(&bad);
+    assert!(render(root.path(), false).is_err());
+}

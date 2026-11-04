@@ -314,6 +314,10 @@ pub struct Config {
     /// output is byte-identical to the unopted template.
     #[serde(default)]
     pub secret_environment: BTreeMap<String, String>,
+    /// Forgejo workflows: lowercase hex sha256 of the pinned tool release for this
+    /// platform. A runner that lacks the declared tool may fetch it by hash.
+    #[serde(default)]
+    pub tool_sha256: Option<String>,
 }
 
 fn default_tool_secret_binary() -> String {
@@ -413,6 +417,17 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         validate_resolver_token_secret(secret)?;
     }
     validate_secret_environment(&config.secret_environment)?;
+    if let Some(digest) = &config.tool_sha256 {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(failure(
+                "[render].tool_sha256 must be 64 lowercase hex digits",
+            ));
+        }
+    }
     if parsed.jobs.is_empty() {
         return Err(failure("Rendering requires at least one declared job"));
     }
@@ -554,7 +569,12 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         }
         outputs.insert(
             PathBuf::from(format!("{FORGEJO_DIRECTORY}/{workflow}.yml")),
-            forgejo_workflow(&config.tool_revision, workflow, plans),
+            forgejo_workflow(
+                &config.tool_revision,
+                config.tool_sha256.as_deref(),
+                workflow,
+                plans,
+            ),
         );
     }
     outputs.insert(
@@ -637,7 +657,12 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
 /// (`CCID_TOOL_ROOT`, laid out `<root>/ccid/<revision>/<triple>/ccid`) and every
 /// cache endpoint through its own environment. A missing tool fails the job; a
 /// check never installs a tool and never skips.
-fn forgejo_workflow(tool_revision: &str, workflow: &str, plans: &[&jobs::Plan]) -> String {
+fn forgejo_workflow(
+    tool_revision: &str,
+    tool_sha256: Option<&str>,
+    workflow: &str,
+    plans: &[&jobs::Plan],
+) -> String {
     let mut branches: Vec<&str> = plans
         .iter()
         .flat_map(|plan| plan.push_branches.iter().map(String::as_str))
@@ -708,6 +733,12 @@ fn forgejo_workflow(tool_revision: &str, workflow: &str, plans: &[&jobs::Plan]) 
         out.push_str(
             &FORGEJO_STEPS
                 .replace("CCID_TOOL_REVISION", tool_revision)
+                .replace(
+                    "CCID_TOOL_SHA_LINE",
+                    &tool_sha256
+                        .map(|digest| format!("          CCID_TOOL_SHA256: {digest}\n"))
+                        .unwrap_or_default(),
+                )
                 .replace("CCID_RUN", &run),
         );
     }
