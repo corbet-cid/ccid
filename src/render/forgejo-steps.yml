@@ -22,10 +22,12 @@ CCID_TOOL_SHA_LINE        run: |
           # A runner without the declared tool fetches the pinned release by hash: CCID_TOOL_URL (runner environment) is the package base, the digest comes from the manifest.
           if [ ! -x "$tool" ] && [ -n "${CCID_TOOL_URL:-}" ] && [ -n "${CCID_TOOL_SHA256:-}" ]; then
             mkdir -p "$(dirname "$tool")"
-            curl --fail --silent --show-error --location "$CCID_TOOL_URL/$CCID_REVISION/ccid-$triple" --output "$tool.part"
-            echo "$CCID_TOOL_SHA256  $tool.part" | sha256sum --check --strict
-            chmod 0555 "$tool.part"
-            mv "$tool.part" "$tool"
+            # Concurrent jobs fetch the same release: each into a temp file of its own, the rename is atomic and the content is the pinned digest either way.
+            part=$(mktemp "$tool.XXXXXX")
+            curl --fail --silent --show-error --location "$CCID_TOOL_URL/$CCID_REVISION/ccid-$triple" --output "$part"
+            echo "$CCID_TOOL_SHA256  $part" | sha256sum --check --strict
+            chmod 0555 "$part"
+            mv -f "$part" "$tool"
           fi
           test -x "$tool" || { echo "ccid $CCID_REVISION is not provisioned at $tool" >&2; exit 2; }
           test "$("$tool" source-revision)" = "$CCID_REVISION"
