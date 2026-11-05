@@ -599,7 +599,8 @@ fn forgejo_jobs_render_one_native_workflow_per_workflow_name_and_no_crow_adapter
     assert!(text.contains("CARGO_INCREMENTAL: \"0\""));
     assert!(text.contains("CARGO_PROFILE_DEV_DEBUG: \"0\""));
     assert!(text.contains("  verify:\n    runs-on: heavy\n"));
-    assert!(text.contains("  docs:\n    runs-on: light\n"));
+    assert!(text.contains("  docs:\n    runs-on: light\n    steps:\n"));
+    assert!(text.contains("  verify:\n    runs-on: heavy\n    needs: [docs]\n    if: ${{ !cancelled() }}\n    steps:\n"));
     assert!(text.contains("--check 'test' --check 'lint'"));
     assert!(text.contains(&format!("CCID_REVISION: {PIN}")));
     // One job lacks paths, so the workflow takes no path filter.

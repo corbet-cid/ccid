@@ -708,6 +708,7 @@ fn forgejo_workflow(
     ));
     out.push_str("# The speed profile every CI compile shares: no incremental state, no debug information.\n");
     out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
+    let mut previous: Option<&str> = None;
     for plan in plans {
         let run = if jobs::is_self_checks_command(&plan.command) {
             // The canonical repository identity comes from the workflow, not from a git remote a runner may have rewritten to a local copy.
@@ -729,10 +730,18 @@ fn forgejo_workflow(
             )
         };
         out.push_str(&format!(
-            "  {}:\n    runs-on: {}\n    steps:\n",
+            "  {}:\n    runs-on: {}\n",
             plan.job,
             plan.runs_on.as_deref().unwrap_or("light"),
         ));
+        // The jobs of one workflow share the repository's target cache, whose lock refuses a second concurrent check: they run one after the other, each regardless of the earlier result.
+        if let Some(before) = previous {
+            out.push_str(&format!(
+                "    needs: [{before}]\n    if: ${{{{ !cancelled() }}}}\n"
+            ));
+        }
+        previous = Some(plan.job.as_str());
+        out.push_str("    steps:\n");
         out.push_str(
             &FORGEJO_STEPS
                 .replace("CCID_TOOL_REVISION", tool_revision)
