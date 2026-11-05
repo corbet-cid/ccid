@@ -36,8 +36,8 @@ jobs:
           git clean --quiet -ffdx
       - name: Run the declared checks
         env:
-          CCID_REVISION: f9705e144d6c2c0964d1090126ba47309dfaaa58
-          CCID_TOOL_SHA256: 02c92da950bdfe1b816fb9b16bb7e473bd9092b91620c056ecd17a1d2d1a7b86
+          CCID_REVISION: da31ec5f9b493ba83820279b44c3afa8d7f12bfe
+          CCID_TOOL_SHA256: 472055a961d88926b2610920336afbe37ae7af809828a3009c18394c8379084b
         run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
@@ -57,6 +57,7 @@ jobs:
           test "$("$tool" source-revision)" = "$CCID_REVISION"
           export CCID_SOURCE_REVISION="${{ github.sha }}"
           "$tool" render --repo "$PWD" --check
+          export CI_COMMIT_SHA="${{ github.sha }}" CI_REPOSITORY_URL="${{ github.server_url }}/${{ github.repository }}"
           exec "$tool" check --repo "$PWD" --check 'build'
   compile:
     runs-on: heavy
@@ -76,8 +77,8 @@ jobs:
           git clean --quiet -ffdx
       - name: Run the declared checks
         env:
-          CCID_REVISION: f9705e144d6c2c0964d1090126ba47309dfaaa58
-          CCID_TOOL_SHA256: 02c92da950bdfe1b816fb9b16bb7e473bd9092b91620c056ecd17a1d2d1a7b86
+          CCID_REVISION: da31ec5f9b493ba83820279b44c3afa8d7f12bfe
+          CCID_TOOL_SHA256: 472055a961d88926b2610920336afbe37ae7af809828a3009c18394c8379084b
         run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
@@ -97,6 +98,7 @@ jobs:
           test "$("$tool" source-revision)" = "$CCID_REVISION"
           export CCID_SOURCE_REVISION="${{ github.sha }}"
           "$tool" render --repo "$PWD" --check
+          export CI_COMMIT_SHA="${{ github.sha }}" CI_REPOSITORY_URL="${{ github.server_url }}/${{ github.repository }}"
           exec "$tool" check --repo "$PWD" --check 'compile'
   verify:
     runs-on: heavy
@@ -116,8 +118,8 @@ jobs:
           git clean --quiet -ffdx
       - name: Run the declared checks
         env:
-          CCID_REVISION: f9705e144d6c2c0964d1090126ba47309dfaaa58
-          CCID_TOOL_SHA256: 02c92da950bdfe1b816fb9b16bb7e473bd9092b91620c056ecd17a1d2d1a7b86
+          CCID_REVISION: da31ec5f9b493ba83820279b44c3afa8d7f12bfe
+          CCID_TOOL_SHA256: 472055a961d88926b2610920336afbe37ae7af809828a3009c18394c8379084b
         run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
@@ -137,4 +139,5 @@ jobs:
           test "$("$tool" source-revision)" = "$CCID_REVISION"
           export CCID_SOURCE_REVISION="${{ github.sha }}"
           "$tool" render --repo "$PWD" --check
+          export CI_COMMIT_SHA="${{ github.sha }}" CI_REPOSITORY_URL="${{ github.server_url }}/${{ github.repository }}"
           exec "$tool" check --repo "$PWD" --check 'test' --check 'registry-publisher'
