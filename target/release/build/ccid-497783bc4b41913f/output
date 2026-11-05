@@ -1,3 +1,0 @@
-cargo:rerun-if-env-changed=CCID_SOURCE_REVISION
-cargo:rerun-if-env-changed=CI_COMMIT_SHA
-cargo:rustc-env=CCID_SOURCE_REVISION=unversioned
