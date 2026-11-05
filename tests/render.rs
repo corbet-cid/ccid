@@ -789,7 +789,9 @@ fn forgejo_fetch_step_retries_the_copy_then_asks_the_forge() {
     let root = forgejo_repository(&forgejo_manifest("runs_on='heavy'\n"));
     render(root.path(), false).unwrap();
     let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
-    let start = text.find("          fetched=").expect("retry block rendered");
+    let start = text
+        .find("          fetched=")
+        .expect("retry block rendered");
     let end = text[start..].find("cannot fetch").unwrap() + start;
     let end = start + text[start..end].len() + text[end..].find('\n').unwrap();
     let block: String = text[start..end]
@@ -799,7 +801,12 @@ fn forgejo_fetch_step_retries_the_copy_then_asks_the_forge() {
         .collect::<Vec<_>>()
         .join("\n");
     // `fetch` is the step's own function; here it fails `fails` times (the copy lags), then works. The forge fallback is told apart by GIT_CONFIG_COUNT=0.
-    for (fails, forge_only, ok) in [(0, false, true), (2, false, true), (4, true, true), (9, false, false)] {
+    for (fails, forge_only, ok) in [
+        (0, false, true),
+        (2, false, true),
+        (4, true, true),
+        (9, false, false),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("sleep");
         fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
@@ -811,7 +818,15 @@ fn forgejo_fetch_step_retries_the_copy_then_asks_the_forge() {
             c = counter.display(),
             forge = u8::from(forge_only),
         );
-        let status = std::process::Command::new("bash").arg("-c").arg(&script).status().unwrap();
-        assert_eq!(status.success(), ok, "fails={fails} forge_only={forge_only}");
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
+        assert_eq!(
+            status.success(),
+            ok,
+            "fails={fails} forge_only={forge_only}"
+        );
     }
 }
