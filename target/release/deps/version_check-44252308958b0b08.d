@@ -1,0 +1,10 @@
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/version_check-44252308958b0b08.d: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/version.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/channel.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/date.rs
+
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/libversion_check-44252308958b0b08.rlib: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/version.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/channel.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/date.rs
+
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/libversion_check-44252308958b0b08.rmeta: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/version.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/channel.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/date.rs
+
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/lib.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/version.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/channel.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/version_check-0.9.5/src/date.rs:

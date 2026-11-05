@@ -1,0 +1,11 @@
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/bitflags-39ab91fce48e69b1.d: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/iter.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/parser.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/traits.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/public.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/internal.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/external.rs
+
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/libbitflags-39ab91fce48e69b1.rmeta: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/iter.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/parser.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/traits.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/public.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/internal.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/external.rs
+
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/lib.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/iter.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/parser.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/traits.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/public.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/internal.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/bitflags-2.13.2/src/external.rs:

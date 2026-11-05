@@ -1,0 +1,10 @@
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/anstyle-d5c6d400afaa1e10.d: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/macros.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/color.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/effect.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/reset.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/style.rs
+
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/libanstyle-d5c6d400afaa1e10.rmeta: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/macros.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/color.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/effect.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/reset.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/style.rs
+
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/lib.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/macros.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/color.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/effect.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/reset.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-1.0.14/src/style.rs:

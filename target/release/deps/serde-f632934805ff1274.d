@@ -1,0 +1,14 @@
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/serde-f632934805ff1274.d: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/integer128.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/mod.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/de.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/ser.rs /home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/build/serde-ecaaa211a805c7b1/out/private.rs
+
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/libserde-f632934805ff1274.rlib: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/integer128.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/mod.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/de.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/ser.rs /home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/build/serde-ecaaa211a805c7b1/out/private.rs
+
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/libserde-f632934805ff1274.rmeta: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/integer128.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/mod.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/de.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/ser.rs /home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/build/serde-ecaaa211a805c7b1/out/private.rs
+
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/lib.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/integer128.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/mod.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/de.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/serde-1.0.229/src/private/ser.rs:
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/build/serde-ecaaa211a805c7b1/out/private.rs:
+
+# env-dep:OUT_DIR=/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/build/serde-ecaaa211a805c7b1/out

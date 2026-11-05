@@ -4,7 +4,7 @@ const PIN: &str = "1234567890abcdef1234567890abcdef12345678";
 
 fn manifest(workflow: &str, scheduler: &str) -> String {
     format!(
-        "schema=1\nproject='fixture'\n[render]\ntool_revision='{PIN}'\n\
+        "schema=1\nproject='fixture'\n[render]\ntool_revision='{PIN}'\nallow_crow=true\n\
          [checks.test]\nkind='commands'\ncommands=[['true']]\n\
          [jobs.verify]\nchecks=['test']\nworkflow='{workflow}'\ncommand=['sh','.ci/run.sh']\n\
          [jobs.alternate]\nscheduler='{scheduler}'\nchecks=['test']\nworkflow='{workflow}'\ncommand=['sh','.ci/run.sh']\n"
@@ -203,7 +203,7 @@ fn generated_shell_preserves_request_data_and_binds_the_crow_source() {
 fn push_manifest() -> String {
     format!(
         "schema=1\nproject='fixture'\nrepository='https://forge.example.invalid/cpkg/demo.git'\n\
-         [render]\ntool_revision='{PIN}'\n\
+         [render]\ntool_revision='{PIN}'\nallow_crow=true\n\
          [checks.test]\nkind='commands'\ncommands=[['true']]\n\
          [jobs.fast]\nchecks=['test']\nworkflow='manual'\ncommand=['ccid:run-declared-checks']\n\
          push_branches=['v01']\n\
@@ -299,7 +299,9 @@ fn invalid_push_declarations_fail_before_any_rendered_file_changes() {
         ),
         base.replace(
             &format!("tool_revision='{PIN}'"),
-            &format!("tool_revision='{PIN}'\ntool_secret_binary='lowercase-secret'"),
+            &format!(
+                "tool_revision='{PIN}'\nallow_crow=true\ntool_secret_binary='lowercase-secret'"
+            ),
         ),
     ] {
         fs::write(&config, invalid).unwrap();
@@ -364,7 +366,7 @@ fn resolver_token_secret_opt_in_projects_only_the_named_reference() {
 
 fn secret_manifest(declaration: &str, release_secrets: &str) -> String {
     format!(
-        "schema=1\nproject='fixture'\n[render]\ntool_revision='{PIN}'\n{declaration}\n\
+        "schema=1\nproject='fixture'\n[render]\ntool_revision='{PIN}'\nallow_crow=true\n{declaration}\n\
          [checks.test]\nkind='commands'\ncommands=[['true']]\n\
          [jobs.verify]\nchecks=['test']\nworkflow='verify'\ncommand=['sh','.ci/run.sh']\n\
          [jobs.release]\nchecks=['test']\nworkflow='verify'\ncommand=['sh','.ci/run.sh']\n{release_secrets}\n"
@@ -570,7 +572,7 @@ fn verdict_declarations_are_validated_and_absent_gating_posts_no_verdict() {
 
 fn forgejo_manifest(job_extra: &str) -> String {
     format!(
-        "schema=1\nproject='fixture'\n[render]\ntool_revision='{PIN}'\n\
+        "schema=1\nproject='fixture'\n[render]\ntool_revision='{PIN}'\nallow_crow=true\n\
          [checks.test]\nkind='commands'\ncommands=[['true']]\n\
          [checks.lint]\nkind='commands'\ncommands=[['true']]\n\
          [jobs.verify]\nscheduler='forgejo'\nchecks=['test','lint']\nworkflow='ci'\ncommand=['ccid:run-declared-checks']\n{job_extra}\
@@ -705,8 +707,8 @@ fn forgejo_jobs_may_run_a_repository_script_with_the_adapter_contract() {
 fn forgejo_tool_digest_is_validated_and_rendered_for_the_hash_checked_fetch() {
     let digest = "ab".repeat(32);
     let manifest = forgejo_manifest("").replace(
-        &format!("tool_revision='{PIN}'\n"),
-        &format!("tool_revision='{PIN}'\ntool_sha256='{digest}'\n"),
+        &format!("tool_revision='{PIN}'\nallow_crow=true\n"),
+        &format!("tool_revision='{PIN}'\nallow_crow=true\ntool_sha256='{digest}'\n"),
     );
     let root = forgejo_repository(&manifest);
     render(root.path(), false).unwrap();
@@ -715,8 +717,8 @@ fn forgejo_tool_digest_is_validated_and_rendered_for_the_hash_checked_fetch() {
     assert!(text.contains("sha256sum --check --strict"));
     assert!(!text.contains("CCID_TOOL_SHA_LINE"));
     let bad = forgejo_manifest("").replace(
-        &format!("tool_revision='{PIN}'\n"),
-        &format!("tool_revision='{PIN}'\ntool_sha256='XYZ'\n"),
+        &format!("tool_revision='{PIN}'\nallow_crow=true\n"),
+        &format!("tool_revision='{PIN}'\nallow_crow=true\ntool_sha256='XYZ'\n"),
     );
     let root = forgejo_repository(&bad);
     assert!(render(root.path(), false).is_err());
@@ -760,4 +762,23 @@ fn forgejo_jobs_export_their_declared_environment_before_the_checks() {
     render(root.path(), false).unwrap();
     let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
     assert!(text.contains("export CI_JOBS='2'\n          export QUOTED='it'\\''s'\n          "));
+}
+
+#[test]
+fn crow_is_refused_unless_the_manifest_keeps_it_alive_and_forgejo_and_argo_are_not() {
+    let crow = manifest("verify", "crow").replace("allow_crow=true\n", "");
+    let root = forgejo_repository(&crow);
+    let error = render(root.path(), false).unwrap_err().to_string();
+    assert!(error.contains("Crow is retired"), "{error}");
+    assert!(!root.path().join(".crow").exists());
+    assert!(!root.path().join(".ci/jobs.json").exists());
+    // the escape hatch keeps old repositories rendering
+    render(
+        forgejo_repository(&manifest("verify", "crow")).path(),
+        false,
+    )
+    .unwrap();
+    // a Forgejo-only manifest needs no flag
+    let forgejo = forgejo_manifest("").replace("allow_crow=true\n", "");
+    render(forgejo_repository(&forgejo).path(), false).unwrap();
 }

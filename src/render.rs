@@ -318,6 +318,11 @@ pub struct Config {
     /// platform. A runner that lacks the declared tool may fetch it by hash.
     #[serde(default)]
     pub tool_sha256: Option<String>,
+    /// Crow is retired as a scheduler: this renderer refuses Crow jobs, Crow
+    /// push adapters and push-consumer fan-out unless the manifest says so.
+    /// The escape hatch exists for repositories that have not moved yet.
+    #[serde(default)]
+    pub allow_crow: bool,
 }
 
 fn default_tool_secret_binary() -> String {
@@ -472,6 +477,24 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             )?,
         );
         inventory.jobs.insert(name.clone(), plan);
+    }
+    if !config.allow_crow {
+        let crow_jobs: Vec<&str> = inventory
+            .jobs
+            .iter()
+            .filter(|(_, plan)| plan.scheduler == jobs::Scheduler::Crow)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !crow_jobs.is_empty() || !parsed.push_consumer.is_empty() {
+            return Err(failure(format!(
+                "Crow is retired as a scheduler: jobs {crow_jobs:?}{} need scheduler = \"forgejo\" (or [render] allow_crow = true until the repository moves)",
+                if parsed.push_consumer.is_empty() {
+                    ""
+                } else {
+                    " and push_consumer entries (no Forgejo fan-out exists yet)"
+                }
+            )));
+        }
     }
     // Push adapters are keyed per job and branch so the event carries no job
     // selection: the filename and baked command name it. Only opted-in jobs

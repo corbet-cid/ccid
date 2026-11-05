@@ -112,3 +112,11 @@ triple), and cache endpoints arrive through the runner environment. A missing or
 mismatched tool fails the job; a check never installs a tool. Jobs of one
 workflow must agree on `events`. Forgejo jobs take no secrets, environment or
 refresh scope; switching a job from Crow removes the owned Crow adapter.
+
+## Crow is retired
+
+From this renderer on, `ccid render` refuses jobs that still select Crow (the default
+`scheduler`), Crow push adapters and `[push_consumer.*]` fan-out: set
+`scheduler = "forgejo"` on the job. `[render] allow_crow = true` keeps the old rendering for a
+repository that has not moved yet; it is the only way to render a Crow adapter and is meant to
+disappear. Argo jobs are untouched. There is no Forgejo equivalent of `push_consumer` yet.

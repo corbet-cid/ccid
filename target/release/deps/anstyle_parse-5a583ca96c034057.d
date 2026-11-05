@@ -1,0 +1,9 @@
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/anstyle_parse-5a583ca96c034057.d: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/params.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/mod.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/definitions.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/table.rs
+
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/libanstyle_parse-5a583ca96c034057.rmeta: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/params.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/mod.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/definitions.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/table.rs
+
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/lib.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/params.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/mod.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/definitions.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/anstyle-parse-1.0.0/src/state/table.rs:

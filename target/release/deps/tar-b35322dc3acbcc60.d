@@ -1,0 +1,12 @@
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/tar-b35322dc3acbcc60.d: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/archive.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/builder.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/entry.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/entry_type.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/error.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/header.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/pax.rs
+
+/home/richc/agents/projects/forge/worktrees/en1-ccid/target/release/deps/libtar-b35322dc3acbcc60.rmeta: /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/lib.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/archive.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/builder.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/entry.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/entry_type.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/error.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/header.rs /home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/pax.rs
+
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/lib.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/archive.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/builder.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/entry.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/entry_type.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/error.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/header.rs:
+/home/richc/.cargo/registry/src/crates.cache.corbet.ch-147d6231fc06fc70/tar-0.4.46/src/pax.rs:
