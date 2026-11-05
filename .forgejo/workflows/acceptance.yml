@@ -33,8 +33,8 @@ jobs:
           git clean --quiet -ffdx
       - name: Run the declared checks
         env:
-          CCID_REVISION: bd9aff07073185fb0a3503bab331aedefb6d8fd2
-          CCID_TOOL_SHA256: 38c0eadf2a2adb406f83c7d4892bc01a0a10b95671e1e671358e43a257bb5d23
+          CCID_REVISION: 4cd68908acb198a0b01886a3d8d1dfe8155b1453
+          CCID_TOOL_SHA256: 299a7a5494b4690cbbf86f6f328ad02f04e97854e1a58ae71f217196e2171620
         run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
@@ -56,6 +56,14 @@ jobs:
           "$tool" render --repo "$PWD" --check
           export CI_COMMIT_SHA="${{ github.sha }}" CI_REPOSITORY_URL="${{ github.server_url }}/${{ github.repository }}"
           exec "$tool" check --repo "$PWD" --check 'cache-acceptance'
+      - name: Archive the locked flake inputs
+        run: |
+          set -eu
+          if [ -f flake.lock ] && [ -n "${CCID_FLAKE_ARCHIVE_PUSH:-}" ]; then
+            nix flake archive --json . | jq -r '[.. | .path? // empty] | unique | .[]' | xargs --no-run-if-empty $CCID_FLAKE_ARCHIVE_PUSH
+          else
+            echo "no flake.lock or no archive target on this runner: nothing archived"
+          fi
   native-compile-cache:
     runs-on: heavy
     needs: [cache-acceptance]
@@ -76,8 +84,8 @@ jobs:
           git clean --quiet -ffdx
       - name: Run the declared checks
         env:
-          CCID_REVISION: bd9aff07073185fb0a3503bab331aedefb6d8fd2
-          CCID_TOOL_SHA256: 38c0eadf2a2adb406f83c7d4892bc01a0a10b95671e1e671358e43a257bb5d23
+          CCID_REVISION: 4cd68908acb198a0b01886a3d8d1dfe8155b1453
+          CCID_TOOL_SHA256: 299a7a5494b4690cbbf86f6f328ad02f04e97854e1a58ae71f217196e2171620
         run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
@@ -99,3 +107,11 @@ jobs:
           "$tool" render --repo "$PWD" --check
           export CI_COMMIT_SHA="${{ github.sha }}" CI_REPOSITORY_URL="${{ github.server_url }}/${{ github.repository }}"
           exec "$tool" check --repo "$PWD" --check 'native-compile-cache'
+      - name: Archive the locked flake inputs
+        run: |
+          set -eu
+          if [ -f flake.lock ] && [ -n "${CCID_FLAKE_ARCHIVE_PUSH:-}" ]; then
+            nix flake archive --json . | jq -r '[.. | .path? // empty] | unique | .[]' | xargs --no-run-if-empty $CCID_FLAKE_ARCHIVE_PUSH
+          else
+            echo "no flake.lock or no archive target on this runner: nothing archived"
+          fi

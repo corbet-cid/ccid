@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "generator": "ccid render v1",
-  "tool_revision": "bd9aff07073185fb0a3503bab331aedefb6d8fd2",
-  "manifest_sha256": "c97a674ac141374be0a262faa50ed242e9c0c91351e5722ee5f38ba132174c38",
+  "tool_revision": "4cd68908acb198a0b01886a3d8d1dfe8155b1453",
+  "manifest_sha256": "0c846475f190d4d437405f1b447f20bac788d61b9628e9586f61d8f42e3fffb7",
   "jobs": {
     "build": {
       "job": "build",
@@ -14,7 +14,8 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy"
+      "runs_on": "heavy",
+      "archive_inputs": true
     },
     "cache-acceptance": {
       "job": "cache-acceptance",
@@ -29,7 +30,8 @@
       "runs_on": "heavy",
       "events": [
         "manual"
-      ]
+      ],
+      "archive_inputs": true
     },
     "compile": {
       "job": "compile",
@@ -41,7 +43,8 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy"
+      "runs_on": "heavy",
+      "archive_inputs": true
     },
     "native-compile-cache": {
       "job": "native-compile-cache",
@@ -56,7 +59,8 @@
       "runs_on": "heavy",
       "events": [
         "manual"
-      ]
+      ],
+      "archive_inputs": true
     },
     "verify": {
       "job": "verify",
@@ -69,7 +73,8 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy"
+      "runs_on": "heavy",
+      "archive_inputs": true
     }
   }
 }
