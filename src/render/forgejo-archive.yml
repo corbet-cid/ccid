@@ -1,6 +1,7 @@
       - name: Archive the locked flake inputs
         run: |
           set -eu
+          cd "${CCID_SOURCE_DIR:-.}"
           if [ -f flake.lock ] && [ -n "${CCID_FLAKE_ARCHIVE_PUSH:-}" ]; then
             nix flake archive --json . | jq -r '[.. | .path? // empty] | unique | .[]' | xargs --no-run-if-empty $CCID_FLAKE_ARCHIVE_PUSH
           else
