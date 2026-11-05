@@ -722,3 +722,22 @@ fn forgejo_tool_digest_is_validated_and_rendered_for_the_hash_checked_fetch() {
     let root = forgejo_repository(&bad);
     assert!(render(root.path(), false).is_err());
 }
+
+#[test]
+fn forgejo_archive_inputs_adds_one_post_step_to_that_job_only() {
+    let declared = forgejo_manifest("archive_inputs=true\n");
+    let root = forgejo_repository(&declared);
+    render(root.path(), false).unwrap();
+    let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert_eq!(text.matches("Archive the locked flake inputs").count(), 1);
+    assert!(text.contains("nix flake archive --json ."));
+    assert!(text.contains("CCID_FLAKE_ARCHIVE_PUSH"));
+    let inventory: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(".ci/jobs.json")).unwrap()).unwrap();
+    assert_eq!(inventory["jobs"]["verify"]["archive_inputs"], true);
+    let crow = forgejo_repository(&manifest("verify", "crow").replace(
+        "command=['sh','.ci/run.sh']\n[jobs.alternate]",
+        "command=['sh','.ci/run.sh']\narchive_inputs=true\n[jobs.alternate]",
+    ));
+    assert!(render(crow.path(), false).is_err());
+}

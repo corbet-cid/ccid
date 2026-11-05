@@ -753,11 +753,17 @@ fn forgejo_workflow(
                 )
                 .replace("CCID_RUN", &run),
         );
+        if plan.archive_inputs {
+            out.push_str(FORGEJO_ARCHIVE_STEP);
+        }
     }
     out
 }
 
 const FORGEJO_STEPS: &str = include_str!("render/forgejo-steps.yml");
+
+/// After the checks passed: the locked flake inputs go to the target the runner names, so other runners substitute them. A runner without a target says so and moves on.
+const FORGEJO_ARCHIVE_STEP: &str = include_str!("render/forgejo-archive.yml");
 
 /// Single-pass template substitution: tool revision, secret names, then
 /// caller pairs. Values are pre-validated (no CCID_, no shell metachars),

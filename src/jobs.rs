@@ -58,6 +58,10 @@ pub struct Job {
     /// `push`, `pull_request` and `manual`. Empty (the default) means all three.
     #[serde(default)]
     events: Vec<String>,
+    /// Forgejo jobs only: after the checks pass, push the locked flake inputs of the repository
+    /// (`nix flake archive`) to the target the runner names in `CCID_FLAKE_ARCHIVE_PUSH`.
+    #[serde(default)]
+    archive_inputs: bool,
 }
 
 /// Manifest-owned newest-head refresh scope: update every first-party git
@@ -108,6 +112,9 @@ pub struct Plan {
     /// Forgejo trigger events; skipped when empty (all of them).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<String>,
+    /// Forgejo: archive the locked flake inputs after the checks; skipped when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub archive_inputs: bool,
     /// Declared secret variables this job must not see; `execute` strips them.
     #[serde(skip)]
     pub withheld: Vec<String>,
@@ -326,8 +333,14 @@ pub fn plan(
     }
     if effective == Scheduler::Forgejo {
         validate_forgejo_job(job)?;
-    } else if job.runs_on.is_some() || !job.paths.is_empty() || !job.events.is_empty() {
-        return Err(failure("runs_on, paths and events belong to Forgejo jobs"));
+    } else if job.runs_on.is_some()
+        || !job.paths.is_empty()
+        || !job.events.is_empty()
+        || job.archive_inputs
+    {
+        return Err(failure(
+            "runs_on, paths, events and archive_inputs belong to Forgejo jobs",
+        ));
     }
     Ok(Plan {
         job: name.into(),
@@ -342,6 +355,7 @@ pub fn plan(
         runs_on: job.runs_on.clone(),
         paths: job.paths.clone(),
         events: job.events.clone(),
+        archive_inputs: job.archive_inputs,
         withheld,
     })
 }
