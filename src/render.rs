@@ -710,6 +710,13 @@ fn forgejo_workflow(
     out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
     let mut previous: Option<&str> = None;
     for plan in plans {
+        // The job's declared environment (already validated: no reserved or secret names), shell-quoted, before the checks run.
+        let quote_value = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let declared: String = plan
+            .environment
+            .iter()
+            .map(|(key, value)| format!("export {key}={}\n          ", quote_value(value)))
+            .collect();
         let run = if jobs::is_self_checks_command(&plan.command) {
             // The canonical repository identity comes from the workflow, not from a git remote a runner may have rewritten to a local copy.
             let mut run = String::from(
@@ -751,7 +758,7 @@ fn forgejo_workflow(
                         .map(|digest| format!("          CCID_TOOL_SHA256: {digest}\n"))
                         .unwrap_or_default(),
                 )
-                .replace("CCID_RUN", &run),
+                .replace("CCID_RUN", &format!("{declared}{run}")),
         );
         if plan.archive_inputs {
             out.push_str(FORGEJO_ARCHIVE_STEP);

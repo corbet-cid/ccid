@@ -375,10 +375,8 @@ fn plain_token(value: &str, extra: &[u8]) -> bool {
 /// receives the verified tool, commit, repository and check selection in its
 /// environment. None of the Crow-only machinery applies.
 fn validate_forgejo_job(job: &Job) -> Result<()> {
-    if !job.secrets.is_empty() || !job.environment.is_empty() || job.refresh.is_some() {
-        return Err(failure(
-            "Forgejo jobs take no secrets, environment or refresh scope",
-        ));
+    if !job.secrets.is_empty() || job.refresh.is_some() {
+        return Err(failure("Forgejo jobs take no secrets or refresh scope"));
     }
     if let Some(label) = &job.runs_on {
         if !plain_token(label, b"") {

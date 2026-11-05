@@ -634,7 +634,6 @@ fn forgejo_workflows_filter_paths_only_when_every_job_declares_them() {
 #[test]
 fn forgejo_jobs_refuse_crow_only_features_and_unsafe_values() {
     for extra in [
-        "environment={A='b'}\n",
         "runs_on='heavy label'\n",
         "runs_on='CCID_x'\n",
         "paths=['a b']\n",
@@ -740,4 +739,13 @@ fn forgejo_archive_inputs_adds_one_post_step_to_that_job_only() {
         "command=['sh','.ci/run.sh']\narchive_inputs=true\n[jobs.alternate]",
     ));
     assert!(render(crow.path(), false).is_err());
+}
+
+#[test]
+fn forgejo_jobs_export_their_declared_environment_before_the_checks() {
+    let manifest = forgejo_manifest("environment={ CI_JOBS='2', QUOTED=\"it's\" }\n");
+    let root = forgejo_repository(&manifest);
+    render(root.path(), false).unwrap();
+    let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert!(text.contains("export CI_JOBS='2'\n          export QUOTED='it'\\''s'\n          "));
 }
