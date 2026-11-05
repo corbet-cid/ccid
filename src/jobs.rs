@@ -60,8 +60,10 @@ pub struct Job {
     events: Vec<String>,
     /// Forgejo jobs only: after the checks pass, push the locked flake inputs of the repository
     /// (`nix flake archive`) to the target the runner names in `CCID_FLAKE_ARCHIVE_PUSH`.
+    /// On by default for Forgejo jobs (every CI result is cached once; a runner without a target
+    /// archives nothing and says so); `archive_inputs=false` opts a job out.
     #[serde(default)]
-    archive_inputs: bool,
+    archive_inputs: Option<bool>,
 }
 
 /// Manifest-owned newest-head refresh scope: update every first-party git
@@ -336,7 +338,7 @@ pub fn plan(
     } else if job.runs_on.is_some()
         || !job.paths.is_empty()
         || !job.events.is_empty()
-        || job.archive_inputs
+        || job.archive_inputs == Some(true)
     {
         return Err(failure(
             "runs_on, paths, events and archive_inputs belong to Forgejo jobs",
@@ -355,7 +357,7 @@ pub fn plan(
         runs_on: job.runs_on.clone(),
         paths: job.paths.clone(),
         events: job.events.clone(),
-        archive_inputs: job.archive_inputs,
+        archive_inputs: job.archive_inputs.unwrap_or(effective == Scheduler::Forgejo),
         withheld,
     })
 }

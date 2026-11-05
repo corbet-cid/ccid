@@ -723,17 +723,29 @@ fn forgejo_tool_digest_is_validated_and_rendered_for_the_hash_checked_fetch() {
 }
 
 #[test]
-fn forgejo_archive_inputs_adds_one_post_step_to_that_job_only() {
-    let declared = forgejo_manifest("archive_inputs=true\n");
-    let root = forgejo_repository(&declared);
+fn forgejo_jobs_archive_their_flake_inputs_by_default_and_a_job_can_opt_out() {
+    // Every Forgejo job gets the archive post-step unless it declares archive_inputs=false.
+    let root = forgejo_repository(&forgejo_manifest(""));
     render(root.path(), false).unwrap();
     let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
-    assert_eq!(text.matches("Archive the locked flake inputs").count(), 1);
+    assert_eq!(text.matches("Archive the locked flake inputs").count(), 2);
     assert!(text.contains("nix flake archive --json ."));
     assert!(text.contains("CCID_FLAKE_ARCHIVE_PUSH"));
     let inventory: serde_json::Value =
         serde_json::from_slice(&fs::read(root.path().join(".ci/jobs.json")).unwrap()).unwrap();
     assert_eq!(inventory["jobs"]["verify"]["archive_inputs"], true);
+    assert_eq!(inventory["jobs"]["docs"]["archive_inputs"], true);
+
+    let opted_out = forgejo_repository(&forgejo_manifest("archive_inputs=false\n"));
+    render(opted_out.path(), false).unwrap();
+    let text = fs::read_to_string(opted_out.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert_eq!(text.matches("Archive the locked flake inputs").count(), 1);
+    let inventory: serde_json::Value =
+        serde_json::from_slice(&fs::read(opted_out.path().join(".ci/jobs.json")).unwrap()).unwrap();
+    assert!(inventory["jobs"]["verify"].get("archive_inputs").is_none());
+    assert_eq!(inventory["jobs"]["docs"]["archive_inputs"], true);
+
+    // A non-Forgejo job still refuses to declare it.
     let crow = forgejo_repository(&manifest("verify", "crow").replace(
         "command=['sh','.ci/run.sh']\n[jobs.alternate]",
         "command=['sh','.ci/run.sh']\narchive_inputs=true\n[jobs.alternate]",
