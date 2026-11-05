@@ -4,12 +4,12 @@
           CCID_REVISION: CCID_TOOL_REVISION
 CCID_TOOL_SHA_LINE        run: |
           set -eu
-          # A runner may name CCID_SOURCE_ROOT: the source then lives in a stable directory per repository and slot instead of the per-task directory, so absolute source
+          # A runner may name CCID_SOURCE_ROOT: the source then lives in a stable directory per repository, job and slot instead of the per-task directory, so absolute source
           # paths (cargo's CARGO_MANIFEST_DIR, which sccache puts into every key) repeat from run to run and the compile caches hit. A slot is claimed by a lock directory that
           # holds the pid and start time of this shell (the shell becomes the check by exec, so the pid lives as long as the job; no file descriptor is inherited by daemons).
           if [ -n "${CCID_SOURCE_ROOT:-}" ]; then
             slots="${CCID_SOURCE_SLOTS:-2}"
-            base="$CCID_SOURCE_ROOT/${{ github.repository }}"
+            base="$CCID_SOURCE_ROOT/${{ github.repository }}/${{ github.job }}"
             mkdir -p "$base"
             me="$$ $(cut -d' ' -f22 /proc/$$/stat)"
             deadline=$(( $(date +%s) + ${CI_TIMEOUT:-2700} ))
@@ -43,7 +43,11 @@ CCID_TOOL_SHA_LINE        run: |
           fetch() { git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" fetch --quiet --depth 1 origin "${{ github.sha }}"; }
           # A runner may route the fetch to a local copy of the repository (its own git configuration); that copy can lag the push by seconds. Then ask the forge itself.
           fetch || { echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2; GIT_CONFIG_COUNT=0 fetch; }
-          git checkout --quiet --force --detach FETCH_HEAD
+          # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the fetch above carries the token, so does the LFS transfer).
+          GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
+          if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
+            git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" lfs pull origin
+          fi
           git clean --quiet -ffdx
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
           triple="${CCID_TOOL_TRIPLE:-$(uname -m)-unknown-linux-gnu}"
