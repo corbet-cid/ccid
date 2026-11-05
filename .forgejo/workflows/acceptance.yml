@@ -34,7 +34,7 @@ jobs:
       - name: Run the declared checks
         env:
           CCID_REVISION: 4cd68908acb198a0b01886a3d8d1dfe8155b1453
-          CCID_TOOL_SHA256: 299a7a5494b4690cbbf86f6f328ad02f04e97854e1a58ae71f217196e2171620
+          CCID_TOOL_SHA256: 1f6587637f6db365d9caae9e27e3da716aefc634ff0812ba0a377a9468f15900
         run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
@@ -85,7 +85,7 @@ jobs:
       - name: Run the declared checks
         env:
           CCID_REVISION: 4cd68908acb198a0b01886a3d8d1dfe8155b1453
-          CCID_TOOL_SHA256: 299a7a5494b4690cbbf86f6f328ad02f04e97854e1a58ae71f217196e2171620
+          CCID_TOOL_SHA256: 1f6587637f6db365d9caae9e27e3da716aefc634ff0812ba0a377a9468f15900
         run: |
           set -eu
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
