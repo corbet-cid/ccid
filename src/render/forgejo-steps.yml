@@ -42,7 +42,20 @@ CCID_TOOL_SHA_LINE        run: |
           git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
           fetch() { git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" fetch --quiet --depth 1 origin "${{ github.sha }}"; }
           # A runner may route the fetch to a local copy of the repository (its own git configuration); that copy can lag the push by seconds. Then ask the forge itself.
-          fetch || { echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2; GIT_CONFIG_COUNT=0 fetch; }
+          # Seconds after a push the copy may not have the commit yet ("not our ref"): ask it again a few times, then the forge itself (same commit id, so the same verification).
+          fetched=
+          for attempt in 1 2 3; do
+            if fetch; then fetched=1; break; fi
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$fetched" ]; then
+            echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2
+            for attempt in 1 2 3; do
+              if GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
+              [ "$attempt" -lt 3 ] && sleep 5
+            done
+          fi
+          [ -n "$fetched" ] || { echo "cannot fetch ${{ github.sha }}" >&2; exit 2; }
           # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the fetch above carries the token, so does the LFS transfer).
           GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
           if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
