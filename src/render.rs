@@ -710,7 +710,10 @@ fn forgejo_workflow(
     out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
     for plan in plans {
         let run = if jobs::is_self_checks_command(&plan.command) {
-            let mut run = String::from("exec \"$tool\" check --repo \"$PWD\"");
+            // The canonical repository identity comes from the workflow, not from a git remote a runner may have rewritten to a local copy.
+            let mut run = String::from(
+                "export CI_COMMIT_SHA=\"${{ github.sha }}\" CI_REPOSITORY_URL=\"${{ github.server_url }}/${{ github.repository }}\"\n          exec \"$tool\" check --repo \"$PWD\"",
+            );
             for check in &plan.checks {
                 run.push_str(&format!(" --check '{check}'"));
             }
