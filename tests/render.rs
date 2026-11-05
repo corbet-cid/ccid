@@ -830,3 +830,40 @@ fn forgejo_fetch_step_retries_the_copy_then_asks_the_forge() {
         );
     }
 }
+
+fn remote_manifest() -> String {
+    format!(
+        "schema=1\nproject='fixture'\n[render]\ntool_revision='{PIN}'\n\
+         [checks.test]\nkind='commands'\ncommands=[['true']]\n\
+         [jobs.verify]\nscheduler='forgejo'\nchecks=['test']\nworkflow='ci'\ncommand=['ccid:run-declared-checks']\n\
+         [jobs.windows]\nscheduler='remote'\nprovider='gitlab'\nplatform='windows-x64'\n\
+         workflow='ccid-remote'\nchecks=['test']\npush_branches=['main']\n\
+         paths=['src/**','Cargo.toml']\n"
+    )
+}
+
+#[test]
+fn remote_jobs_are_recorded_and_require_their_provider_workflow_file() {
+    let root = forgejo_repository(&remote_manifest());
+    // Without the provider workflow file the declaration is refused.
+    let error = render(root.path(), false).unwrap_err().to_string();
+    assert!(error.contains("provider workflow file"), "{error}");
+    assert!(!root.path().join(".ci/jobs.json").exists());
+    fs::write(
+        root.path().join(".gitlab-ci.yml"),
+        "stages: [test]\ntest:\n  script: [echo]\n",
+    )
+    .unwrap();
+    render(root.path(), false).unwrap();
+    // Remote jobs get no Crow adapter and no Forgejo workflow of their own.
+    assert!(!root.path().join(".crow").exists());
+    let workflow = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert!(!workflow.contains("windows"));
+    let inventory: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(".ci/jobs.json")).unwrap()).unwrap();
+    assert_eq!(inventory["jobs"]["windows"]["scheduler"], "remote");
+    assert_eq!(inventory["jobs"]["windows"]["provider"], "gitlab");
+    assert_eq!(inventory["jobs"]["windows"]["platform"], "windows-x64");
+    assert_eq!(inventory["jobs"]["windows"]["timeout_minutes"], 60);
+    render(root.path(), true).unwrap();
+}

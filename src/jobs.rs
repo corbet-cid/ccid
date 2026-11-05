@@ -16,6 +16,19 @@ pub enum Scheduler {
     /// Forgejo Actions: rendered as `.forgejo/workflows/<workflow>.yml`, run
     /// natively on push, pull request and manual dispatch.
     Forgejo,
+    /// An external CI provider's own workflow in the repository's mirror, dispatched and reported by a
+    /// host-side broker (adapters/remote_ci.py). ccid only validates and records the declaration.
+    Remote,
+}
+
+/// External CI providers a remote job can name. ccid never talks to them.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Github,
+    Gitlab,
+    Circleci,
+    Bitbucket,
 }
 
 #[derive(Debug, Deserialize)]
@@ -25,6 +38,9 @@ pub struct Job {
     scheduler: Scheduler,
     checks: Vec<String>,
     workflow: String,
+    /// Remote jobs declare no command: the provider workflow is the command.
+    /// Every other scheduler still requires a non-empty command.
+    #[serde(default)]
     command: Vec<String>,
     /// Branches whose push events may execute this job through a generated
     /// push adapter. Empty (the default) refuses all push execution.
@@ -64,6 +80,17 @@ pub struct Job {
     /// archives nothing and says so); `archive_inputs=false` opts a job out.
     #[serde(default)]
     archive_inputs: Option<bool>,
+    /// Remote jobs only: the external CI provider the broker dispatches to.
+    #[serde(default)]
+    provider: Option<Provider>,
+    /// Remote jobs only: the provider platform the workflow runs on, a plain
+    /// lowercase token (`windows-x64`).
+    #[serde(default)]
+    platform: Option<String>,
+    /// Remote jobs only: the provider workflow's wall-clock budget in minutes.
+    /// Absent uses the default of 60; allowed range 5..=360.
+    #[serde(default)]
+    timeout_minutes: Option<u32>,
 }
 
 /// Manifest-owned newest-head refresh scope: update every first-party git
@@ -117,6 +144,16 @@ pub struct Plan {
     /// Forgejo: archive the locked flake inputs after the checks; skipped when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub archive_inputs: bool,
+    /// Remote: the external CI provider; skipped when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+    /// Remote: the provider platform; skipped when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Remote: the effective workflow budget in minutes (declared or the
+    /// default); skipped when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_minutes: Option<u32>,
     /// Declared secret variables this job must not see; `execute` strips them.
     #[serde(skip)]
     pub withheld: Vec<String>,
@@ -173,6 +210,11 @@ pub fn execute(request: &Request) -> Result<()> {
     let root = scratch.path().join("source");
     crate::verify_source(&request.archive, &request.sha256, &request.commit, &root)?;
     let planned = plan(&root, Path::new(".ci/ccid.toml"), &request.job, None)?;
+    if planned.scheduler == Scheduler::Remote {
+        return Err(failure(
+            "Remote jobs run on their provider, never through execute-job",
+        ));
+    }
     // Manifest-owned per-job environment applies consistently to manual and
     // push routes. Re-run admission and budget afterwards so declared values
     // (e.g. CI_JOBS) are bound/validated exactly like scheduler-provided ones.
@@ -276,7 +318,11 @@ pub fn plan(
         .get(name)
         .ok_or_else(|| failure(format!("Unknown job: {name}")))?;
     let checks = select_checks(&manifest, &job.checks)?;
-    validate_command(&job.command)?;
+    let effective = scheduler.unwrap_or(job.scheduler);
+    // Remote jobs have no command: the provider workflow is the command.
+    if effective != Scheduler::Remote {
+        validate_command(&job.command)?;
+    }
     if job.workflow.is_empty()
         || !job
             .workflow
@@ -326,15 +372,28 @@ pub fn plan(
     // execution. Arbitrary commands are refused here (fail closed) so push
     // can never silently ignore jobs.command. Manual-only jobs (no push
     // branches, no refresh scope) skip this check and stay byte stable.
-    let effective = scheduler.unwrap_or(job.scheduler);
+    // Remote jobs have no command to opt in with: their provider workflow runs.
     let push_enabled = !job.push_branches.is_empty() || job.refresh.is_some();
-    if push_enabled && effective != Scheduler::Forgejo && !is_self_checks_command(&job.command) {
+    if push_enabled
+        && effective != Scheduler::Forgejo
+        && effective != Scheduler::Remote
+        && !is_self_checks_command(&job.command)
+    {
         return Err(failure(
             "Push jobs require explicit ccid:run-declared-checks command; arbitrary commands are refused",
         ));
     }
+    if effective != Scheduler::Remote
+        && (job.provider.is_some() || job.platform.is_some() || job.timeout_minutes.is_some())
+    {
+        return Err(failure(
+            "provider, platform and timeout_minutes belong to remote jobs",
+        ));
+    }
     if effective == Scheduler::Forgejo {
         validate_forgejo_job(job)?;
+    } else if effective == Scheduler::Remote {
+        validate_remote_job(job)?;
     } else if job.runs_on.is_some()
         || !job.paths.is_empty()
         || !job.events.is_empty()
@@ -360,6 +419,16 @@ pub fn plan(
         archive_inputs: job
             .archive_inputs
             .unwrap_or(effective == Scheduler::Forgejo),
+        provider: job.provider,
+        platform: job.platform.clone(),
+        timeout_minutes: if effective == Scheduler::Remote {
+            Some(
+                job.timeout_minutes
+                    .unwrap_or(REMOTE_TIMEOUT_DEFAULT_MINUTES),
+            )
+        } else {
+            None
+        },
         withheld,
     })
 }
@@ -391,6 +460,63 @@ fn validate_forgejo_job(job: &Job) -> Result<()> {
         if !["push", "pull_request", "manual"].contains(&event.as_str()) {
             return Err(failure("Job events must be push, pull_request or manual"));
         }
+    }
+    for glob in &job.paths {
+        if !plain_token(glob, b"/*") {
+            return Err(failure("Job paths must be plain path globs"));
+        }
+    }
+    Ok(())
+}
+
+/// Default wall-clock budget of a remote provider workflow, in minutes.
+const REMOTE_TIMEOUT_DEFAULT_MINUTES: u32 = 60;
+
+/// Remote jobs are an external CI provider's own workflow in the repository's
+/// mirror. ccid validates the declaration and records it in the inventory; a
+/// host-side broker dispatches the run and reports its commit status. None of
+/// the ccid-owned execution machinery applies.
+fn validate_remote_job(job: &Job) -> Result<()> {
+    if job.provider.is_none() {
+        return Err(failure("Remote jobs require an explicit provider"));
+    }
+    let platform = job
+        .platform
+        .as_deref()
+        .ok_or_else(|| failure("Remote jobs require an explicit platform"))?;
+    if platform.is_empty()
+        || platform.len() > 32
+        || !platform
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        return Err(failure(
+            "Remote platform must be 1..=32 lowercase ascii letters, digits and '-'",
+        ));
+    }
+    if let Some(timeout) = job.timeout_minutes {
+        if !(5..=360).contains(&timeout) {
+            return Err(failure(
+                "Remote job timeout_minutes must be between 5 and 360",
+            ));
+        }
+    }
+    if !job.command.is_empty() {
+        return Err(failure(
+            "Remote jobs take no command: the provider workflow is the command",
+        ));
+    }
+    if !job.secrets.is_empty() || job.refresh.is_some() {
+        return Err(failure("Remote jobs take no secrets or refresh scope"));
+    }
+    if !job.environment.is_empty() {
+        return Err(failure("Remote jobs take no environment"));
+    }
+    if job.runs_on.is_some() || !job.events.is_empty() {
+        return Err(failure("Remote jobs take no runs_on or events"));
+    }
+    if job.archive_inputs == Some(true) {
+        return Err(failure("Remote jobs take no archive_inputs"));
     }
     for glob in &job.paths {
         if !plain_token(glob, b"/*") {
@@ -858,5 +984,67 @@ mod tests {
             !hostile.join("probe").exists(),
             "hostile directory must stay untouched"
         );
+    }
+
+    #[test]
+    fn remote_jobs_plan_the_declared_provider_and_effective_timeout() {
+        let root = repository(
+            "scheduler = 'remote'\nprovider = 'gitlab'\nplatform = 'windows-x64'\n\
+             workflow = 'ccid-remote'\nchecks = ['test']\npush_branches = ['main']\n\
+             paths = ['src/**', 'Cargo.toml', 'Cargo.lock']",
+        );
+        let planned = plan(root.path(), Path::new("ci.toml"), "verify", None).unwrap();
+        assert_eq!(planned.scheduler, Scheduler::Remote);
+        assert_eq!(planned.provider, Some(Provider::Gitlab));
+        assert_eq!(planned.platform.as_deref(), Some("windows-x64"));
+        assert_eq!(planned.timeout_minutes, Some(60));
+        assert!(planned.command.is_empty());
+        assert_eq!(planned.push_branches, ["main"]);
+        let explicit = repository(
+            "scheduler = 'remote'\nprovider = 'github'\nplatform = 'windows-x64'\n\
+             workflow = 'ccid-remote'\nchecks = ['test']\ntimeout_minutes = 90",
+        );
+        assert_eq!(
+            plan(explicit.path(), Path::new("ci.toml"), "verify", None)
+                .unwrap()
+                .timeout_minutes,
+            Some(90)
+        );
+    }
+
+    #[test]
+    fn remote_jobs_refuse_incomplete_or_foreign_declarations() {
+        let base = "scheduler = 'remote'\nprovider = 'gitlab'\nplatform = 'windows-x64'\n\
+                    workflow = 'ccid-remote'\nchecks = ['test']\n";
+        for job in [
+            // Missing provider and missing platform.
+            "scheduler = 'remote'\nplatform = 'windows-x64'\nworkflow = 'ccid-remote'\nchecks = ['test']".to_owned(),
+            "scheduler = 'remote'\nprovider = 'gitlab'\nworkflow = 'ccid-remote'\nchecks = ['test']".to_owned(),
+            // Platform must be a plain lowercase token.
+            "scheduler = 'remote'\nprovider = 'gitlab'\nplatform = 'Windows x64'\nworkflow = 'ccid-remote'\nchecks = ['test']".to_owned(),
+            // Timeout must stay inside 5..=360.
+            format!("{base}timeout_minutes = 2"),
+            format!("{base}timeout_minutes = 400"),
+            // A remote job has no command, secrets, runner label or events.
+            format!("{base}command = ['true']"),
+            format!("{base}secrets = ['DEMO_TOKEN']"),
+            format!("{base}runs_on = 'heavy'"),
+            format!("{base}events = ['push']"),
+        ] {
+            let bad = repository(&job);
+            assert!(
+                plan(bad.path(), Path::new("ci.toml"), "verify", None).is_err(),
+                "{job}"
+            );
+        }
+        // Remote-only fields are refused on every other scheduler.
+        let forgejo = repository(
+            "scheduler = 'forgejo'\nprovider = 'gitlab'\nchecks = ['test']\n\
+             workflow = 'ci'\ncommand = ['ccid:run-declared-checks']",
+        );
+        assert!(plan(forgejo.path(), Path::new("ci.toml"), "verify", None).is_err());
+        // A Crow job still requires a command.
+        let crow = repository("checks = ['test']\nworkflow = 'verify'");
+        assert!(plan(crow.path(), Path::new("ci.toml"), "verify", None).is_err());
     }
 }

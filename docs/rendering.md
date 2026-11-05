@@ -120,3 +120,21 @@ From this renderer on, `ccid render` refuses jobs that still select Crow (the de
 `scheduler = "forgejo"` on the job. `[render] allow_crow = true` keeps the old rendering for a
 repository that has not moved yet; it is the only way to render a Crow adapter and is meant to
 disappear. Argo jobs are untouched. There is no Forgejo equivalent of `push_consumer` yet.
+
+## Remote providers
+
+A job with `scheduler = "remote"` declares an external CI provider's own
+workflow that lives in the repository's mirror. It names `provider` (`github`,
+`gitlab`, `circleci` or `bitbucket`), a plain lowercase `platform` such as
+`windows-x64`, the provider `workflow` name, the `checks` it proves, and
+optionally `push_branches`, `paths` and `timeout_minutes` (default 60, allowed
+5..=360). A remote job takes no command, secrets, environment, runner label,
+events or flake-input archive.
+
+ccid only validates the declaration and records it in `.ci/jobs.json`; it never
+contacts a provider. The provider workflow file must already exist in the
+repository (`bitbucket-pipelines.yml` and `.gitlab-ci.yml` for those providers,
+`.circleci/config.yml`, or `.github/workflows/<workflow>.yml`), otherwise
+rendering fails. A host-side broker (`adapters/remote_ci.py`) dispatches the
+workflow and reports a commit status. A remote job never runs through
+`execute-job`.

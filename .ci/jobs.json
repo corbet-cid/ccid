@@ -2,7 +2,7 @@
   "schema": 1,
   "generator": "ccid render v1",
   "tool_revision": "105ddc4cc22bd460ddb7e9e68207f265ca229a34",
-  "manifest_sha256": "001e512e8e772588d31e4d3cd029e5c63c188dc763ea3241c80c609af1ac2669",
+  "manifest_sha256": "efa59856942e9089d6cd0c9a109e8611cab32bedba8a4ca511e198e3dfe5aaf7",
   "jobs": {
     "build": {
       "job": "build",
@@ -67,7 +67,8 @@
       "scheduler": "forgejo",
       "checks": [
         "test",
-        "registry-publisher"
+        "registry-publisher",
+        "remote-ci"
       ],
       "workflow": "ci",
       "command": [

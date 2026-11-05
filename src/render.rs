@@ -395,6 +395,17 @@ struct Inventory<'a> {
     push_consumers: BTreeMap<String, ConsumerPlan>,
 }
 
+/// The provider workflow file a remote declaration refers to inside the
+/// repository mirror. The broker runs it; ccid only requires that it exists.
+fn remote_workflow_path(provider: jobs::Provider, workflow: &str) -> String {
+    match provider {
+        jobs::Provider::Github => format!(".github/workflows/{workflow}.yml"),
+        jobs::Provider::Gitlab => ".gitlab-ci.yml".to_owned(),
+        jobs::Provider::Circleci => ".circleci/config.yml".to_owned(),
+        jobs::Provider::Bitbucket => "bitbucket-pipelines.yml".to_owned(),
+    }
+}
+
 /// Render repository jobs, or check byte-for-byte drift without modifying files.
 /// Manual Crow execution adapters come from job workflows; push execution
 /// adapters come from job push opt-ins and consumer fan-out declarations.
@@ -456,6 +467,22 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
     let gating = gating_jobs(&parsed)?;
     for name in parsed.jobs.keys() {
         let plan = jobs::plan(repo, manifest, name, None)?;
+        if plan.scheduler == jobs::Scheduler::Remote {
+            // Remote jobs are dispatched by the host-side broker, which runs
+            // the provider's own workflow; ccid only records the declaration.
+            // The workflow file must already exist in the repository.
+            let provider = plan
+                .provider
+                .ok_or_else(|| failure(format!("Remote job {name}: missing provider")))?;
+            let path = remote_workflow_path(provider, &plan.workflow);
+            if !repo.join(&path).is_file() {
+                return Err(failure(format!(
+                    "Remote job {name}: provider workflow file {path} is missing"
+                )));
+            }
+            inventory.jobs.insert(name.clone(), plan);
+            continue;
+        }
         if plan.scheduler == jobs::Scheduler::Forgejo {
             // Forgejo jobs get a native workflow below, never a Crow adapter.
             inventory.jobs.insert(name.clone(), plan);
@@ -508,7 +535,10 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         .filter(|url| !url.contains("CCID") && crate::cache::canonical_repository(url).is_ok());
     for name in parsed.jobs.keys() {
         let planned = jobs::plan(repo, manifest, name, None)?;
-        if planned.scheduler == jobs::Scheduler::Forgejo || planned.push_branches.is_empty() {
+        if planned.scheduler == jobs::Scheduler::Forgejo
+            || planned.scheduler == jobs::Scheduler::Remote
+            || planned.push_branches.is_empty()
+        {
             continue;
         }
         validate_push_name(name)?;

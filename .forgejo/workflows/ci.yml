@@ -261,7 +261,7 @@ jobs:
           export CCID_SOURCE_REVISION="${{ github.sha }}"
           "$tool" render --repo "$PWD" --check
           export CI_COMMIT_SHA="${{ github.sha }}" CI_REPOSITORY_URL="${{ github.server_url }}/${{ github.repository }}"
-          exec "$tool" check --repo "$PWD" --check 'test' --check 'registry-publisher'
+          exec "$tool" check --repo "$PWD" --check 'test' --check 'registry-publisher' --check 'remote-ci'
       - name: Archive the locked flake inputs
         run: |
           set -eu
