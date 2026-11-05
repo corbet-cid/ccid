@@ -357,7 +357,9 @@ pub fn plan(
         runs_on: job.runs_on.clone(),
         paths: job.paths.clone(),
         events: job.events.clone(),
-        archive_inputs: job.archive_inputs.unwrap_or(effective == Scheduler::Forgejo),
+        archive_inputs: job
+            .archive_inputs
+            .unwrap_or(effective == Scheduler::Forgejo),
         withheld,
     })
 }
