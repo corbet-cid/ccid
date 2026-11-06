@@ -1,8 +1,8 @@
 {
   "_doc": "The central ccid release channel. Workflows rendered with render_schema = 2 read this file (the runner names its URL in CCID_CHANNEL_URL) and run the release it selects. `classes` overrides `default` per runs-on label (canary: change one class first). A bump is a commit to this file; a rollback is a revert. The release must be published in the corbet-cid generic package registry.",
   "default": {
-    "revision": "b7837227754adbd48b4b6c0a16752b80e593eedc",
-    "sha256": "ff4135d379c4eb2549f45a2b6bef3d41f4e7b6ed6cee944f710e6786a9f9c5d0"
+    "revision": "93d5288318bb1daa6ba39f90803886899f4a7057",
+    "sha256": "3c6ddc4616e5a45058c3431ae93fe122836a851bd95110d6513529dbef8fbedc"
   },
   "classes": {}
 }
