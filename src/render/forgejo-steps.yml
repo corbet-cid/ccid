@@ -59,9 +59,10 @@ CCID_TOOL_SHA_LINE        run: |
           # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the LFS transfer authenticates with Basic).
           GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
           if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
-            # The LFS endpoint wants HTTP Basic (the "token" scheme that git itself accepts is refused with 401): user and token, whatever the user name.
-            lfs_auth=$(printf 'x-access-token:%s' "$CCID_FORGE_TOKEN" | base64 -w0)
-            git -c "http.extraHeader=Authorization: Basic $lfs_auth" lfs pull origin
+            # The LFS endpoint wants HTTP Basic (the "token" scheme git itself accepts is refused with 401), and its batch answer carries a credential for the object downloads: a
+            # credential helper supplies Basic exactly once (a fixed extra header would be sent twice and the forge answers 400). `lfs install --local` makes `lfs pull` check the files out.
+            git lfs install --local --skip-smudge
+            git -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$CCID_FORGE_TOKEN"; }; f' lfs pull origin
           fi
           git clean --quiet -ffdx
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"

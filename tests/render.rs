@@ -608,7 +608,10 @@ fn forgejo_jobs_render_one_native_workflow_per_workflow_name_and_no_crow_adapter
     assert!(text.contains("  verify:\n    runs-on: heavy\n    needs: [docs]\n    if: ${{ !cancelled() }}\n    steps:\n"));
     assert!(text.contains("--check 'test' --check 'lint'"));
     // Git LFS content is pulled over HTTP Basic (the "token" scheme is refused by the LFS endpoint).
-    assert!(text.contains("Authorization: Basic $lfs_auth\" lfs pull origin"));
+    assert!(
+        text.contains("git lfs install --local --skip-smudge")
+            && text.contains("credential.helper=!f()")
+    );
     assert!(text.contains(&format!("CCID_REVISION: {PIN}")));
     // One job lacks paths, so the workflow takes no path filter.
     assert!(!text.contains("paths:"));
