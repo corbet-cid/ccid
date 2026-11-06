@@ -25,6 +25,8 @@ mod cached;
 mod checks;
 pub mod compile_cache;
 mod dependency;
+#[cfg(unix)]
+pub mod job_run;
 pub mod jobs;
 pub mod push;
 pub mod render;

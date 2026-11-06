@@ -39,6 +39,22 @@ enum Action {
         #[arg(long, hide = true)]
         parent_watch: bool,
     },
+    /// Run one repository job as a Forgejo workflow step does: claim a source slot, fetch the exact commit, check the adapters, run the command.
+    #[cfg(unix)]
+    JobRun {
+        #[arg(long)]
+        job: String,
+        /// `owner/name` of the repository.
+        #[arg(long)]
+        repository: String,
+        #[arg(long)]
+        sha: String,
+        #[arg(long)]
+        server_url: String,
+        /// Owner of the repository (qualifies sibling names).
+        #[arg(long)]
+        owner: String,
+    },
     /// Generate owned scheduler adapters from the repository job manifest.
     Render {
         #[arg(long, default_value = ".")]
@@ -331,6 +347,24 @@ fn main() -> ExitCode {
             }
             ccid::tor::run(&action)
         }
+        #[cfg(unix)]
+        Action::JobRun {
+            job,
+            repository,
+            sha,
+            server_url,
+            owner,
+        } => ccid::job_run::run(
+            &ccid::job_run::Options {
+                job,
+                repository,
+                sha,
+                server_url,
+                owner,
+            },
+            &ccid::job_run::Pace::default(),
+        )
+        .map(|_| ()),
         Action::SourceRevision => {
             println!("{}", ccid::SOURCE_REVISION);
             Ok(())
