@@ -9,8 +9,9 @@ commit, starts the provider workflow by API, polls it until it ends or times out
 result as a commit status on the primary forge (Forgejo/Gitea API).
 
 Each platform family (the part of `platform` before the first '-': linux, windows, macos, ...) runs only when
-the host configuration's `platforms` switch says `true` for it; anything else (off, absent, no `platforms` at
-all) is refused before any provider call and logged as needing the operator's yes.
+the host configuration's `platforms` switch says `true` for it, on every provider alike; anything else (off,
+absent, no `platforms` at all) is refused before any provider call and logged as needing the operator's yes:
+every remote run spends external CI minutes.
 
 Credentials are read from environment variables named in the host configuration, at the moment of
 use, and only ever travel in request headers (or, for GitHub writes, to the configured write gate
@@ -523,7 +524,8 @@ class Broker:
         """Dispatch when the mirror carries `sha`. True when a run started; False when it must wait."""
         family = str(plan.get("platform") or "").split("-")[0]
         if self.platforms.get(family) is not True:
-            raise Refused(f"{plan.get('platform')} needs Julian's yes (platform switch '{family}' is off on this host)")
+            raise Refused(f"{plan.get('platform')} on {plan.get('provider')}: needs Julian's yes: external CI minutes "
+                          f"(platform switch '{family}' is off on this host)")
         provider = self.provider(plan["provider"])
         mirror = self.mirror(repo, plan["provider"])
         provider.ensure(mirror)
