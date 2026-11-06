@@ -736,7 +736,7 @@ fn forgejo_siblings_step(siblings: &BTreeMap<String, String>) -> String {
         "  if [ -z \"$got\" ]; then".into(),
         "    echo \"local copy lacks $repo $want, fetching from the forge\" >&2".into(),
         "    for attempt in 1 2 3; do".into(),
-        "      if GIT_CONFIG_COUNT=0 sib_fetch; then got=1; break; fi".into(),
+        "      if GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 sib_fetch; then got=1; break; fi".into(),
         "      [ \"$attempt\" -lt 3 ] && sleep 5".into(),
         "    done".into(),
         "  fi".into(),

@@ -809,7 +809,7 @@ fn forgejo_fetch_step_retries_the_copy_then_asks_the_forge() {
         .map(|line| line.trim_start())
         .collect::<Vec<_>>()
         .join("\n");
-    // `fetch` is the step's own function; here it fails `fails` times (the copy lags), then works. The forge fallback is told apart by GIT_CONFIG_COUNT=0.
+    // `fetch` is the step's own function; here it fails `fails` times (the copy lags), then works. The forge fallback is told apart by GIT_CONFIG_COUNT=0 AND GIT_CONFIG_SYSTEM=/dev/null (the runner keeps its copy rewrite rules in either place).
     for (fails, forge_only, ok) in [
         (0, false, true),
         (2, false, true),
@@ -822,7 +822,7 @@ fn forgejo_fetch_step_retries_the_copy_then_asks_the_forge() {
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         let counter = dir.path().join("n");
         let script = format!(
-            "set -eu\nPATH={}:$PATH\nfetch() {{ n=$(cat {c} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {c}; if [ {forge} = 1 ] && [ \"${{GIT_CONFIG_COUNT:-}}\" != 0 ] ; then return 1; fi; [ $n -gt {fails} ]; }}\n{block}\n",
+            "set -eu\nPATH={}:$PATH\nfetch() {{ n=$(cat {c} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {c}; if [ {forge} = 1 ] && {{ [ \"${{GIT_CONFIG_COUNT:-}}\" != 0 ] || [ \"${{GIT_CONFIG_SYSTEM:-}}\" != /dev/null ]; }} ; then return 1; fi; [ $n -gt {fails} ]; }}\n{block}\n",
             dir.path().display(),
             c = counter.display(),
             forge = u8::from(forge_only),

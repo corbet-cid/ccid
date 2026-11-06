@@ -51,7 +51,7 @@ CCID_TOOL_SHA_LINE        run: |
           if [ -z "$fetched" ]; then
             echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2
             for attempt in 1 2 3; do
-              if GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
+              if GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
               [ "$attempt" -lt 3 ] && sleep 5
             done
           fi
