@@ -14,3 +14,8 @@ debug = 0
 
 [profile.release]
 debug = 0
+
+# Cargo's color setting is CARGO_TERM_COLOR in the environment of CI jobs today, and that variable is hashed into every compile-cache key like any CARGO_*: as config it
+# is invisible to the cache, so a lane or workstation with the same file hits CI's entries whatever its terminal is.
+[term]
+color = "never"
