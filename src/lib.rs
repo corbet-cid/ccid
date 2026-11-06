@@ -500,15 +500,6 @@ fn run_checks_inner(
         cache::Freshness::invalidate(&target)?;
         None
     };
-    // Cargo finds the locked target through a ccid-owned config above the stable source, not through CARGO_TARGET_DIR: sccache
-    // hashes CARGO_* variables, so a per-repository value would make every cross-repository compile-cache lookup miss. A
-    // caller that declared its own target keeps that declaration (it is semantic).
-    #[cfg(unix)]
-    if !caller_target {
-        if let Some(source) = stable_source.as_ref() {
-            cache::route_target_outside_env(&mut environment, &target, source.path());
-        }
-    }
     let scratch_for_kache = _stable_scratch
         .as_ref()
         .map(|scratch| scratch.path().to_owned())

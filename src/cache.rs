@@ -196,43 +196,6 @@ struct ScratchChoice {
     rejected: Vec<Rejected>,
 }
 
-/// Route Cargo's target directory to the locked target WITHOUT an environment variable.
-///
-/// sccache hashes every `CARGO_*` variable the compiler is started with, so a `CARGO_TARGET_DIR` that differs per
-/// repository or slot makes every cross-repository compile-cache lookup miss. The location is therefore written into a
-/// ccid-owned Cargo config in the directory above the stable source (`<target>/.ccid/.cargo/config.toml`, found by
-/// Cargo's upward config walk; a repository's own, closer config still wins) and handed to scripts as `CCID_TARGET_DIR`.
-/// Returns whether the routing was installed; on any problem nothing changes and the caller keeps the environment variable.
-#[cfg(unix)]
-pub(crate) fn route_target_outside_env(
-    env: &mut Environment,
-    target: &Path,
-    stable_source: &Path,
-) -> bool {
-    let Some(parent) = stable_source.parent() else {
-        return false;
-    };
-    let Some(path) = target
-        .to_str()
-        .filter(|path| !path.contains(['"', '\\', '\n']))
-    else {
-        return false;
-    };
-    let directory = parent.join(".cargo");
-    let config = directory.join("config.toml");
-    let text = format!(
-        "# Owned by ccid, rewritten on every run: Cargo's target directory without a CARGO_* environment variable.\n[build]\ntarget-dir = \"{path}\"\n"
-    );
-    if fs::create_dir_all(&directory).is_err() || fs::write(&config, text).is_err() {
-        return false;
-    }
-    for name in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"] {
-        env.remove(std::ffi::OsStr::new(name));
-    }
-    set(env, "CCID_TARGET_DIR", target.as_os_str());
-    true
-}
-
 /// A per-job runtime directory (sockets, locks) for the `kache` compiler cache. Only when the job's `RUSTC_WRAPPER` is
 /// `kache` and the job did not name `KACHE_RUNTIME_DIR` itself: the directory lives in the job's scratch root, which is
 /// owner-only and short enough for Unix socket paths, and disappears with the job. Returns the directory when it was set.
@@ -1195,52 +1158,6 @@ mod tests {
         assert_eq!(incremental_cap_mb(&Environment::new()), INCREMENTAL_CAP_MB);
         let custom = Environment::from([("CCID_INCREMENTAL_CAP_MB".into(), "5".into())]);
         assert_eq!(incremental_cap_mb(&custom), 5);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_target_reaches_cargo_through_a_ccid_config_and_never_through_a_cargo_variable() {
-        let (_guard, top) = hygiene_top();
-        let target = top.join("target");
-        let source = target.join(".ccid/source-v1");
-        fs::create_dir_all(&source).unwrap();
-        let mut environment = Environment::from([
-            ("CARGO_TARGET_DIR".into(), target.as_os_str().into()),
-            ("CARGO_BUILD_TARGET_DIR".into(), target.as_os_str().into()),
-            ("CARGO_BUILD_JOBS".into(), "4".into()),
-        ]);
-        assert!(route_target_outside_env(&mut environment, &target, &source));
-        // Nothing sccache would hash: no per-repository CARGO_* path is left.
-        for name in environment.keys() {
-            let name = name.to_string_lossy();
-            assert!(
-                !name.starts_with("CARGO_") || name == "CARGO_BUILD_JOBS",
-                "{name} leaked"
-            );
-        }
-        assert_eq!(
-            environment.get(std::ffi::OsStr::new("CCID_TARGET_DIR")),
-            Some(&target.as_os_str().to_owned())
-        );
-        // Cargo's upward config walk from the source finds the file above it.
-        let config = fs::read_to_string(target.join(".ccid/.cargo/config.toml")).unwrap();
-        assert!(
-            config.contains(&format!("target-dir = \"{}\"", target.display())),
-            "{config}"
-        );
-        // Rewritten, not appended, on the next run.
-        assert!(route_target_outside_env(&mut environment, &target, &source));
-        assert_eq!(
-            fs::read_to_string(target.join(".ccid/.cargo/config.toml")).unwrap(),
-            config
-        );
-        // A path that cannot be a TOML string is never routed.
-        let odd = top.join("t\"x");
-        assert!(!route_target_outside_env(
-            &mut Environment::new(),
-            &odd,
-            &source
-        ));
     }
 
     #[cfg(unix)]
