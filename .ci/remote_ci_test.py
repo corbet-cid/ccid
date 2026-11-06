@@ -84,7 +84,7 @@ def broker(state, http, git, **extra):
     config = {"forgejo": {"api": "https://forge.example/api/v1", "token_env": "T_FORGE"},
               "git_copy": "/nonexistent/{repo}.git", "state_dir": str(state),
               "providers": {"gitlab": {"api": "https://gitlab.example/api/v4", "token_env": "T_GITLAB"}},
-              "repos": {"o/r": {"gitlab": "o/r"}}, "platforms": {"windows": True, "linux": True}, **extra}
+              "repos": {"o/r": {"gitlab": "o/r"}}, "platforms": {"windows": True, "linux": True}, "follow_branches": True, **extra}
     return rc.Broker(config, http=http, git=git)
 
 
@@ -273,6 +273,16 @@ class RemoteCiTest(unittest.TestCase):
         self.assertNotIn("last_dispatched", self.record())
         with self.assertRaises(rc.Refused):
             b.dispatch_now("o/r", "windows", A, "main")
+
+    def test_branches_off_dispatches_nothing_but_reports_runs_in_flight(self):
+        http = FakeHttp()
+        broker(self.state, http, FakeGit()).sweep()  # one run in flight
+        http.pipeline_status = "success"
+        off = broker(self.state, http, FakeGit(head=B), follow_branches=False, release_tags="")
+        off.sweep()
+        self.assertEqual(http.statuses[-1]["state"], "success", "the run in flight is still reported")
+        off.sweep()
+        self.assertEqual(sum(1 for c in http.calls if c[1].endswith("/pipeline")), 1, "no new dispatch")
 
     def test_absent_platform_switch_refuses_everything(self):
         http = FakeHttp()

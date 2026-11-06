@@ -20,7 +20,8 @@ the provider workflow. GitHub writes (enabling Actions, workflow dispatch) are n
 adapter: they go through the configured gate command, which applies its own budgets.
 
 Commands:
-  sweep     follow every configured repository once (one run per job at a time, newest head only,
+  sweep     report the runs in flight; when the host enables `follow_branches`, also follow every configured
+            repository once (one run per job at a time, newest head only,
             at most one dispatch per job per `min_interval_hours`, path filter from the declaration);
             every NEW release tag (`release_tags`, default `v[0-9]*`) runs each remote job once, regardless of
             interval and paths (the tags that exist when a job is first seen are the baseline, never run)
@@ -492,6 +493,8 @@ class Broker:
         self.state = State(Path(config["state_dir"]))
         self.interval = float(config.get("min_interval_hours", DEFAULT_INTERVAL_HOURS)) * 3600
         self.release_tags = config.get("release_tags", DEFAULT_RELEASE_TAGS)
+        # Automatic runs on new branch commits only when the host says so; absent = off (on-demand dispatch only).
+        self.follow_branches = config.get("follow_branches") is True
         self.platforms = config.get("platforms") or {}
         self.providers: dict[str, object] = {}
         for repo, mirrors in config.get("repos", {}).items():
@@ -570,6 +573,8 @@ class Broker:
         log(f"{repo} {job}: {sha[:12]} {verdict} ({text})")
 
     def due(self, repo: str, sha: str, plan: dict, record: dict) -> bool:
+        if not self.follow_branches:
+            return False
         last = record.get("last_dispatched") or {}
         if last.get("commit") == sha:
             return False
