@@ -84,7 +84,7 @@ def broker(state, http, git, **extra):
     config = {"forgejo": {"api": "https://forge.example/api/v1", "token_env": "T_FORGE"},
               "git_copy": "/nonexistent/{repo}.git", "state_dir": str(state),
               "providers": {"gitlab": {"api": "https://gitlab.example/api/v4", "token_env": "T_GITLAB"}},
-              "repos": {"o/r": {"gitlab": "o/r"}}, **extra}
+              "repos": {"o/r": {"gitlab": "o/r"}}, "platforms": {"windows": True, "linux": True}, **extra}
     return rc.Broker(config, http=http, git=git)
 
 
@@ -262,6 +262,29 @@ class RemoteCiTest(unittest.TestCase):
         b.sweep()
         self.assertIn("v1.0.0", self.record()["tags_seen"])
         self.assertEqual(sum(1 for c in http.calls if c[1].endswith("/pipeline")), 2)
+
+    def test_platform_switch_off_refuses_before_any_provider_call(self):
+        http = FakeHttp()
+        b = broker(self.state, http, FakeGit(), platforms={"windows": False, "linux": True})
+        self.assertEqual(b.sweep(), 0)
+        b.sweep()
+        self.assertEqual(http.calls, [], "no provider or forge call for a switched-off platform")
+        self.assertEqual(self.stderr.getvalue().count("needs Julian's yes"), 1, "logged once per commit")
+        self.assertNotIn("last_dispatched", self.record())
+        with self.assertRaises(rc.Refused):
+            b.dispatch_now("o/r", "windows", A, "main")
+
+    def test_absent_platform_switch_refuses_everything(self):
+        http = FakeHttp()
+        config_platforms = {}
+        b = broker(self.state, http, FakeGit(), platforms=config_platforms)
+        b.sweep()
+        self.assertEqual(http.calls, [])
+
+    def test_linux_arm64_runs_while_windows_is_off(self):
+        http, git = FakeHttp(), FakeGit(plans={"linux-arm64": dict(PLAN, platform="linux-arm64")})
+        broker(self.state, http, git, platforms={"windows": False, "macos": False, "linux": True}).sweep()
+        self.assertTrue(any(c[1].endswith("/pipeline") for c in http.calls))
 
     def test_github_requires_the_gate(self):
         with self.assertRaises(rc.Failure):

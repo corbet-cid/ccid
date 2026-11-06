@@ -8,6 +8,10 @@ holds the credentials, follows the declared branches, waits until the mirror car
 commit, starts the provider workflow by API, polls it until it ends or times out, and posts the
 result as a commit status on the primary forge (Forgejo/Gitea API).
 
+Each platform family (the part of `platform` before the first '-': linux, windows, macos, ...) runs only when
+the host configuration's `platforms` switch says `true` for it; anything else (off, absent, no `platforms` at
+all) is refused before any provider call and logged as needing the operator's yes.
+
 Credentials are read from environment variables named in the host configuration, at the moment of
 use, and only ever travel in request headers (or, for GitHub writes, to the configured write gate
 command through its environment). They are never logged, never written to state and never handed to
@@ -53,6 +57,10 @@ DESCRIPTION_MAX = 140
 
 class Failure(Exception):
     """A definite failure: reported, never retried silently."""
+
+
+class Refused(Exception):
+    """The host's platform switch is off for this platform: nothing is dispatched, nothing is reported."""
 
 
 class Transient(Exception):
@@ -483,6 +491,7 @@ class Broker:
         self.state = State(Path(config["state_dir"]))
         self.interval = float(config.get("min_interval_hours", DEFAULT_INTERVAL_HOURS)) * 3600
         self.release_tags = config.get("release_tags", DEFAULT_RELEASE_TAGS)
+        self.platforms = config.get("platforms") or {}
         self.providers: dict[str, object] = {}
         for repo, mirrors in config.get("repos", {}).items():
             if not REPO.match(repo) or not isinstance(mirrors, dict):
@@ -512,6 +521,9 @@ class Broker:
 
     def start(self, repo: str, branch: str, sha: str, job: str, plan: dict, record: dict) -> bool:
         """Dispatch when the mirror carries `sha`. True when a run started; False when it must wait."""
+        family = str(plan.get("platform") or "").split("-")[0]
+        if self.platforms.get(family) is not True:
+            raise Refused(f"{plan.get('platform')} needs Julian's yes (platform switch '{family}' is off on this host)")
         provider = self.provider(plan["provider"])
         mirror = self.mirror(repo, plan["provider"])
         provider.ensure(mirror)
@@ -580,6 +592,10 @@ class Broker:
                         self.follow(repo, job, record)
                     elif not self.release(repo, job, plan, record) and self.due(repo, sha, plan, record):
                         self.start(repo, branch, sha, job, self.with_plan(plan), record)
+                except Refused as error:
+                    if record.get("refused") != sha:  # once per commit, not every sweep
+                        log(f"{repo} {job}: not dispatched: {error}")
+                        record["refused"] = sha
                 except Transient as error:
                     log(f"{repo} {job}: provider unavailable, retrying later ({error})")
                     record["transient"] = int(record.get("transient", 0)) + 1
@@ -706,7 +722,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "dispatch":
             return broker.dispatch_now(args.repo, args.job, args.commit, args.branch)
         return broker.sweep()
-    except (Failure, Transient) as error:
+    except (Failure, Transient, Refused) as error:
         log(str(error))
         return 2
 
