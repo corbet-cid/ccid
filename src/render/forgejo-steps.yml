@@ -56,10 +56,12 @@ CCID_TOOL_SHA_LINE        run: |
             done
           fi
           [ -n "$fetched" ] || { echo "cannot fetch ${{ github.sha }}" >&2; exit 2; }
-          # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the fetch above carries the token, so does the LFS transfer).
+          # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the LFS transfer authenticates with Basic).
           GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
           if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
-            git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" lfs pull origin
+            # The LFS endpoint wants HTTP Basic (the "token" scheme that git itself accepts is refused with 401): user and token, whatever the user name.
+            lfs_auth=$(printf 'x-access-token:%s' "$CCID_FORGE_TOKEN" | base64 -w0)
+            git -c "http.extraHeader=Authorization: Basic $lfs_auth" lfs pull origin
           fi
           git clean --quiet -ffdx
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
