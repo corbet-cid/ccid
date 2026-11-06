@@ -509,6 +509,13 @@ fn run_checks_inner(
             cache::route_target_outside_env(&mut environment, &target, source.path());
         }
     }
+    let scratch_for_kache = _stable_scratch
+        .as_ref()
+        .map(|scratch| scratch.path().to_owned())
+        .or_else(|| _scratch.as_ref().map(|scratch| scratch.path().to_owned()));
+    if let Some(scratch) = scratch_for_kache {
+        cache::prepare_kache_runtime(&mut environment, &scratch);
+    }
     compile_cache::prepare_go(&mut environment);
     let _compiler_cache = compile_cache::CompilerCache::prepare(&root, &mut environment);
     let mut runner = {

@@ -233,6 +233,25 @@ pub(crate) fn route_target_outside_env(
     true
 }
 
+/// A per-job runtime directory (sockets, locks) for the `kache` compiler cache. Only when the job's `RUSTC_WRAPPER` is
+/// `kache` and the job did not name `KACHE_RUNTIME_DIR` itself: the directory lives in the job's scratch root, which is
+/// owner-only and short enough for Unix socket paths, and disappears with the job. Returns the directory when it was set.
+pub(crate) fn prepare_kache_runtime(env: &mut Environment, scratch: &Path) -> Option<PathBuf> {
+    let wrapper = value(env, "RUSTC_WRAPPER")?;
+    if Path::new(&wrapper)
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some("kache")
+        || value(env, "KACHE_RUNTIME_DIR").is_some()
+    {
+        return None;
+    }
+    let directory = scratch.join("kache-run");
+    fs::create_dir_all(&directory).ok()?;
+    set(env, "KACHE_RUNTIME_DIR", directory.as_os_str());
+    Some(directory)
+}
+
 /// Cap of the incremental-compilation state of one target (MiB), unless `CCID_INCREMENTAL_CAP_MB` names another.
 const INCREMENTAL_CAP_MB: u64 = 2048;
 
@@ -1111,6 +1130,30 @@ mod tests {
         let mut expected = before;
         expected.insert("TMPDIR".into(), path.as_os_str().into());
         assert_eq!(environment, expected);
+    }
+
+    #[test]
+    fn kache_gets_a_per_job_runtime_directory_only_when_it_is_the_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sccache = Environment::from([("RUSTC_WRAPPER".into(), "sccache-corbet".into())]);
+        assert_eq!(prepare_kache_runtime(&mut sccache, dir.path()), None);
+        let mut none = Environment::new();
+        assert_eq!(prepare_kache_runtime(&mut none, dir.path()), None);
+        let mut kache = Environment::from([("RUSTC_WRAPPER".into(), "/opt/bin/kache".into())]);
+        let runtime = prepare_kache_runtime(&mut kache, dir.path()).unwrap();
+        assert_eq!(runtime, dir.path().join("kache-run"));
+        assert!(runtime.is_dir());
+        assert_eq!(
+            value(&kache, "KACHE_RUNTIME_DIR").as_deref(),
+            runtime.to_str()
+        );
+        // A job that names its own runtime directory keeps it.
+        let mut own = Environment::from([
+            ("RUSTC_WRAPPER".into(), "kache".into()),
+            ("KACHE_RUNTIME_DIR".into(), "/mine".into()),
+        ]);
+        assert_eq!(prepare_kache_runtime(&mut own, dir.path()), None);
+        assert_eq!(value(&own, "KACHE_RUNTIME_DIR").as_deref(), Some("/mine"));
     }
 
     #[test]
