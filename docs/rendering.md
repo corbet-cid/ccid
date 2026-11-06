@@ -98,6 +98,7 @@ command = ["ccid:run-declared-checks"]  # the only command a Forgejo job takes
 paths = ["src/**", "Cargo.toml"]        # optional push path filter (all jobs of the workflow)
 events = ["push", "pull_request"]       # optional; default push, pull_request and manual
 push_branches = ["main"]                # optional; default main
+siblings = { cdate = "main", cink = "<40-hex commit>" }  # optional; see below
 ```
 
 The workflow runs on push, pull request and manual dispatch, cancels a
@@ -112,6 +113,21 @@ triple), and cache endpoints arrive through the runner environment. A missing or
 mismatched tool fails the job; a check never installs a tool. Jobs of one
 workflow must agree on `events`. Forgejo jobs take no secrets, environment or
 refresh scope; switching a job from Crow removes the owned Crow adapter.
+
+### Sibling repositories
+
+A Forgejo job whose checks read other repositories (a family of packages that
+verify each other) declares them in `siblings`: a key is a repository (`name`
+in the job's own owner, or `owner/name`), a value is `main` (the default-branch
+tip at run time) or an exact lowercase 40-hex commit. Before the checks, the
+workflow fetches each one read-only with the same discipline as the checkout (a
+few attempts against the runner's local copy, then against the forge itself) into
+`<checkout>.siblings/<name>`, and exports `CCID_SIBLINGS_DIR` (that directory)
+and `CCID_SIBLINGS_REVISIONS` (`name=sha,...`, the resolved commits). A pinned
+commit that does not arrive fails the job. Because a `main` sibling moves
+without the repository changing, a cached check that reads siblings lists
+`CCID_SIBLINGS_REVISIONS` in `cache_env`. Remote and non-Forgejo jobs take no
+`siblings`.
 
 ## Crow is retired
 

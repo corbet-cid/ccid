@@ -286,6 +286,7 @@ mod tests {
         assert!(CompilerCache::prepare(Path::new("/repo"), &mut environment).is_none());
         assert_eq!(before, environment);
     }
+    #[cfg(unix)]
     #[test]
     fn a_nested_check_skips_the_enclosing_jobs_compiler_aliases() {
         use std::os::unix::fs::PermissionsExt;

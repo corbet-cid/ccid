@@ -704,6 +704,68 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
     })
 }
 
+/// Shell that stages a job's declared sibling repositories, read-only, as
+/// `<checkout>.siblings/<name>`, with the same fetch discipline as the
+/// checkout (a few attempts against the runner's local copy, then against the
+/// forge itself). It exports `CCID_SIBLINGS_DIR` and the resolved commits as
+/// `CCID_SIBLINGS_REVISIONS` (`name=sha,...`, a stable cache-key input).
+/// Empty for a job that declares none, so existing workflows stay byte-identical.
+fn forgejo_siblings_step(siblings: &BTreeMap<String, String>) -> String {
+    if siblings.is_empty() {
+        return String::new();
+    }
+    let indent = "\n          ";
+    let mut lines: Vec<String> = vec![
+        "# Sibling repositories declared by the job, read-only, at their pinned or default-branch revisions.".into(),
+        "siblings_dir=\"$PWD.siblings\"".into(),
+        "if [ -e \"$siblings_dir\" ]; then rm -r \"$siblings_dir\"; fi".into(),
+        "mkdir -p \"$siblings_dir\"".into(),
+        "siblings_revisions=".into(),
+        "stage_sibling() {".into(),
+        "  name=$1; repo=$2; want=$3".into(),
+        "  dir=\"$siblings_dir/$name\"; mkdir -p \"$dir\"".into(),
+        "  git -C \"$dir\" init --quiet".into(),
+        "  git -C \"$dir\" remote add origin \"${{ github.server_url }}/$repo.git\"".into(),
+        "  ref=$want; [ \"$want\" != main ] || ref=HEAD".into(),
+        "  sib_fetch() { git -C \"$dir\" -c \"http.extraHeader=Authorization: token $CCID_FORGE_TOKEN\" fetch --quiet --depth 1 origin \"$ref\"; }".into(),
+        "  got=".into(),
+        "  for attempt in 1 2 3; do".into(),
+        "    if sib_fetch; then got=1; break; fi".into(),
+        "    [ \"$attempt\" -lt 3 ] && sleep 5".into(),
+        "  done".into(),
+        "  if [ -z \"$got\" ]; then".into(),
+        "    echo \"local copy lacks $repo $want, fetching from the forge\" >&2".into(),
+        "    for attempt in 1 2 3; do".into(),
+        "      if GIT_CONFIG_COUNT=0 sib_fetch; then got=1; break; fi".into(),
+        "      [ \"$attempt\" -lt 3 ] && sleep 5".into(),
+        "    done".into(),
+        "  fi".into(),
+        "  [ -n \"$got\" ] || { echo \"cannot fetch sibling $repo $want\" >&2; exit 2; }".into(),
+        "  git -C \"$dir\" checkout --quiet --force --detach FETCH_HEAD".into(),
+        "  have=$(git -C \"$dir\" rev-parse HEAD)".into(),
+        "  [ \"$want\" = main ] || [ \"$have\" = \"$want\" ] || { echo \"sibling $repo is $have, not the pinned $want\" >&2; exit 2; }".into(),
+        "  echo \"sibling $repo at $have\"".into(),
+        "  siblings_revisions=\"$siblings_revisions$name=$have,\"".into(),
+        "}".into(),
+    ];
+    for (repository, revision) in siblings {
+        let (qualified, name) = match repository.split_once('/') {
+            Some((_, name)) => (repository.clone(), name),
+            None => (
+                format!("${{{{ github.repository_owner }}}}/{repository}"),
+                repository.as_str(),
+            ),
+        };
+        lines.push(format!(
+            "stage_sibling '{name}' \"{qualified}\" '{revision}'"
+        ));
+    }
+    lines.push("export CCID_SIBLINGS_DIR=\"$siblings_dir\" CCID_SIBLINGS_REVISIONS=\"${siblings_revisions%,}\"".into());
+    let mut out = lines.join(indent);
+    out.push_str(indent);
+    out
+}
+
 /// Render one Forgejo Actions workflow for the jobs that share a workflow name.
 ///
 /// The workflow carries no operator facts: the runner provides the tool root
@@ -770,6 +832,7 @@ fn forgejo_workflow(
             .iter()
             .map(|(key, value)| format!("export {key}={}\n          ", quote_value(value)))
             .collect();
+        let declared = format!("{}{declared}", forgejo_siblings_step(&plan.siblings));
         let run = if jobs::is_self_checks_command(&plan.command) {
             // The canonical repository identity comes from the workflow, not from a git remote a runner may have rewritten to a local copy.
             let mut run = String::from(

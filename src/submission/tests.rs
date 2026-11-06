@@ -3,10 +3,12 @@ use super::*;
 use std::cell::RefCell;
 
 mod archives;
+#[cfg(unix)]
 mod cfrg_client;
 mod contracts;
 mod dependent_checks;
 mod failure_digest;
+#[cfg(unix)]
 mod pod_local;
 mod resolution;
 mod retry;
@@ -17,7 +19,14 @@ fn config(root: &Path) -> Config {
     Config {
         api: "https://ci.example.invalid/api/v1".into(),
         token_command: strings(&["false"]),
-        ssh: strings(&["printf", "MemAvailable: 33554432 kB\nfull avg10=0.00\n"]),
+        // The shell builtin: /usr/bin/printf differs between GNU and BSD
+        // when it is handed the extra argument the ssh wrapper appends.
+        ssh: strings(&[
+            "sh",
+            "-c",
+            "printf 'MemAvailable: 33554432 kB\\nfull avg10=0.00\\n'",
+            "ssh-stand-in",
+        ]),
         state_root: root.join("state"),
         host_sources: "/host/sources".into(),
         worker_sources: "/worker/sources".into(),

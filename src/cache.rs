@@ -1062,6 +1062,12 @@ mod tests {
             .prefix(".h")
             .tempdir_in("/tmp")
             .unwrap();
+        // tempfile creates directories with 0777 minus the umask; pin the
+        // top to owner-only so the hygiene rules never depend on the ambient
+        // umask (0002 gives 0775, which the group-writable-ancestor rule
+        // rightly rejects).
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let top = temp.path().canonicalize().unwrap();
         (temp, top)
     }
@@ -1238,10 +1244,21 @@ mod tests {
             .prefix("t")
             .tempdir_in("/tmp")
             .unwrap();
+        // Owner-only whatever the umask is, so /tmp is the first violation.
+        make_dir(
+            temp.path().parent().unwrap(),
+            temp.path().file_name().unwrap().to_str().unwrap(),
+            0o700,
+        );
         let root = make_dir(temp.path(), "s", 0o700);
         let reason = vet_scratch_root(&root, false, Path::new("/")).unwrap_err();
+        // The chain is checked on resolved paths: /tmp is a link on macOS.
+        let tmp = Path::new("/tmp").canonicalize().unwrap();
         assert!(
-            reason.contains("ancestor /tmp is writable by group or others"),
+            reason.contains(&format!(
+                "ancestor {} is writable by group or others",
+                tmp.display()
+            )),
             "{reason}"
         );
     }

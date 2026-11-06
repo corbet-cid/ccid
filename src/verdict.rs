@@ -296,4 +296,5 @@ pub fn report_terminal(request: &Path, succeeded: bool) -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests;

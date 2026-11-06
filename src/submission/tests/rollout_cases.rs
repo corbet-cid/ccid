@@ -476,6 +476,7 @@ fn a_branch_already_in_main_goes_straight_to_the_verdict() {
     assert_eq!(contexts(&fake, "org/app"), Some(json!(["ccid/verdict"])));
 }
 
+#[cfg(unix)]
 #[test]
 fn land_outcomes_follow_the_exit_status_and_the_message() {
     use std::os::unix::process::ExitStatusExt;

@@ -80,6 +80,15 @@ pub struct Job {
     /// archives nothing and says so); `archive_inputs=false` opts a job out.
     #[serde(default)]
     archive_inputs: Option<bool>,
+    /// Forgejo jobs only: sibling repositories staged read-only next to the
+    /// checkout before the checks run. A key is a repository (`name` in the
+    /// job's own owner, or `owner/name`); a value is `main` (the default
+    /// branch tip, resolved at run time) or an exact 40-hex commit. The
+    /// runner exports `CCID_SIBLINGS_DIR` (the directory holding one
+    /// checkout per sibling, named by repository) and
+    /// `CCID_SIBLINGS_REVISIONS` (the resolved commits, for `cache_env`).
+    #[serde(default)]
+    siblings: BTreeMap<String, String>,
     /// Remote jobs only: the external CI provider the broker dispatches to.
     #[serde(default)]
     provider: Option<Provider>,
@@ -144,6 +153,9 @@ pub struct Plan {
     /// Forgejo: archive the locked flake inputs after the checks; skipped when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub archive_inputs: bool,
+    /// Forgejo: sibling repositories staged before the checks; skipped when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub siblings: BTreeMap<String, String>,
     /// Remote: the external CI provider; skipped when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
@@ -397,10 +409,11 @@ pub fn plan(
     } else if job.runs_on.is_some()
         || !job.paths.is_empty()
         || !job.events.is_empty()
+        || !job.siblings.is_empty()
         || job.archive_inputs == Some(true)
     {
         return Err(failure(
-            "runs_on, paths, events and archive_inputs belong to Forgejo jobs",
+            "runs_on, paths, events, siblings and archive_inputs belong to Forgejo jobs",
         ));
     }
     Ok(Plan {
@@ -416,6 +429,7 @@ pub fn plan(
         runs_on: job.runs_on.clone(),
         paths: job.paths.clone(),
         events: job.events.clone(),
+        siblings: job.siblings.clone(),
         archive_inputs: job
             .archive_inputs
             .unwrap_or(effective == Scheduler::Forgejo),
@@ -454,6 +468,27 @@ fn validate_forgejo_job(job: &Job) -> Result<()> {
     if let Some(label) = &job.runs_on {
         if !plain_token(label, b"") {
             return Err(failure("Job runs_on must be a plain runner label"));
+        }
+    }
+    for (repository, revision) in &job.siblings {
+        let parts: Vec<&str> = repository.split('/').collect();
+        if parts.len() > 2
+            || !parts
+                .iter()
+                .all(|part| plain_token(part, b"") && !part.starts_with('.'))
+        {
+            return Err(failure(
+                "Job siblings must name repositories as name or owner/name",
+            ));
+        }
+        let pinned = revision.len() == 40
+            && revision
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+        if revision != "main" && !pinned {
+            return Err(failure(
+                "Job sibling revisions must be main or an exact lowercase 40-hex commit",
+            ));
         }
     }
     for event in &job.events {
@@ -511,6 +546,9 @@ fn validate_remote_job(job: &Job) -> Result<()> {
     }
     if !job.environment.is_empty() {
         return Err(failure("Remote jobs take no environment"));
+    }
+    if !job.siblings.is_empty() {
+        return Err(failure("Remote jobs take no siblings"));
     }
     if job.runs_on.is_some() || !job.events.is_empty() {
         return Err(failure("Remote jobs take no runs_on or events"));

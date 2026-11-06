@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 const PIN: &str = "1234567890abcdef1234567890abcdef12345678";
 
@@ -869,4 +872,129 @@ fn remote_jobs_are_recorded_and_require_their_provider_workflow_file() {
     assert_eq!(inventory["jobs"]["windows"]["platform"], "windows-x64");
     assert_eq!(inventory["jobs"]["windows"]["timeout_minutes"], 60);
     render(root.path(), true).unwrap();
+}
+
+#[test]
+fn forgejo_siblings_are_declared_validated_and_staged_at_their_revisions() {
+    let pinned = "0123456789abcdef0123456789abcdef01234567";
+    let root = forgejo_repository(&forgejo_manifest(&format!(
+        "siblings={{cdate='main','other/cink'='{pinned}'}}\n"
+    )));
+    render(root.path(), false).unwrap();
+    let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert_eq!(text.matches("stage_sibling() {").count(), 1);
+    assert!(text.contains("stage_sibling 'cdate' \"${{ github.repository_owner }}/cdate\" 'main'"));
+    assert!(text.contains(&format!("stage_sibling 'cink' \"other/cink\" '{pinned}'")));
+    let inventory: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.path().join(".ci/jobs.json")).unwrap()).unwrap();
+    assert_eq!(inventory["jobs"]["verify"]["siblings"]["cdate"], "main");
+    assert!(inventory["jobs"]["docs"].get("siblings").is_none());
+
+    // A job without siblings renders no staging at all.
+    let plain = forgejo_repository(&forgejo_manifest(""));
+    render(plain.path(), false).unwrap();
+    let text = fs::read_to_string(plain.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    assert!(!text.contains("stage_sibling"));
+
+    for bad in [
+        "siblings={cdate='v1'}\n",
+        "siblings={cdate='0123456789ABCDEF0123456789abcdef01234567'}\n",
+        "siblings={'a/b/c'='main'}\n",
+        "siblings={'../x'='main'}\n",
+    ] {
+        let repository = forgejo_repository(&forgejo_manifest(bad));
+        assert!(render(repository.path(), false).is_err(), "{bad}");
+    }
+    let crow = forgejo_repository(&manifest("verify", "crow").replace(
+        "command=['sh','.ci/run.sh']\n[jobs.alternate]",
+        "command=['sh','.ci/run.sh']\nsiblings={cdate='main'}\n[jobs.alternate]",
+    ));
+    assert!(render(crow.path(), false).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_rendered_sibling_step_stages_exact_checkouts_and_refuses_a_wrong_pin() {
+    use std::process::Command;
+    let git = |dir: &Path, args: &[&str]| {
+        let output = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let forge = tempfile::tempdir().unwrap();
+    let remote = forge.path().join("owner/cdate.git");
+    fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "--quiet", "--bare", "-b", "main"]);
+    let work = forge.path().join("work");
+    fs::create_dir(&work).unwrap();
+    git(&work, &["init", "--quiet", "-b", "main"]);
+    fs::write(work.join("typst.toml"), "name = \"cdate\"\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "--quiet", "-m", "one"]);
+    let first = git(&work, &["rev-parse", "HEAD"]);
+    fs::write(work.join("more"), "x").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "--quiet", "-m", "two"]);
+    let second = git(&work, &["rev-parse", "HEAD"]);
+    git(
+        &work,
+        &["push", "--quiet", remote.to_str().unwrap(), "main"],
+    );
+
+    let stage = |revision: &str| {
+        let root = forgejo_repository(&forgejo_manifest(&format!(
+            "siblings={{cdate='{revision}'}}\n"
+        )));
+        render(root.path(), false).unwrap();
+        let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+        let start = text.find("          # Sibling repositories").unwrap();
+        let end = text.find("export CCID_SIBLINGS_DIR").unwrap();
+        let end = end + text[end..].find('\n').unwrap();
+        let script: String = text[start..end]
+            .lines()
+            .map(|line| line.trim_start_matches("          "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace(
+                "${{ github.server_url }}",
+                &format!("file://{}", forge.path().display()),
+            )
+            .replace("${{ github.repository_owner }}", "owner");
+        let checkout = tempfile::tempdir().unwrap();
+        let tail = "\necho \"DIR=$CCID_SIBLINGS_DIR\"\necho \"REV=$CCID_SIBLINGS_REVISIONS\"\n";
+        let output = Command::new("sh")
+            .args(["-eu", "-c", &format!("{script}{tail}")])
+            .current_dir(checkout.path())
+            .env("CCID_FORGE_TOKEN", "unused")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        (output, checkout)
+    };
+    let (output, checkout) = stage("main");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains(&format!("REV=cdate={second}")), "{stdout}");
+    let staged = PathBuf::from(format!("{}.siblings/cdate", checkout.path().display()));
+    assert!(staged.join("typst.toml").is_file() && staged.join("more").is_file());
+    let (output, checkout) = stage(&first);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let staged = PathBuf::from(format!("{}.siblings/cdate", checkout.path().display()));
+    assert!(staged.join("typst.toml").is_file() && !staged.join("more").exists());
 }
