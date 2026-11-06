@@ -358,12 +358,14 @@ fn command_environment(
     env
 }
 
-/// The profile variables an older rendered workflow exports and the shared table replaces; a job that declares one itself keeps it.
+/// The profile variables (debug levels, colour) an older rendered workflow exports and the shared table replaces; a job that declares one itself keeps it.
 fn stripped_profile_variables(declared: &BTreeMap<String, String>) -> Vec<&'static str> {
     [
         "CARGO_PROFILE_DEV_DEBUG",
         "CARGO_PROFILE_TEST_DEBUG",
         "CARGO_PROFILE_RELEASE_DEBUG",
+        // The shared profile table carries the colour setting as well (a workstation shell and CI must key the same).
+        "CARGO_TERM_COLOR",
     ]
     .into_iter()
     .filter(|key| !declared.contains_key(*key))
@@ -566,10 +568,10 @@ mod tests {
     #[test]
     fn profile_variables_are_dropped_unless_the_job_declares_them() {
         let mut declared = BTreeMap::new();
-        assert_eq!(stripped_profile_variables(&declared).len(), 3);
+        assert_eq!(stripped_profile_variables(&declared).len(), 4);
         declared.insert("CARGO_PROFILE_DEV_DEBUG".to_owned(), "1".to_owned());
         let stripped = stripped_profile_variables(&declared);
-        assert_eq!(stripped.len(), 2);
+        assert_eq!(stripped.len(), 3);
         assert!(!stripped.contains(&"CARGO_PROFILE_DEV_DEBUG"));
     }
 }
