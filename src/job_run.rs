@@ -358,6 +358,18 @@ fn command_environment(
     env
 }
 
+/// The profile variables an older rendered workflow exports and the shared table replaces; a job that declares one itself keeps it.
+fn stripped_profile_variables(declared: &BTreeMap<String, String>) -> Vec<&'static str> {
+    [
+        "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_PROFILE_TEST_DEBUG",
+        "CARGO_PROFILE_RELEASE_DEBUG",
+    ]
+    .into_iter()
+    .filter(|key| !declared.contains_key(*key))
+    .collect()
+}
+
 /// Run the whole job: claim, fetch, check the adapters, exec the declared command. Does not return on success of the exec.
 #[cfg(unix)]
 pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
@@ -421,6 +433,11 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     command
         .envs(&extra)
         .env("CCID_SOURCE_REVISION", &options.sha);
+    // The profile (debug level of dev, test and release builds) is ccid's shared table now (profiles/dev.toml, applied as cargo --config, which sccache keys the same for
+    // lanes and CI). Workflows rendered earlier still export CARGO_PROFILE_*_DEBUG: those are dropped here, before ccid decides, unless the job declares them itself.
+    for key in stripped_profile_variables(&plan.environment) {
+        command.env_remove(key);
+    }
     let error = command.exec();
     Err(failure(format!("cannot start the job command: {error}")))
 }
@@ -544,5 +561,15 @@ mod tests {
         pace.lfs_storage = None;
         checkout(&work, &options, "token", &pace).unwrap();
         assert!(!fs::read_to_string(&log).unwrap().contains("lfs.storage"));
+    }
+
+    #[test]
+    fn profile_variables_are_dropped_unless_the_job_declares_them() {
+        let mut declared = BTreeMap::new();
+        assert_eq!(stripped_profile_variables(&declared).len(), 3);
+        declared.insert("CARGO_PROFILE_DEV_DEBUG".to_owned(), "1".to_owned());
+        let stripped = stripped_profile_variables(&declared);
+        assert_eq!(stripped.len(), 2);
+        assert!(!stripped.contains(&"CARGO_PROFILE_DEV_DEBUG"));
     }
 }
