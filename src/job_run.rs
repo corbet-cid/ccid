@@ -44,6 +44,8 @@ pub struct Options {
 pub struct Pace {
     /// The git program (tests substitute a fake).
     pub git: std::ffi::OsString,
+    /// A shared Git LFS object store (`CCID_LFS_STORAGE`, named by the runner): every slot and repository of that runner then fetches an object once.
+    pub lfs_storage: Option<PathBuf>,
     pub attempts: u32,
     pub backoff: Duration,
     pub slot_poll: Duration,
@@ -54,6 +56,9 @@ impl Default for Pace {
     fn default() -> Self {
         Self {
             git: "git".into(),
+            lfs_storage: std::env::var_os("CCID_LFS_STORAGE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             attempts: 3,
             backoff: Duration::from_secs(5),
             slot_poll: Duration::from_secs(5),
@@ -222,6 +227,14 @@ pub fn checkout(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Resu
             git(pace, dir).args(["lfs", "install", "--local", "--skip-smudge"]),
             "git lfs install",
         )?;
+        if let Some(storage) = &pace.lfs_storage {
+            // Objects are content-addressed, so one store serves all slots and repositories; an object already in it is not downloaded again.
+            fs::create_dir_all(storage)?;
+            run_ok(
+                git(pace, dir).args(["config", "lfs.storage"]).arg(storage),
+                "git config lfs.storage",
+            )?;
+        }
         run_ok(
             git(pace, dir)
                 .env("CCID_LFS_TOKEN", token)
@@ -409,6 +422,7 @@ mod tests {
     fn quick() -> Pace {
         Pace {
             git: "git".into(),
+            lfs_storage: None,
             attempts: 2,
             backoff: Duration::from_millis(1),
             slot_poll: Duration::from_millis(5),
@@ -478,5 +492,47 @@ mod tests {
         );
         assert!(fetches[2].starts_with("/dev/null|"));
         assert!(!fetches[0].starts_with("/dev/null|"));
+    }
+
+    /// A repository that tracks files with LFS gets the runner's shared object store configured before the pull, and none without one.
+    #[cfg(unix)]
+    #[test]
+    fn lfs_pull_uses_the_shared_store_when_the_runner_names_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("git");
+        let log = dir.path().join("log");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> {}\ncase \"$*\" in *show*) echo '*.bin filter=lfs';; esac\nexit 0\n",
+            log.display()
+        );
+        fs::write(&bin, script).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        let store = dir.path().join("lfs-store");
+        let options = Options {
+            job: "verify".into(),
+            repository: "o/r".into(),
+            sha: "a".repeat(40),
+            server_url: "https://forge.example/".into(),
+            owner: "o".into(),
+        };
+        let mut pace = quick();
+        pace.git = bin.clone().into();
+        pace.lfs_storage = Some(store.clone());
+        checkout(&work, &options, "token", &pace).unwrap();
+        let calls = fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains(&format!("config lfs.storage {}", store.display())),
+            "{calls}"
+        );
+        assert!(store.is_dir());
+        // The configuration comes before the pull.
+        assert!(calls.find("config lfs.storage").unwrap() < calls.find("lfs pull").unwrap());
+        fs::remove_file(&log).unwrap();
+        pace.lfs_storage = None;
+        checkout(&work, &options, "token", &pace).unwrap();
+        assert!(!fs::read_to_string(&log).unwrap().contains("lfs.storage"));
     }
 }
