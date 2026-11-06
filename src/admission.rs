@@ -462,12 +462,23 @@ mod tests {
         let mut env = job_env();
         let error = reserve_in(&mut env, &dir, "job4", 40960, 8192, 40960).unwrap_err();
         assert!(error.is::<Refused>());
-        // A job ending releases its share: the fifth is admitted.
+        // A job ending releases its share: the fifth is admitted. Another test thread may have forked a child between our open and its exec, and
+        // that child holds a copy of the lock descriptor for that instant: wait for the release instead of probing once.
         held.pop();
-        let mut env = job_env();
-        assert!(reserve_in(&mut env, &dir, "job4", 40960, 8192, 40960)
-            .unwrap()
-            .is_some());
+        let started = Instant::now();
+        let admitted = loop {
+            let mut env = job_env();
+            match reserve_in(&mut env, &dir, "job4", 40960, 8192, 40960) {
+                Ok(file) => break file,
+                Err(error)
+                    if error.is::<Refused>() && started.elapsed() < Duration::from_secs(5) =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        assert!(admitted.is_some());
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]

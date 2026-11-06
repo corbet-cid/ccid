@@ -3230,8 +3230,10 @@ mod tests {
             "held lock must report contention, not IO"
         );
         drop(held);
+        // Another test thread may have forked a child between our open and its exec: the child holds a copy of the descriptor (and so the
+        // flock) for that instant. Wait for the release instead of probing once, so a loaded host cannot make this fail.
         assert!(
-            try_lock_file(&dir.join("exec.lock"), 0, overall)
+            try_lock_file(&dir.join("exec.lock"), 5, overall)
                 .unwrap()
                 .is_some(),
             "released lock must hold again"
