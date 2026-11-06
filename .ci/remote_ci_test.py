@@ -59,7 +59,7 @@ class FakeHttp:
         if url.endswith("/projects/o%2Fr") and method == "GET":
             return 200, self.project
         if url.endswith("/projects/o%2Fr") and method == "PUT":
-            self.project = {"builds_access_level": "enabled", "shared_runners_enabled": True}
+            self.project = {**self.project, **body}
             return 200, self.project
         if "/repository/branches/" in url:
             return 200, {"commit": {"id": self.mirror_head}}
@@ -190,10 +190,16 @@ class RemoteCiTest(unittest.TestCase):
 
     def test_ci_switched_on_when_off(self):
         http = FakeHttp()
-        http.project = {"builds_access_level": "disabled", "shared_runners_enabled": False}
-        broker(self.state, http, FakeGit()).sweep()
-        put = [c for c in http.calls if c[0] == "PUT"][0]
-        self.assertEqual(put[2], {"builds_access_level": "enabled", "shared_runners_enabled": True})
+        http.project = {"builds_access_level": "disabled", "shared_runners_enabled": False,
+                        "ci_pipeline_variables_minimum_override_role": "no_one_allowed"}
+        b = broker(self.state, http, FakeGit())
+        b.sweep()
+        put = [c for c in http.calls if c[0] == "PUT"]
+        self.assertEqual(put[0][2], {"builds_access_level": "enabled", "shared_runners_enabled": True,
+                                     "ci_pipeline_variables_minimum_override_role": "maintainer"})
+        http.project["builds_access_level"] = "enabled"
+        b.provider("gitlab").ensure("o/r")  # only what differs, and nothing when nothing does
+        self.assertEqual(len([c for c in http.calls if c[0] == "PUT"]), 1)
 
     def test_undeclared_provider_and_non_remote_jobs_are_ignored(self):
         http = FakeHttp()

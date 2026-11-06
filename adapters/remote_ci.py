@@ -211,14 +211,17 @@ class GitLab:
         return urllib.parse.quote(mirror, safe="")
 
     def ensure(self, mirror: str) -> None:
-        """CI on, instance runners on: the project's own setting, applied idempotently (GET first)."""
+        """CI on, instance runners on, pipeline variables allowed for maintainers (the broker passes the job and
+        the expected commit as variables; GitLab's newer default `no_one_allowed` refuses them): the project's own
+        settings, applied idempotently (GET first, one PUT only for what differs)."""
         project = expect(*self._call("GET", f"/projects/{self._project(mirror)}"), (200,), f"GitLab project {mirror}")
-        if project.get("builds_access_level") == "enabled" and project.get("shared_runners_enabled"):
+        wanted = {"builds_access_level": "enabled", "shared_runners_enabled": True,
+                  "ci_pipeline_variables_minimum_override_role": "maintainer"}
+        change = {key: value for key, value in wanted.items() if project.get(key) != value}
+        if not change:
             return
-        expect(*self._call("PUT", f"/projects/{self._project(mirror)}",
-                           {"builds_access_level": "enabled", "shared_runners_enabled": True}),
-               (200,), f"enable CI on GitLab {mirror}")
-        log(f"gitlab {mirror}: CI and instance runners enabled")
+        expect(*self._call("PUT", f"/projects/{self._project(mirror)}", change), (200,), f"enable CI on GitLab {mirror}")
+        log(f"gitlab {mirror}: set {', '.join(sorted(change))}")
 
     def head(self, mirror: str, branch: str) -> str | None:
         status, payload = self._call("GET", f"/projects/{self._project(mirror)}/repository/branches/{urllib.parse.quote(branch, safe='')}")
