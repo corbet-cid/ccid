@@ -99,6 +99,12 @@ pub fn cargo_commands(
                 command.extend(options.clone());
                 command.extend(strings(&["--", "-D", "warnings"]));
             }
+            // clippy compiles everything `cargo check` does (it runs the same front end over all targets), so a selection that has both runs clippy only: one compile
+            // instead of two. The receipt event says which check was covered.
+            "check" if actions.iter().any(|other| other == "clippy") => {
+                event(json!({"event":"check-covered-by-clippy","action":"check"}));
+                continue;
+            }
             "check" | "build" => {
                 command.push(action.clone());
                 command.extend(options.clone());
@@ -111,6 +117,14 @@ pub fn cargo_commands(
         commands.push(command);
     }
     Ok(commands)
+}
+/// Put `--config <file>` right after the cargo program prefix (`cargo`, or `rustup run <toolchain> cargo`) of every command: it is a global cargo option, so it goes before the subcommand.
+pub(crate) fn apply_config_file(commands: &mut [Vec<String>], prefix: usize, file: &str) {
+    for command in commands {
+        if command.len() > prefix {
+            command.splice(prefix..prefix, ["--config".into(), file.to_owned()]);
+        }
+    }
 }
 pub(crate) fn nix_check(check: &Check, runner: &mut Runner) -> Result<()> {
     if cfg!(windows) {
@@ -344,6 +358,58 @@ pub(crate) fn cache_eligible(check: &Check) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shared_profile_is_config_and_goes_before_the_subcommand() {
+        let table: toml::Value = toml::from_str(crate::DEV_PROFILE).unwrap();
+        for profile in ["dev", "test", "release"] {
+            assert_eq!(
+                table["profile"][profile]["debug"].as_integer(),
+                Some(0),
+                "{profile}"
+            );
+        }
+        let mut commands = vec![
+            strings(&["rustup", "run", "1.94.0", "cargo", "clippy", "--locked"]),
+            strings(&["rustup", "run", "1.94.0", "cargo"]),
+        ];
+        apply_config_file(&mut commands, 4, "/tmp/p.toml");
+        assert_eq!(
+            commands[0],
+            strings(&[
+                "rustup",
+                "run",
+                "1.94.0",
+                "cargo",
+                "--config",
+                "/tmp/p.toml",
+                "clippy",
+                "--locked"
+            ])
+        );
+        // A bare prefix without a subcommand is left alone.
+        assert_eq!(commands[1].len(), 4);
+    }
+
+    #[test]
+    fn clippy_covers_cargo_check() {
+        let check = |actions: &[&str]| -> Check {
+            let list: Vec<String> = actions.iter().map(|a| format!("'{a}'")).collect();
+            toml::from_str(&format!("kind = 'cargo'\nactions = [{}]", list.join(","))).unwrap()
+        };
+        let cargo = strings(&["cargo"]);
+        let both = cargo_commands(&check(&["check", "clippy", "test"]), &cargo, "2").unwrap();
+        assert_eq!(both.len(), 2, "{both:?}");
+        assert!(both.iter().all(|c| c[1] != "check"));
+        assert!(both.iter().any(|c| c[1] == "clippy"));
+        // Alone, `check` still runs.
+        let alone = cargo_commands(&check(&["check", "test"]), &cargo, "2").unwrap();
+        assert_eq!(alone.len(), 2);
+        assert!(alone.iter().any(|c| c[1] == "check"));
+        // `build` is not covered: clippy produces no artifacts.
+        let build = cargo_commands(&check(&["build", "clippy"]), &cargo, "2").unwrap();
+        assert!(build.iter().any(|c| c[1] == "build"));
+    }
 
     fn cached_check() -> Check {
         Check {

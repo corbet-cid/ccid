@@ -1,0 +1,16 @@
+# The shared build profile of the fleet's CI and of every lane/workstation that wants to share compile-cache keys with it.
+#
+# A cargo config fragment, NEVER environment variables: a compiler cache (sccache, kache) hashes every CARGO_* variable the compiler is started with, so the same
+# setting given as CARGO_PROFILE_DEV_DEBUG in one place and as `[profile.dev] debug` in another produces different keys (measured 2026-11-06: env vs config = no
+# hit, config vs config = hit). ccid applies this file to its cargo checks with `cargo --config <file>`; `ccid dev-profile` prints it for the include file of a
+# CARGO_HOME (scripts, lanes, workstations).
+#
+# No debug information in CI builds: smaller objects, faster links, identical keys everywhere.
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.release]
+debug = 0

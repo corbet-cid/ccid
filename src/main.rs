@@ -89,6 +89,8 @@ enum Action {
         action: ccid::tor::Action,
     },
     SourceRevision,
+    /// Print the shared build profile (profiles/dev.toml) as a cargo config fragment, for the include file of a CARGO_HOME.
+    DevProfile,
     VerifySource {
         #[arg(long)]
         archive: PathBuf,
@@ -367,6 +369,10 @@ fn main() -> ExitCode {
         .map(|_| ()),
         Action::SourceRevision => {
             println!("{}", ccid::SOURCE_REVISION);
+            Ok(())
+        }
+        Action::DevProfile => {
+            print!("{}", ccid::DEV_PROFILE);
             Ok(())
         }
         Action::VerifySource {

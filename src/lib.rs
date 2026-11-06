@@ -13,6 +13,9 @@ use std::{
 };
 
 pub const SOURCE_REVISION: &str = env!("CCID_SOURCE_REVISION");
+
+/// The shared build profile (profiles/dev.toml) as a cargo config fragment. See the file for why it is config and never CARGO_PROFILE_* environment.
+pub const DEV_PROFILE: &str = include_str!("../profiles/dev.toml");
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub mod submission;
@@ -504,6 +507,7 @@ fn run_checks_inner(
         .as_ref()
         .map(|scratch| scratch.path().to_owned())
         .or_else(|| _scratch.as_ref().map(|scratch| scratch.path().to_owned()));
+    let scratch_for_profile = scratch_for_kache.clone();
     if let Some(scratch) = scratch_for_kache {
         cache::prepare_kache_runtime(&mut environment, &scratch);
     }
@@ -577,6 +581,19 @@ fn run_checks_inner(
                     );
                     if removed > 0 {
                         event(json!({"event":"incremental-trimmed","bytes":removed}));
+                    }
+                }
+                // The shared profile as a config file argument, unless the job declares profile settings itself (environment) : one mechanism fleet-wide, see profiles/dev.toml.
+                let declares_profile = cargo_environment
+                    .keys()
+                    .any(|name| name.to_string_lossy().starts_with("CARGO_PROFILE_"));
+                if !declares_profile {
+                    if let Some(scratch) = scratch_for_profile.as_ref() {
+                        let file = scratch.join("ccid-dev-profile.toml");
+                        if fs::write(&file, DEV_PROFILE).is_ok() {
+                            let file = file.to_string_lossy().into_owned();
+                            checks::apply_config_file(&mut commands, cargo.len(), &file);
+                        }
                     }
                 }
                 let cargo_runner =
