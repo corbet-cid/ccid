@@ -44,6 +44,16 @@ fn malformed_lfs_pointer_fails_closed() {
     assert!(archive::pointer(b"ordinary file").unwrap().is_none());
 }
 fn lfs(f: &mut Fixture, data: &[u8]) -> PathBuf {
+    // A host may relocate Git LFS storage globally (`lfs.storage`, e.g. a shared cache directory): the fixture names its own, so the test never depends on that.
+    git(
+        &f.repo,
+        &[
+            "config",
+            "lfs.storage",
+            &f.repo.join(".git/lfs").to_string_lossy(),
+        ],
+    )
+    .unwrap();
     let hash = sha(data);
     let path = f
         .repo

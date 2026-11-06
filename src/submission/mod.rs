@@ -264,7 +264,12 @@ fn output(argv: &[String], cwd: Option<&Path>, input: Option<&[u8]>) -> Result<V
         });
         let result = child.wait_with_output();
         if let Some(writer) = writer {
-            writer.join().map_err(|_| "Input writer panicked")??;
+            // A child that has read all it wants and exits (`git get-tar-commit-id` reads the first kilobyte of a tar) closes its stdin: the write then fails
+            // with a broken pipe, and the child's exit status alone decides.
+            match writer.join().map_err(|_| "Input writer panicked")? {
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                other => other?,
+            }
         }
         Result::Ok(result?)
     })?;
