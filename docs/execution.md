@@ -182,9 +182,3 @@ own default. Cargo applies it to workspace members only, so registry and git dep
 their compile-cache hits. The incremental state of a target is capped (2048 MiB, `CCID_INCREMENTAL_CAP_MB`): above the cap ccid
 removes only the `incremental` directories before the run, never build outputs or other caches, and logs an
 `incremental-trimmed` event. Debug information stays off (`CARGO_PROFILE_*_DEBUG` is the job's declaration).
-
-## Cached-verdict epoch
-
-A cached check result is keyed by its inputs and by `VERDICT_EPOCH` (`src/cached.rs`), not by the ccid build revision: a
-new ccid that checks the same things the same way keeps every existing verdict. The epoch is raised only when the semantics
-of a check change (what runs, or what counts as passing); older verdicts then stop answering for the new meaning.
