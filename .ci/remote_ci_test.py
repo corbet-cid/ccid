@@ -27,6 +27,10 @@ class FakeGit:
         self.heads = {"main": head}
         self.plans = {"windows": dict(PLAN)} if plans is None else plans
         self.files = changed or ["src/lib.rs"]
+        self.tag_list = {}
+
+    def tags(self, repo, pattern):
+        return dict(self.tag_list)
 
     def head(self, repo, branch):
         return self.heads.get(branch)
@@ -48,6 +52,7 @@ class FakeHttp:
         self.calls, self.statuses = [], []
         self.mirror_head, self.pipeline_sha, self.pipeline_status = A, A, "running"
         self.dispatch_status = 201
+        self.tag_head = C
         self.project = {"builds_access_level": "enabled", "shared_runners_enabled": True}
 
     def __call__(self, method, url, headers, body=None, pace=True):
@@ -63,6 +68,8 @@ class FakeHttp:
             return 200, self.project
         if "/repository/branches/" in url:
             return 200, {"commit": {"id": self.mirror_head}}
+        if "/repository/tags/" in url:
+            return 200, {"commit": {"id": self.tag_head}}
         if url.endswith("/pipeline") and method == "POST":
             return self.dispatch_status, {"id": 7, "sha": self.pipeline_sha, "web_url": "https://gitlab.example/p/7",
                                           "message": "bad request"}
@@ -206,6 +213,55 @@ class RemoteCiTest(unittest.TestCase):
         plans = {"mac": dict(PLAN, provider="github")}
         broker(self.state, http, FakeGit(plans=plans)).sweep()
         self.assertEqual(http.calls, [])
+
+    def test_release_tags_baseline_then_one_run_per_new_tag(self):
+        http, git = FakeHttp(), FakeGit()
+        git.tag_list = {"v0.9.0": B}
+        b = broker(self.state, http, git)
+        b.sweep()  # first sight: v0.9.0 is the baseline; the branch head runs as usual
+        posts = lambda: [c for c in http.calls if c[1].endswith("/pipeline")]
+        self.assertEqual([c[2]["ref"] for c in posts()], ["main"])
+        http.pipeline_status = "success"
+        b.sweep()
+        git.tag_list["v1.0.0"] = C  # a new release tag: runs at once, inside the interval
+        http.pipeline_sha = C
+        http.pipeline_status = "running"
+        b.sweep()
+        self.assertEqual([c[2]["ref"] for c in posts()], ["main", "v1.0.0"])
+        self.assertTrue(any("/repository/tags/v1.0.0" in c[1] for c in http.calls))
+        self.assertIn("v1.0.0", self.record()["tags_seen"])
+        variables = {v["key"]: v["value"] for v in posts()[-1][2]["variables"]}
+        self.assertEqual(variables["CCID_EXPECTED_SHA"], C)
+        http.pipeline_status = "success"
+        b.sweep()
+        b.sweep()  # nothing new: no third pipeline
+        self.assertEqual(len(posts()), 2)
+
+    def test_release_tag_on_a_proven_commit_is_not_run_again(self):
+        http, git = FakeHttp(), FakeGit()
+        b = broker(self.state, http, git)
+        b.sweep()
+        http.pipeline_status = "success"
+        b.sweep()
+        git.tag_list["v1.0.0"] = A  # the commit the branch run already proved
+        b.sweep()
+        self.assertEqual(sum(1 for c in http.calls if c[1].endswith("/pipeline")), 1)
+        self.assertIn("v1.0.0", self.record()["tags_seen"])
+
+    def test_release_tag_waits_for_the_mirror(self):
+        http, git = FakeHttp(), FakeGit()
+        b = broker(self.state, http, git)
+        b.sweep()
+        http.pipeline_status = "success"
+        b.sweep()
+        git.tag_list["v1.0.0"] = C
+        http.tag_head = B  # the mirror has not received the tag's commit yet
+        b.sweep()
+        self.assertNotIn("v1.0.0", self.record()["tags_seen"])
+        http.tag_head = http.pipeline_sha = C
+        b.sweep()
+        self.assertIn("v1.0.0", self.record()["tags_seen"])
+        self.assertEqual(sum(1 for c in http.calls if c[1].endswith("/pipeline")), 2)
 
     def test_github_requires_the_gate(self):
         with self.assertRaises(rc.Failure):

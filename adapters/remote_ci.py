@@ -16,7 +16,9 @@ adapter: they go through the configured gate command, which applies its own budg
 
 Commands:
   sweep     follow every configured repository once (one run per job at a time, newest head only,
-            at most one dispatch per job per `min_interval_hours`, path filter from the declaration)
+            at most one dispatch per job per `min_interval_hours`, path filter from the declaration);
+            every NEW release tag (`release_tags`, default `v[0-9]*`) runs each remote job once, regardless of
+            interval and paths (the tags that exist when a job is first seen are the baseline, never run)
   dispatch  start one declared job now for an exact commit (manual; ignores interval and paths)
   status    print the state of every followed job as JSON
 """
@@ -42,6 +44,7 @@ NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PROVIDERS = ("gitlab", "github", "circleci", "bitbucket")
 DEFAULT_INTERVAL_HOURS = 24
+DEFAULT_RELEASE_TAGS = "v[0-9]*"  # the release tags (vX.Y.Z); an empty value follows no tags
 PACE_SECONDS = 1.0  # between provider API calls of one sweep: never a burst
 HTTP_TIMEOUT = 30
 MAX_TRANSIENT = 6  # transient dispatch failures before the commit is reported as an error
@@ -158,6 +161,21 @@ class GitCopy:
             return {}
         return {name: plan for name, plan in (inventory.get("jobs") or {}).items() if plan.get("scheduler") == "remote"}
 
+    def tags(self, repo: str, pattern: str) -> dict[str, str]:
+        """Release tags matching `pattern`, each with the commit it points to (annotated tags peeled)."""
+        result = {}
+        try:
+            listing = self._git(repo, "for-each-ref", "--format=%(refname:strip=2) %(objectname) %(*objectname)", "refs/tags")
+        except Transient:
+            return result
+        for line in listing.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and fnmatch.fnmatchcase(parts[0], pattern) and NAME.match(parts[0]):
+                sha = parts[2] if len(parts) > 2 else parts[1]
+                if SHA.match(sha):
+                    result[parts[0]] = sha
+        return result
+
     def contains(self, repo: str, ancestor: str, sha: str) -> bool:
         directory = self.template.format(repo=repo)
         return subprocess.run(["git", "--git-dir", directory, "merge-base", "--is-ancestor", ancestor, sha],
@@ -223,11 +241,12 @@ class GitLab:
         expect(*self._call("PUT", f"/projects/{self._project(mirror)}", change), (200,), f"enable CI on GitLab {mirror}")
         log(f"gitlab {mirror}: set {', '.join(sorted(change))}")
 
-    def head(self, mirror: str, branch: str) -> str | None:
-        status, payload = self._call("GET", f"/projects/{self._project(mirror)}/repository/branches/{urllib.parse.quote(branch, safe='')}")
+    def head(self, mirror: str, branch: str, tag: bool = False) -> str | None:
+        kind = "tags" if tag else "branches"
+        status, payload = self._call("GET", f"/projects/{self._project(mirror)}/repository/{kind}/{urllib.parse.quote(branch, safe='')}")
         if status == 404:
             return None
-        return (expect(status, payload, (200,), f"GitLab branch {mirror}:{branch}").get("commit") or {}).get("id")
+        return (expect(status, payload, (200,), f"GitLab {kind} {mirror}:{branch}").get("commit") or {}).get("id")
 
     def dispatch(self, mirror: str, branch: str, sha: str, job: str, plan: dict, request: str) -> Run:
         variables = [{"key": "CCID_REMOTE_JOB", "value": job}, {"key": "CCID_EXPECTED_SHA", "value": sha},
@@ -276,7 +295,10 @@ class GitHub:
     def ensure(self, mirror: str) -> None:
         """Actions must be on; switching them on is a gate write, so it is part of the gate's dispatch."""
 
-    def head(self, mirror: str, branch: str) -> str | None:
+    def head(self, mirror: str, branch: str, tag: bool = False) -> str | None:
+        if tag:  # the commit a tag points to (annotated tags peeled)
+            status, payload = self._get(f"/repos/{mirror}/commits/{urllib.parse.quote(branch, safe='')}")
+            return None if status in (404, 422) else expect(status, payload, (200,), f"GitHub tag {mirror}:{branch}").get("sha")
         status, payload = self._get(f"/repos/{mirror}/branches/{urllib.parse.quote(branch, safe='')}")
         if status == 404:
             return None
@@ -327,11 +349,12 @@ class CircleCI:
     def ensure(self, mirror: str) -> None:
         """Project and pipeline definition are declared on the CircleCI side; nothing to switch here."""
 
-    def head(self, mirror: str, branch: str) -> str | None:
+    def head(self, mirror: str, branch: str, tag: bool = False) -> str | None:
         return None  # CircleCI reads the VCS itself; the pipeline's revision is verified after the trigger
 
     def dispatch(self, mirror: str, branch: str, sha: str, job: str, plan: dict, request: str) -> Run:
-        body = {"branch": branch, "parameters": {"ccid_job": job, "ccid_sha": sha, "ccid_request": request}}
+        body = {"tag" if plan.get("tag") else "branch": branch,
+                "parameters": {"ccid_job": job, "ccid_sha": sha, "ccid_request": request}}
         pipeline = expect(*self._call("POST", f"/project/{mirror}/pipeline", body), (201, 200), f"CircleCI pipeline on {mirror}")
         run = Run(provider=self.name, id=pipeline["id"], url=None, mirror=mirror, number=pipeline.get("number"))
         for _ in range(12):
@@ -380,11 +403,12 @@ class Bitbucket:
                f"enable Pipelines on Bitbucket {mirror}")
         log(f"bitbucket {mirror}: Pipelines enabled")
 
-    def head(self, mirror: str, branch: str) -> str | None:
-        status, payload = self._call("GET", f"/repositories/{mirror}/refs/branches/{urllib.parse.quote(branch, safe='')}")
+    def head(self, mirror: str, branch: str, tag: bool = False) -> str | None:
+        kind = "tags" if tag else "branches"
+        status, payload = self._call("GET", f"/repositories/{mirror}/refs/{kind}/{urllib.parse.quote(branch, safe='')}")
         if status == 404:
             return None
-        return (expect(status, payload, (200,), f"Bitbucket branch {mirror}:{branch}").get("target") or {}).get("hash")
+        return (expect(status, payload, (200,), f"Bitbucket {kind} {mirror}:{branch}").get("target") or {}).get("hash")
 
     def dispatch(self, mirror: str, branch: str, sha: str, job: str, plan: dict, request: str) -> Run:
         body = {"target": {"type": "pipeline_commit_target", "commit": {"type": "commit", "hash": sha},
@@ -458,6 +482,7 @@ class Broker:
         self.forge = Forgejo(self.http, config["forgejo"])
         self.state = State(Path(config["state_dir"]))
         self.interval = float(config.get("min_interval_hours", DEFAULT_INTERVAL_HOURS)) * 3600
+        self.release_tags = config.get("release_tags", DEFAULT_RELEASE_TAGS)
         self.providers: dict[str, object] = {}
         for repo, mirrors in config.get("repos", {}).items():
             if not REPO.match(repo) or not isinstance(mirrors, dict):
@@ -490,7 +515,7 @@ class Broker:
         provider = self.provider(plan["provider"])
         mirror = self.mirror(repo, plan["provider"])
         provider.ensure(mirror)
-        head = provider.head(mirror, branch)
+        head = provider.head(mirror, branch, bool(plan.get("tag")))
         if head is not None and head != sha:
             log(f"{repo} {job}: the {plan['provider']} mirror is at {head[:12]}, waiting for {sha[:12]}")
             return False
@@ -503,7 +528,7 @@ class Broker:
                                 "dispatched": now, "deadline": now + 60 * int(plan.get("timeout_minutes") or 60)},
                       last_dispatched={"commit": sha, "at": now}, transient=0)
         self.forge.status(repo, sha, "pending", context(job), self.describe(plan, "running"), run.get("url"))
-        log(f"{repo} {job}: dispatched {sha[:12]} to {plan['provider']} ({run.get('url')})")
+        log(f"{repo} {job}: dispatched {sha[:12]} ({'tag' if plan.get('tag') else 'branch'} {branch}) to {plan['provider']} ({run.get('url')})")
         return True
 
     def follow(self, repo: str, job: str, record: dict) -> None:
@@ -553,7 +578,7 @@ class Broker:
                 try:
                     if record.get("inflight"):
                         self.follow(repo, job, record)
-                    elif self.due(repo, sha, plan, record):
+                    elif not self.release(repo, job, plan, record) and self.due(repo, sha, plan, record):
                         self.start(repo, branch, sha, job, self.with_plan(plan), record)
                 except Transient as error:
                     log(f"{repo} {job}: provider unavailable, retrying later ({error})")
@@ -567,6 +592,33 @@ class Broker:
                         self.report_error(repo, sha, job, plan, str(error), record)
                 self.state.save(repo, job, record)
         return 1 if failures else 0
+
+    def release(self, repo: str, job: str, plan: dict, record: dict) -> bool:
+        """Run the job once for the oldest new release tag. True when a tag was handled in this sweep."""
+        if not self.release_tags:
+            return False
+        tags = self.git.tags(repo, self.release_tags)
+        if "tags_seen" not in record:  # first sight: the existing tags are the baseline, never run
+            record["tags_seen"] = sorted(tags)
+            return False
+        for name in sorted(set(tags) - set(record["tags_seen"])):
+            sha = tags[name]
+            tagged = self.git.jobs(repo, sha).get(job)
+            last = record.get("last_result") or {}
+            if not tagged or tagged.get("provider") != plan.get("provider") or (
+                    last.get("commit") == sha and last.get("state") in ("success", "failure")):
+                record["tags_seen"] = sorted({*record["tags_seen"], name})  # nothing to run, or already proven
+                continue
+            tag_plan = {**self.with_plan(tagged), "tag": True}
+            try:
+                started = self.start(repo, name, sha, job, tag_plan, record)
+            except Failure as error:
+                self.report_error(repo, sha, job, tag_plan, str(error), record)
+                started = True
+            if started:
+                record["tags_seen"] = sorted({*record["tags_seen"], name})
+            return True  # one dispatch per job and sweep; a mirror without the tag yet waits for the next sweep
+        return False
 
     def report_error(self, repo: str, sha: str, job: str, plan: dict, text: str, record: dict) -> None:
         try:
