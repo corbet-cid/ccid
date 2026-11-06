@@ -783,6 +783,7 @@ fn crow_is_refused_unless_the_manifest_keeps_it_alive_and_forgejo_and_argo_are_n
     render(forgejo_repository(&forgejo).path(), false).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn forgejo_fetch_step_retries_the_copy_then_asks_the_forge() {
     use std::os::unix::fs::PermissionsExt;
