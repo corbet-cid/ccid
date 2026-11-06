@@ -195,6 +195,59 @@ class GitCopy:
         return [line for line in self._git(repo, "diff", "--name-only", base, sha).splitlines() if line]
 
 
+class ForgejoSource:
+    """The same reads as GitCopy through the forge's API, for a host without a local copy. Public repositories need no
+    credential; `token_env`, when set, names a read credential for private ones."""
+
+    def __init__(self, http: Http, config: dict) -> None:
+        self.http, self.api, self.token_env = http, config["api"].rstrip("/"), config.get("token_env")
+
+    def _get(self, path: str):
+        headers = {}
+        if self.token_env:
+            headers["Authorization"] = f"token {secret(self.token_env)}"
+        return self.http("GET", f"{self.api}{path}", headers)
+
+    def head(self, repo: str, branch: str) -> str | None:
+        status, payload = self._get(f"/repos/{repo}/branches/{urllib.parse.quote(branch, safe='')}")
+        sha = ((payload or {}).get("commit") or {}).get("id") if status == 200 else None
+        return sha if sha and SHA.match(sha) else None
+
+    def jobs(self, repo: str, sha: str) -> dict:
+        status, inventory = self._get(f"/repos/{repo}/raw/.ci/jobs.json?ref={sha}")
+        if status != 200 or not isinstance(inventory, dict):
+            return {}
+        return {name: plan for name, plan in (inventory.get("jobs") or {}).items() if plan.get("scheduler") == "remote"}
+
+    def tags(self, repo: str, pattern: str) -> dict[str, str]:
+        result = {}
+        for page in range(1, 21):
+            status, listing = self._get(f"/repos/{repo}/tags?limit=50&page={page}")
+            if status != 200 or not listing:
+                break
+            for tag in listing:
+                name, sha = tag.get("name", ""), (tag.get("commit") or {}).get("sha", "")
+                if fnmatch.fnmatchcase(name, pattern) and NAME.match(name) and SHA.match(sha):
+                    result[name] = sha
+        return result
+
+    def contains(self, repo: str, ancestor: str, sha: str) -> bool:
+        status, _ = self._get(f"/repos/{repo}/compare/{ancestor}...{sha}")
+        return status == 200
+
+    def changed(self, repo: str, base: str, sha: str) -> list[str] | None:
+        """The changed paths, or None when the forge does not say (the caller then treats every path as changed)."""
+        status, payload = self._get(f"/repos/{repo}/compare/{base}...{sha}")
+        if status != 200 or not isinstance(payload, dict):
+            return None
+        files = payload.get("files")
+        if files is None:
+            files = [f for commit in payload.get("commits") or [] for f in (commit.get("files") or [])]
+            if not files and payload.get("commits"):
+                return None
+        return [f.get("filename") for f in files if f.get("filename")]
+
+
 def matches(paths: list[str], changed: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(file, glob) or fnmatch.fnmatchcase(file, glob.replace("/**", "/*"))
                or (glob.endswith("/**") and file.startswith(glob[:-2])) for glob in paths for file in changed)
@@ -205,9 +258,11 @@ def matches(paths: list[str], changed: list[str]) -> bool:
 
 class Forgejo:
     def __init__(self, http: Http, config: dict) -> None:
-        self.http, self.api, self.token_env = http, config["api"].rstrip("/"), config["token_env"]
+        self.http, self.api, self.token_env = http, config["api"].rstrip("/"), config.get("token_env")
 
     def status(self, repo: str, sha: str, state: str, context: str, description: str, target: str | None) -> None:
+        if not self.token_env:
+            raise Failure("this host holds no forge credential: commit statuses cannot be posted")
         body = {"state": state, "context": context, "description": description[:DESCRIPTION_MAX]}
         if target:
             body["target_url"] = target
@@ -488,7 +543,7 @@ class Broker:
     def __init__(self, config: dict, http: Http | None = None, git: GitCopy | None = None) -> None:
         self.config = config
         self.http = http or Http()
-        self.git = git or GitCopy(config["git_copy"])
+        self.git = git or (GitCopy(config["git_copy"]) if config.get("git_copy") else ForgejoSource(self.http, config["source"]))
         self.forge = Forgejo(self.http, config["forgejo"])
         self.state = State(Path(config["state_dir"]))
         self.interval = float(config.get("min_interval_hours", DEFAULT_INTERVAL_HOURS)) * 3600
@@ -583,7 +638,8 @@ class Broker:
         paths = plan.get("paths") or []
         base = last.get("commit")
         if paths and base and SHA.match(base) and self.git.contains(repo, base, sha):
-            if not matches(paths, self.git.changed(repo, base, sha)):
+            changed = self.git.changed(repo, base, sha)
+            if changed is not None and not matches(paths, changed):
                 return False
         return True
 

@@ -296,6 +296,33 @@ class RemoteCiTest(unittest.TestCase):
         broker(self.state, http, git, platforms={"windows": False, "macos": False, "linux": True}).sweep()
         self.assertTrue(any(c[1].endswith("/pipeline") for c in http.calls))
 
+    def test_forgejo_source_reads_anonymously(self):
+        inventory = {"jobs": {"windows": dict(PLAN), "verify": {"scheduler": "forgejo"}}}
+        answers = {
+            "/repos/o/r/branches/main": (200, {"commit": {"id": A}}),
+            f"/repos/o/r/raw/.ci/jobs.json?ref={A}": (200, inventory),
+            "/repos/o/r/tags?limit=50&page=1": (200, [{"name": "v1.0.0", "commit": {"sha": B}}, {"name": "x", "commit": {"sha": C}}]),
+            "/repos/o/r/tags?limit=50&page=2": (200, []),
+            f"/repos/o/r/compare/{A}...{B}": (200, {"files": [{"filename": "src/a.rs"}]}),
+            f"/repos/o/r/compare/{B}...{C}": (200, {"commits": [{"sha": C}]}),
+        }
+        seen = []
+        def http(method, url, headers, body=None, pace=True):
+            seen.append(headers)
+            return answers[url.removeprefix("https://forge.example/api/v1")]
+        source = rc.ForgejoSource(http, {"api": "https://forge.example/api/v1"})
+        self.assertEqual(source.head("o/r", "main"), A)
+        self.assertEqual(list(source.jobs("o/r", A)), ["windows"])
+        self.assertEqual(source.tags("o/r", "v[0-9]*"), {"v1.0.0": B})
+        self.assertEqual(source.changed("o/r", A, B), ["src/a.rs"])
+        self.assertIsNone(source.changed("o/r", B, C), "commits without files: unknown, never 'nothing changed'")
+        self.assertTrue(all(h == {} for h in seen), "no credential without token_env")
+
+    def test_forge_without_credential_never_posts(self):
+        forge = rc.Forgejo(FakeHttp(), {"api": "https://forge.example/api/v1"})
+        with self.assertRaises(rc.Failure):
+            forge.status("o/r", A, "pending", "remote / x", "d", None)
+
     def test_github_requires_the_gate(self):
         with self.assertRaises(rc.Failure):
             rc.GitHub(FakeHttp(), {})
