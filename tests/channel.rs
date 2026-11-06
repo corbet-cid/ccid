@@ -42,6 +42,7 @@ fn channel_json_entries_are_published_with_the_named_digest() {
         .filter(|value| !value.is_empty())
     else {
         eprintln!("CCID_TOOL_URL is not set: published-digest check skipped");
+        let _ = std::fs::write(marker(), "skipped: CCID_TOOL_URL is not set\n");
         return;
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("channel.json");
@@ -84,4 +85,9 @@ fn channel_json_entries_are_published_with_the_named_digest() {
         "channel.json: {} release(s) fetched and digest-checked",
         checked.len()
     );
+}
+
+/// Evidence for operators: a passing test prints nothing in the CI log, so the outcome (checked or skipped) is also written below the target directory.
+fn marker() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("channel-check.txt")
 }
