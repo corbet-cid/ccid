@@ -235,16 +235,26 @@ pub fn checkout(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Resu
                 "git config lfs.storage",
             )?;
         }
-        run_ok(
+        // With a shared store several accounts write to it: the objects and their directories are group-writable (umask 002; the store's setgid
+        // directory keeps the group). No shell glue beyond the umask.
+        let mut pull = if pace.lfs_storage.is_some() {
+            let mut command = Command::new("sh");
+            command
+                .current_dir(dir)
+                .args(["-c", "umask 002; exec \"$0\" \"$@\""])
+                .arg(&pace.git);
+            command
+        } else {
             git(pace, dir)
-                .env("CCID_LFS_TOKEN", token)
-                .args([
-                    "-c",
-                    "credential.helper=!f() { echo username=x-access-token; echo \"password=$CCID_LFS_TOKEN\"; }; f",
-                    "lfs",
-                    "pull",
-                    "origin",
-                ]),
+        };
+        run_ok(
+            pull.env("CCID_LFS_TOKEN", token).args([
+                "-c",
+                "credential.helper=!f() { echo username=x-access-token; echo \"password=$CCID_LFS_TOKEN\"; }; f",
+                "lfs",
+                "pull",
+                "origin",
+            ]),
             "git lfs pull",
         )?;
     }
