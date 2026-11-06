@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "generator": "ccid render v1",
-  "tool_revision": "105ddc4cc22bd460ddb7e9e68207f265ca229a34",
-  "manifest_sha256": "efa59856942e9089d6cd0c9a109e8611cab32bedba8a4ca511e198e3dfe5aaf7",
+  "tool_revision": "10a28f64c3bb63dfade833dd219cba0f504c9345",
+  "manifest_sha256": "921beb73d8c3032abd1a10f84589dcc1d89671bd0ea9ef88b5cea0c6e8d26ba9",
   "jobs": {
     "build": {
       "job": "build",
@@ -46,6 +46,29 @@
       "runs_on": "heavy",
       "archive_inputs": true
     },
+    "macos": {
+      "job": "macos",
+      "scheduler": "remote",
+      "checks": [
+        "test"
+      ],
+      "workflow": "ccid-remote",
+      "command": [],
+      "push_branches": [
+        "main"
+      ],
+      "paths": [
+        "src/**",
+        "tests/**",
+        "build.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        ".github/workflows/ccid-remote.yml"
+      ],
+      "provider": "github",
+      "platform": "macos-arm64",
+      "timeout_minutes": 60
+    },
     "native-compile-cache": {
       "job": "native-compile-cache",
       "scheduler": "forgejo",
@@ -76,6 +99,29 @@
       ],
       "runs_on": "heavy",
       "archive_inputs": true
+    },
+    "windows": {
+      "job": "windows",
+      "scheduler": "remote",
+      "checks": [
+        "test"
+      ],
+      "workflow": "ccid-remote",
+      "command": [],
+      "push_branches": [
+        "main"
+      ],
+      "paths": [
+        "src/**",
+        "tests/**",
+        "build.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        ".gitlab-ci.yml"
+      ],
+      "provider": "gitlab",
+      "platform": "windows-x64",
+      "timeout_minutes": 90
     }
   }
 }

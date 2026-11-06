@@ -24,8 +24,8 @@ jobs:
       - name: Fetch the exact commit and run the declared checks
         env:
           CCID_FORGE_TOKEN: ${{ github.token }}
-          CCID_REVISION: 105ddc4cc22bd460ddb7e9e68207f265ca229a34
-          CCID_TOOL_SHA256: d3378c2ee0185079dbd3dd7d2d5de4a904851158f0f4e647154b7f4158f9856d
+          CCID_REVISION: 10a28f64c3bb63dfade833dd219cba0f504c9345
+          CCID_TOOL_SHA256: fe74ddd559238d99c9fad0655468edebac57be6031156ccbc09e35fb88959243
         run: |
           set -eu
           # A runner may name CCID_SOURCE_ROOT: the source then lives in a stable directory per repository, job and slot instead of the per-task directory, so absolute source
@@ -66,7 +66,20 @@ jobs:
           git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
           fetch() { git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" fetch --quiet --depth 1 origin "${{ github.sha }}"; }
           # A runner may route the fetch to a local copy of the repository (its own git configuration); that copy can lag the push by seconds. Then ask the forge itself.
-          fetch || { echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2; GIT_CONFIG_COUNT=0 fetch; }
+          # Seconds after a push the copy may not have the commit yet ("not our ref"): ask it again a few times, then the forge itself (same commit id, so the same verification).
+          fetched=
+          for attempt in 1 2 3; do
+            if fetch; then fetched=1; break; fi
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$fetched" ]; then
+            echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2
+            for attempt in 1 2 3; do
+              if GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
+              [ "$attempt" -lt 3 ] && sleep 5
+            done
+          fi
+          [ -n "$fetched" ] || { echo "cannot fetch ${{ github.sha }}" >&2; exit 2; }
           # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the fetch above carries the token, so does the LFS transfer).
           GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
           if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
@@ -109,8 +122,8 @@ jobs:
       - name: Fetch the exact commit and run the declared checks
         env:
           CCID_FORGE_TOKEN: ${{ github.token }}
-          CCID_REVISION: 105ddc4cc22bd460ddb7e9e68207f265ca229a34
-          CCID_TOOL_SHA256: d3378c2ee0185079dbd3dd7d2d5de4a904851158f0f4e647154b7f4158f9856d
+          CCID_REVISION: 10a28f64c3bb63dfade833dd219cba0f504c9345
+          CCID_TOOL_SHA256: fe74ddd559238d99c9fad0655468edebac57be6031156ccbc09e35fb88959243
         run: |
           set -eu
           # A runner may name CCID_SOURCE_ROOT: the source then lives in a stable directory per repository, job and slot instead of the per-task directory, so absolute source
@@ -151,7 +164,20 @@ jobs:
           git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
           fetch() { git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" fetch --quiet --depth 1 origin "${{ github.sha }}"; }
           # A runner may route the fetch to a local copy of the repository (its own git configuration); that copy can lag the push by seconds. Then ask the forge itself.
-          fetch || { echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2; GIT_CONFIG_COUNT=0 fetch; }
+          # Seconds after a push the copy may not have the commit yet ("not our ref"): ask it again a few times, then the forge itself (same commit id, so the same verification).
+          fetched=
+          for attempt in 1 2 3; do
+            if fetch; then fetched=1; break; fi
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$fetched" ]; then
+            echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2
+            for attempt in 1 2 3; do
+              if GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
+              [ "$attempt" -lt 3 ] && sleep 5
+            done
+          fi
+          [ -n "$fetched" ] || { echo "cannot fetch ${{ github.sha }}" >&2; exit 2; }
           # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the fetch above carries the token, so does the LFS transfer).
           GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
           if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
@@ -194,8 +220,8 @@ jobs:
       - name: Fetch the exact commit and run the declared checks
         env:
           CCID_FORGE_TOKEN: ${{ github.token }}
-          CCID_REVISION: 105ddc4cc22bd460ddb7e9e68207f265ca229a34
-          CCID_TOOL_SHA256: d3378c2ee0185079dbd3dd7d2d5de4a904851158f0f4e647154b7f4158f9856d
+          CCID_REVISION: 10a28f64c3bb63dfade833dd219cba0f504c9345
+          CCID_TOOL_SHA256: fe74ddd559238d99c9fad0655468edebac57be6031156ccbc09e35fb88959243
         run: |
           set -eu
           # A runner may name CCID_SOURCE_ROOT: the source then lives in a stable directory per repository, job and slot instead of the per-task directory, so absolute source
@@ -236,7 +262,20 @@ jobs:
           git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
           fetch() { git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" fetch --quiet --depth 1 origin "${{ github.sha }}"; }
           # A runner may route the fetch to a local copy of the repository (its own git configuration); that copy can lag the push by seconds. Then ask the forge itself.
-          fetch || { echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2; GIT_CONFIG_COUNT=0 fetch; }
+          # Seconds after a push the copy may not have the commit yet ("not our ref"): ask it again a few times, then the forge itself (same commit id, so the same verification).
+          fetched=
+          for attempt in 1 2 3; do
+            if fetch; then fetched=1; break; fi
+            [ "$attempt" -lt 3 ] && sleep 5
+          done
+          if [ -z "$fetched" ]; then
+            echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2
+            for attempt in 1 2 3; do
+              if GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
+              [ "$attempt" -lt 3 ] && sleep 5
+            done
+          fi
+          [ -n "$fetched" ] || { echo "cannot fetch ${{ github.sha }}" >&2; exit 2; }
           # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the fetch above carries the token, so does the LFS transfer).
           GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
           if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
