@@ -2,8 +2,7 @@ schema = 1
 project = "ccid"
 
 [render]
-tool_revision = "10a28f64c3bb63dfade833dd219cba0f504c9345"
-tool_sha256 = "fe74ddd559238d99c9fad0655468edebac57be6031156ccbc09e35fb88959243"
+render_schema = 2
 
 # Formatting, Clippy with warnings denied and the full test suite, on the
 # release profile the compile job and the shipped binary share.
