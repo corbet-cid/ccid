@@ -233,6 +233,83 @@ pub(crate) fn route_target_outside_env(
     true
 }
 
+/// Cap of the incremental-compilation state of one target (MiB), unless `CCID_INCREMENTAL_CAP_MB` names another.
+const INCREMENTAL_CAP_MB: u64 = 2048;
+
+/// Whether rustc may keep incremental state in this target: only a persistent target at a stable source path
+/// (`persistent`) keeps it between runs, and only there does it pay (a fresh or seeded directory gets nothing from it).
+/// A job that sets `CARGO_INCREMENTAL` itself keeps its value (`None`); otherwise 1 for a persistent target and no
+/// opinion (Cargo's own default) for any other. Dependencies from registries and git stay non-incremental (Cargo applies it to workspace members only), so
+/// their compile-cache hits are unaffected.
+pub(crate) fn incremental_default(env: &Environment, persistent: bool) -> Option<&'static str> {
+    if value(env, "CARGO_INCREMENTAL").is_some() {
+        return None;
+    }
+    persistent.then_some("1")
+}
+
+/// The `incremental` directories below a target (`<target>/<profile>/incremental`, plus the per-triple variants).
+fn incremental_directories(target: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(profiles) = fs::read_dir(target) else {
+        return found;
+    };
+    for profile in profiles.flatten() {
+        if !profile.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let direct = profile.path().join("incremental");
+        if direct.is_dir() {
+            found.push(direct);
+        }
+        // `--target <triple>` keeps `<target>/<triple>/<profile>/incremental`.
+        if let Ok(inner) = fs::read_dir(profile.path()) {
+            for entry in inner.flatten() {
+                let candidate = entry.path().join("incremental");
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) && candidate.is_dir() {
+                    found.push(candidate);
+                }
+            }
+        }
+    }
+    found
+}
+
+fn directory_bytes(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => directory_bytes(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Remove ONLY the `incremental` directories of a target: all of them when `force` (an operator reset) or when together they exceed `cap_mb`. Returns the bytes removed. Build
+/// outputs, dependency artifacts and every other cache are never touched.
+pub(crate) fn trim_incremental(target: &Path, cap_mb: u64, force: bool) -> u64 {
+    let directories = incremental_directories(target);
+    let total: u64 = directories.iter().map(|path| directory_bytes(path)).sum();
+    if !force && total <= cap_mb.saturating_mul(1024 * 1024) {
+        return 0;
+    }
+    for directory in directories {
+        // remove_dir_all does not follow links; the path was found as a real directory below the locked target.
+        let _ = fs::remove_dir_all(&directory);
+    }
+    total
+}
+
+pub(crate) fn incremental_cap_mb(env: &Environment) -> u64 {
+    value(env, "CCID_INCREMENTAL_CAP_MB")
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(INCREMENTAL_CAP_MB)
+}
+
 /// Per-job scratch directory; exports it as `TMPDIR` to the checked programs.
 ///
 /// The scratch path never enters a cache key (`TMPDIR` and `RUNNER_TEMP` are
@@ -1034,6 +1111,47 @@ mod tests {
         let mut expected = before;
         expected.insert("TMPDIR".into(), path.as_os_str().into());
         assert_eq!(environment, expected);
+    }
+
+    #[test]
+    fn incremental_is_on_only_for_a_persistent_target_and_never_overrides_the_job() {
+        let none = Environment::new();
+        assert_eq!(incremental_default(&none, true), Some("1"));
+        assert_eq!(incremental_default(&none, false), None);
+        let declared = Environment::from([("CARGO_INCREMENTAL".into(), "0".into())]);
+        assert_eq!(incremental_default(&declared, true), None);
+        let declared = Environment::from([("CARGO_INCREMENTAL".into(), "1".into())]);
+        assert_eq!(incremental_default(&declared, false), None);
+    }
+
+    #[test]
+    fn the_incremental_guard_removes_only_incremental_state_and_only_over_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path();
+        let incremental = target.join("debug/incremental/crate-abc");
+        fs::create_dir_all(&incremental).unwrap();
+        fs::write(incremental.join("state"), vec![0u8; 3 * 1024 * 1024]).unwrap();
+        let triple = target.join("x86_64-unknown-linux-gnu/release/incremental/c");
+        fs::create_dir_all(&triple).unwrap();
+        fs::write(triple.join("state"), vec![0u8; 1024 * 1024]).unwrap();
+        let artifact = target.join("debug/deps/libx.rlib");
+        fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        fs::write(&artifact, b"keep").unwrap();
+        // Under the cap (4 MiB used, cap 8): nothing happens.
+        assert_eq!(trim_incremental(target, 8, false), 0);
+        assert!(incremental.join("state").exists());
+        // Over the cap (cap 2): every incremental directory goes, nothing else.
+        let removed = trim_incremental(target, 2, false);
+        assert_eq!(removed, 4 * 1024 * 1024);
+        assert!(!target.join("debug/incremental").exists());
+        assert!(!target
+            .join("x86_64-unknown-linux-gnu/release/incremental")
+            .exists());
+        assert!(artifact.exists());
+        // The cap is a declaration, with a default.
+        assert_eq!(incremental_cap_mb(&Environment::new()), INCREMENTAL_CAP_MB);
+        let custom = Environment::from([("CCID_INCREMENTAL_CAP_MB".into(), "5".into())]);
+        assert_eq!(incremental_cap_mb(&custom), 5);
     }
 
     #[cfg(unix)]

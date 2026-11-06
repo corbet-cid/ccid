@@ -173,3 +173,12 @@ for validation, not a Windows success claim. Nix checks explicitly require a
 supported Nix host. No macOS or Windows hosted build is triggered by this repo.
 
 See the [code quality baseline](docs/code-quality.md) for enforced checks and review principles.
+
+## Incremental compilation
+
+A cargo check whose target is persistent and runs at the stable source path (a cached, cargo-only selection without a
+caller-declared target) gets `CARGO_INCREMENTAL=1` unless the job sets `CARGO_INCREMENTAL` itself; any other check keeps Cargo's
+own default. Cargo applies it to workspace members only, so registry and git dependencies stay non-incremental and keep
+their compile-cache hits. The incremental state of a target is capped (2048 MiB, `CCID_INCREMENTAL_CAP_MB`): above the cap ccid
+removes only the `incremental` directories before the run, never build outputs or other caches, and logs an
+`incremental-trimmed` event. Debug information stays off (`CARGO_PROFILE_*_DEBUG` is the job's declaration).
