@@ -286,7 +286,13 @@ fn workflow_adapter(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// The exact ccid release the generated adapters are pinned to. Absent in a repository on `render_schema = 2`, which
+    /// takes the release from the central channel the runner names (no push per bump).
+    #[serde(default)]
     pub tool_revision: String,
+    /// 2: Forgejo workflows carry a short stable shim that finds the centrally chosen ccid and runs `ccid job-run`; the repository pins no release.
+    #[serde(default)]
+    pub render_schema: Option<u32>,
     /// Crow repo secret holding the immutable prebuilt tool path.
     #[serde(default = "default_tool_secret_binary")]
     pub tool_secret_binary: String,
@@ -419,7 +425,22 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         .render
         .as_ref()
         .ok_or_else(|| failure("Manifest requires [render].tool_revision"))?;
-    if config.tool_revision.len() != 40
+    let central = match config.render_schema {
+        None => false,
+        Some(2) => true,
+        Some(other) => {
+            return Err(failure(format!(
+                "[render].render_schema {other} is not supported by this ccid (supported: 2)"
+            )))
+        }
+    };
+    if central {
+        if !config.tool_revision.is_empty() || config.tool_sha256.is_some() {
+            return Err(failure(
+                "A repository on render_schema = 2 pins no release: remove [render].tool_revision and tool_sha256 (the central channel chooses)",
+            ));
+        }
+    } else if config.tool_revision.len() != 40
         || !config
             .tool_revision
             .bytes()
@@ -504,6 +525,15 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             )?,
         );
         inventory.jobs.insert(name.clone(), plan);
+    }
+    if central
+        && inventory.jobs.values().any(|plan| {
+            plan.scheduler != jobs::Scheduler::Forgejo && plan.scheduler != jobs::Scheduler::Remote
+        })
+    {
+        return Err(failure(
+            "render_schema = 2 supports Forgejo and remote jobs only",
+        ));
     }
     if !config.allow_crow {
         let crow_jobs: Vec<&str> = inventory
@@ -622,12 +652,16 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         }
         outputs.insert(
             PathBuf::from(format!("{FORGEJO_DIRECTORY}/{workflow}.yml")),
-            forgejo_workflow(
-                &config.tool_revision,
-                config.tool_sha256.as_deref(),
-                workflow,
-                plans,
-            ),
+            if central {
+                forgejo_workflow_central(workflow, plans)
+            } else {
+                forgejo_workflow(
+                    &config.tool_revision,
+                    config.tool_sha256.as_deref(),
+                    workflow,
+                    plans,
+                )
+            },
         );
     }
     outputs.insert(
@@ -822,7 +856,13 @@ fn forgejo_workflow(
         "concurrency:\n  group: ccid-{workflow}-${{{{ github.ref }}}}\n  cancel-in-progress: true\n"
     ));
     out.push_str("# The speed profile every CI compile shares: no incremental state, no debug information.\n");
-    out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
+    let central = tool_revision.is_empty();
+    if central {
+        // The incremental decision belongs to ccid (it knows the target class); the workflow sets only the profile.
+        out.push_str("env:\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
+    } else {
+        out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
+    }
     let mut previous: Option<&str> = None;
     for plan in plans {
         // The job's declared environment (already validated: no reserved or secret names), shell-quoted, before the checks run.
@@ -865,6 +905,17 @@ fn forgejo_workflow(
         }
         previous = Some(plan.job.as_str());
         out.push_str("    steps:\n");
+        if central {
+            out.push_str(
+                &FORGEJO_SHIM
+                    .replace("CCID_JOB", &plan.job)
+                    .replace("CCID_CLASS", plan.runs_on.as_deref().unwrap_or("light")),
+            );
+            if plan.archive_inputs {
+                out.push_str(FORGEJO_ARCHIVE_STEP);
+            }
+            continue;
+        }
         out.push_str(
             &FORGEJO_STEPS
                 .replace("CCID_TOOL_REVISION", tool_revision)
@@ -884,6 +935,13 @@ fn forgejo_workflow(
 }
 
 const FORGEJO_STEPS: &str = include_str!("render/forgejo-steps.yml");
+
+/// render_schema 2: the stable shim that finds the centrally chosen ccid and hands over to `ccid job-run`.
+const FORGEJO_SHIM: &str = include_str!("render/forgejo-shim.yml");
+
+fn forgejo_workflow_central(workflow: &str, plans: &[&jobs::Plan]) -> String {
+    forgejo_workflow("", None, workflow, plans)
+}
 
 /// After the checks passed: the locked flake inputs go to the target the runner names, so other runners substitute them. A runner without a target says so and moves on.
 const FORGEJO_ARCHIVE_STEP: &str = include_str!("render/forgejo-archive.yml");

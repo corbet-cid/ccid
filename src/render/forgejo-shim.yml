@@ -1,0 +1,43 @@
+      - name: Run CCID_JOB
+        env:
+          CCID_FORGE_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # The ccid release this job runs is chosen centrally: the runner names a channel file (CCID_CHANNEL_URL: {"default": {"revision", "sha256"}, "classes": {"<runs-on>": {...}}})
+          # and a tool root (CCID_TOOL_ROOT). This step only finds that release and hands over to `ccid job-run`, which holds the actual job logic. It never needs a change.
+          triple="${CCID_TOOL_TRIPLE:-$(uname -m)-unknown-linux-gnu}"
+          : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
+          class='CCID_CLASS'
+          state="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ccid-channel"
+          mkdir -p "$state" 2>/dev/null || true
+          chan=
+          if [ -n "${CCID_CHANNEL_URL:-}" ]; then
+            chan=$(curl --fail --silent --show-error --location --max-time 30 --retry 3 -H "Authorization: token $CCID_FORGE_TOKEN" "$CCID_CHANNEL_URL" 2>/dev/null || true)
+            if [ -n "$chan" ]; then printf '%s' "$chan" > "$state/last-good.json" 2>/dev/null || true; fi
+          fi
+          # A forge that does not answer must not stop a job: the last channel this runner saw is used (and said so).
+          if [ -z "$chan" ] && [ -r "$state/last-good.json" ]; then chan=$(cat "$state/last-good.json"); echo "ccid channel: using the last known channel file" >&2; fi
+          if [ -n "$chan" ]; then
+            revision=$(printf '%s' "$chan" | jq -r --arg c "$class" '(.classes[$c] // .default).revision')
+            sha256=$(printf '%s' "$chan" | jq -r --arg c "$class" '(.classes[$c] // .default).sha256')
+          else
+            revision=${CCID_TOOL_REVISION:-}; sha256=${CCID_TOOL_SHA256:-}
+          fi
+          { [ -n "$revision" ] && [ "$revision" != null ]; } || { echo "no ccid release is selected (channel unreachable and no CCID_TOOL_REVISION)" >&2; exit 2; }
+          tool="$CCID_TOOL_ROOT/ccid/$revision/$triple/ccid"
+          if [ ! -x "$tool" ]; then
+            # Not provisioned on this runner: fetch the release by hash into the tool root, or into the runner's own cache when the root is read-only.
+            mkdir -p "$CCID_TOOL_ROOT/ccid/$revision/$triple" 2>/dev/null && [ -w "$CCID_TOOL_ROOT/ccid/$revision/$triple" ] || tool="$state/tools/$revision/$triple/ccid"
+            tool_dir=$(dirname "$tool"); mkdir -p "$tool_dir"
+            if [ ! -x "$tool" ]; then
+              [ -n "${CCID_TOOL_URL:-}" ] && [ -n "$sha256" ] && [ "$sha256" != null ] || { echo "ccid $revision is not provisioned and cannot be fetched" >&2; exit 2; }
+              # Concurrent jobs fetch the same release: each into a temp file of its own, the rename is atomic and the content is the pinned digest either way.
+              part=$(mktemp "$tool.XXXXXX")
+              curl --fail --silent --show-error --location "$CCID_TOOL_URL/$revision/ccid-$triple" --output "$part"
+              echo "$sha256  $part" | sha256sum --check --strict
+              chmod 0555 "$part"
+              mv -f "$part" "$tool"
+            fi
+          fi
+          test "$("$tool" source-revision)" = "$revision" || { echo "ccid at $tool is not $revision" >&2; exit 2; }
+          exec "$tool" job-run --job 'CCID_JOB' --repository '${{ github.repository }}' --sha '${{ github.sha }}' --server-url '${{ github.server_url }}' --owner '${{ github.repository_owner }}'

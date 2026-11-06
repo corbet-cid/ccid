@@ -1001,3 +1001,32 @@ fn the_rendered_sibling_step_stages_exact_checkouts_and_refuses_a_wrong_pin() {
     let staged = PathBuf::from(format!("{}.siblings/cdate", checkout.path().display()));
     assert!(staged.join("typst.toml").is_file() && !staged.join("more").exists());
 }
+
+#[test]
+fn render_schema_2_renders_the_stable_shim_without_a_pin_and_refuses_pins() {
+    let central = forgejo_manifest("runs_on='heavy'\n")
+        .replace(&format!("tool_revision='{PIN}'"), "render_schema=2");
+    let root = forgejo_repository(&central);
+    render(root.path(), false).unwrap();
+    let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+    // The shim carries no revision, no digest, no step logic: it finds the central release and runs `ccid job-run`.
+    assert!(!text.contains(PIN));
+    assert!(!text.contains("CCID_REVISION:") && !text.contains("CCID_TOOL_SHA256: "));
+    assert!(!text.contains("CARGO_INCREMENTAL"));
+    assert!(text.contains("CCID_CHANNEL_URL"));
+    assert!(text.contains("exec \"$tool\" job-run --job 'verify'"));
+    assert!(text.contains("exec \"$tool\" job-run --job 'docs'"));
+    assert!(text.contains("class='heavy'") && text.contains("class='light'"));
+    assert!(!text.contains("git fetch") && !text.contains("lfs"));
+    // Stable and checkable.
+    render(root.path(), true).unwrap();
+    // A pin next to the schema is refused, an unknown schema is refused.
+    let pinned = forgejo_manifest("").replace(
+        &format!("tool_revision='{PIN}'"),
+        &format!("render_schema=2\ntool_revision='{PIN}'"),
+    );
+    assert!(render(forgejo_repository(&pinned).path(), false).is_err());
+    let unknown =
+        forgejo_manifest("").replace(&format!("tool_revision='{PIN}'"), "render_schema=3");
+    assert!(render(forgejo_repository(&unknown).path(), false).is_err());
+}
