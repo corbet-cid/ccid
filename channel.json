@@ -4,5 +4,10 @@
     "revision": "93d5288318bb1daa6ba39f90803886899f4a7057",
     "sha256": "3c6ddc4616e5a45058c3431ae93fe122836a851bd95110d6513529dbef8fbedc"
   },
-  "classes": {}
+  "classes": {
+    "heavy": {
+      "revision": "0083d404b720268376b5b636cf19a5ee3a51fa42",
+      "sha256": "d06e392ef1ff77926b705fb70f5de9030a3b4e2f73b11f3f69061b7d0b754620"
+    }
+  }
 }
