@@ -127,7 +127,30 @@ pub(crate) fn run_cached_with_environment(
         plan: false,
         force,
         tool: "ccid".into(),
-        tool_revision: SOURCE_REVISION.into(),
+        tool_revision: verdict_epoch_label(),
         environment: environment.into_iter().collect::<cmnp::Environment>(),
     })
+}
+
+/// The version of what a cached verdict MEANS. Cached results are keyed by this number, not by the binary revision: a new
+/// ccid build that checks the same things the same way reuses every existing verdict, so a release does not invalidate the
+/// whole result cache. Raise it ONLY when the semantics of a check change (what a check runs, or what counts as passing),
+/// so older verdicts can no longer answer for the new meaning.
+pub const VERDICT_EPOCH: u32 = 1;
+
+/// What the result cache binds into every verdict key (cmnp's `tool_revision`, the caller's version of the semantics).
+pub(crate) fn verdict_epoch_label() -> String {
+    format!("verdict-epoch-{VERDICT_EPOCH}")
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    #[test]
+    fn the_verdict_key_binds_the_epoch_and_never_the_build_revision() {
+        let label = verdict_epoch_label();
+        assert!(label.ends_with(&VERDICT_EPOCH.to_string()), "{label}");
+        assert!(!label.contains(SOURCE_REVISION), "{label}");
+    }
 }
