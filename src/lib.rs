@@ -449,6 +449,9 @@ fn run_checks_inner(
         resources.test_threads.to_string(),
     );
     set(&mut environment, "CARGO_TARGET_DIR", target.as_os_str());
+    // The runner's canonical Rust homes win over whatever the calling script exported: one rustup/cargo home per machine means one toolchain chain and one registry source
+    // path, which a compile-cache key contains. The runner names them CCID_RUSTUP_HOME / CCID_CARGO_HOME; a script's own per-repository values become dead weight.
+    cache::apply_canonical_rust_homes(&mut environment);
     let nix_config = format!(
         "{}\nmax-jobs = {}\ncores = {}\n",
         value(&environment, "NIX_CONFIG").unwrap_or_default(),

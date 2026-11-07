@@ -215,6 +215,18 @@ pub(crate) fn prepare_kache_runtime(env: &mut Environment, scratch: &Path) -> Op
     Some(directory)
 }
 
+/// `CCID_RUSTUP_HOME` and `CCID_CARGO_HOME` (named by the runner) replace `RUSTUP_HOME` and `CARGO_HOME` for everything ccid runs. Absent or empty: nothing changes.
+pub(crate) fn apply_canonical_rust_homes(env: &mut Environment) {
+    for (from, to) in [
+        ("CCID_RUSTUP_HOME", "RUSTUP_HOME"),
+        ("CCID_CARGO_HOME", "CARGO_HOME"),
+    ] {
+        if let Some(path) = value(env, from).filter(|path| !path.is_empty()) {
+            set(env, to, path);
+        }
+    }
+}
+
 /// Cap of the incremental-compilation state of one target (MiB), unless `CCID_INCREMENTAL_CAP_MB` names another.
 const INCREMENTAL_CAP_MB: u64 = 2048;
 
@@ -1117,6 +1129,30 @@ mod tests {
         ]);
         assert_eq!(prepare_kache_runtime(&mut own, dir.path()), None);
         assert_eq!(value(&own, "KACHE_RUNTIME_DIR").as_deref(), Some("/mine"));
+    }
+
+    #[test]
+    fn the_runners_canonical_rust_homes_override_what_a_script_exported() {
+        let mut env = Environment::from([
+            ("CARGO_HOME".into(), "/repo/cache/cargo".into()),
+            ("RUSTUP_HOME".into(), "/repo/cache/rustup".into()),
+            ("CCID_CARGO_HOME".into(), "/home/richc/.cargo".into()),
+            ("CCID_RUSTUP_HOME".into(), "/home/richc/.rustup".into()),
+        ]);
+        apply_canonical_rust_homes(&mut env);
+        assert_eq!(
+            value(&env, "CARGO_HOME").as_deref(),
+            Some("/home/richc/.cargo")
+        );
+        assert_eq!(
+            value(&env, "RUSTUP_HOME").as_deref(),
+            Some("/home/richc/.rustup")
+        );
+        // Without the runner's names (a workstation, a plain run) the script's values stand.
+        let mut plain = Environment::from([("CARGO_HOME".into(), "/mine".into())]);
+        apply_canonical_rust_homes(&mut plain);
+        assert_eq!(value(&plain, "CARGO_HOME").as_deref(), Some("/mine"));
+        assert_eq!(value(&plain, "RUSTUP_HOME"), None);
     }
 
     #[test]
