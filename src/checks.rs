@@ -369,6 +369,11 @@ mod tests {
                 "{profile}"
             );
         }
+        // One opt-level for every non-member crate: the table that makes lanes and CI share dependency keys.
+        assert_eq!(
+            table["profile"]["dev"]["package"]["*"]["opt-level"].as_integer(),
+            Some(1)
+        );
         let mut commands = vec![
             strings(&["rustup", "run", "1.94.0", "cargo", "clippy", "--locked"]),
             strings(&["rustup", "run", "1.94.0", "cargo"]),

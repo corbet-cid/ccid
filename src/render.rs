@@ -855,14 +855,16 @@ fn forgejo_workflow(
     out.push_str(&format!(
         "concurrency:\n  group: ccid-{workflow}-${{{{ github.ref }}}}\n  cancel-in-progress: true\n"
     ));
-    out.push_str("# The speed profile every CI compile shares: no incremental state, no debug information.\n");
+    // No CARGO_PROFILE_* or CARGO_TERM_COLOR in the workflow environment: a CARGO_* variable is hashed into every
+    // compile-cache key, so the shared build profile arrives as cargo config instead - profiles/dev.toml through `cargo
+    // --config` for cargo checks, and the CARGO_HOME config include for commands checks (which get no --config).
     let central = tool_revision.is_empty();
-    if central {
-        // The incremental decision belongs to ccid (it knows the target class); the workflow sets only the profile.
-        out.push_str("env:\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
-    } else {
-        out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n  CARGO_PROFILE_DEV_DEBUG: \"0\"\n  CARGO_PROFILE_TEST_DEBUG: \"0\"\n  CARGO_PROFILE_RELEASE_DEBUG: \"0\"\n  CARGO_TERM_COLOR: never\njobs:\n");
+    if !central {
+        // A pinned render (schema 1) has no job-run to decide incremental compilation per target class, and its target does
+        // not persist: it sets no incremental state. Schema 2 leaves that decision to ccid, which knows the class.
+        out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n");
     }
+    out.push_str("jobs:\n");
     let mut previous: Option<&str> = None;
     for plan in plans {
         // The job's declared environment (already validated: no reserved or secret names), shell-quoted, before the checks run.

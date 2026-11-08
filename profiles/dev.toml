@@ -15,6 +15,13 @@ debug = 0
 [profile.release]
 debug = 0
 
+# ONE opt-level for every non-member crate: registry dependencies, proc-macros and build-script dependencies. A manifest or a
+# generated workspace that declares its own [profile.*.package] table splits the key space instead of overriding this table's
+# value, so every builder (lane, agent, CI, locked gate) must stop declaring one. Measured 2026-11-08 on the 5-repo lane set at
+# debug 0: cold build 2053 CPU-s (vs 1607 at opt-level 0), tests 173 CPU-s per run (vs 932), cheapest at every cache hit rate.
+[profile.dev.package."*"]
+opt-level = 1
+
 # Cargo's color setting is CARGO_TERM_COLOR in the environment of CI jobs today, and that variable is hashed into every compile-cache key like any CARGO_*: as config it
 # is invisible to the cache, so a lane or workstation with the same file hits CI's entries whatever its terminal is.
 [term]
