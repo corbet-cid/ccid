@@ -115,10 +115,14 @@ allow a documentation-only commit to reuse code checks; the full-repository
 default still invalidates on documentation edits.
 
 Declare produced files with
-`cache_outputs = ["app"]`; cache hits restore these along with the receipt.
-Output paths are relative to the repository. The remote endpoint is passed to
-moon through its environment, so changing the cache address does not rewrite
-the workspace configuration or partition otherwise identical work.
+`cache_outputs = ["app"]`; cache hits restore these along with the receipt. A
+verdict hit restores them from the content-addressed output store beside the
+verdict store (`CCID_RESULT_CACHE/outputs/`, indexed by the same verdict key),
+so coverage reports and archives survive a hit byte-for-byte; a hit whose
+outputs cannot be restored is a miss. Output paths are relative to the
+repository. The remote endpoint is passed to moon through its environment, so
+changing the cache address does not rewrite the workspace configuration or
+partition otherwise identical work.
 
 Landing gates on one aggregated context per commit, `ccid/verdict`; side jobs report
 under their own `ccid/<job>` contexts. See [docs/commit-verdict.md](docs/commit-verdict.md).

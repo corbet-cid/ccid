@@ -180,9 +180,12 @@ See the [code quality baseline](docs/code-quality.md) for enforced checks and re
 (`CCID_RESULT_CACHE/verdicts/`) that a land gate and CI share. The key is the tree's content,
 the resolved git-dependency commits, the tool bytes, the shared profile, the check declaration
 and declared environment, and the verdict epoch; CI accepts only an exact full-key match whose
-producing binary is on the release channel. `--plan` reports each check's verdict and bypass
-reason without running, and `ccid job-run --local --source <dir> --sha <commit>` runs exactly
-CI's job against an existing export. The interface is [docs/verdicts.md](verdicts.md).
+producing binary is on the release channel. A check's declared `cache_outputs` are stored
+content-addressed beside the verdict store and indexed by the same key; a hit restores them
+byte-for-byte, and a hit whose outputs cannot be restored becomes a miss. `--plan` reports each
+check's verdict and bypass reason without running, and `ccid job-run --local --source <dir>
+--sha <commit>` runs exactly CI's job against an existing export. The interface is
+[docs/verdicts.md](verdicts.md).
 
 ## Incremental compilation
 

@@ -25,6 +25,7 @@ mod admission;
 mod budget;
 mod cache;
 mod cached;
+mod cached_outputs;
 mod cached_verdict;
 mod checks;
 pub mod compile_cache;

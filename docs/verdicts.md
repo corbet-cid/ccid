@@ -65,7 +65,10 @@ A lookup is a **hit** only when all of this holds:
 2. `result` is `success`;
 3. the producing binary is on the release channel: `CCID_CHANNEL_FILE` names its
    `revision` + `sha256` (any class), or, when no channel file is provisioned, CI accepts only the
-   binary it is running — the workflow verified that binary against the channel before exec.
+   binary it is running — the workflow verified that binary against the channel before exec;
+4. when the check declares `cache_outputs`, every declared output is present in the content store
+   and restores byte-for-byte into its declared path (see [Outputs](#outputs)). A pass whose
+   outputs cannot be restored is a **miss**, never a hit with missing artefacts.
 
 A lane accepts a fully matching record from the channel release it fetched. Anything else is a
 **miss** (recompute) or **invalid** (a tampered/foreign record; never a pass). The store alone
@@ -89,21 +92,68 @@ did before. It never guesses.
 After a successful check, the inputs are re-read; a dependency that moved while the check ran
 writes no record.
 
+## Outputs
+
+A hit skips the ordinary cached transaction, so it also skips moon's output hydration. The
+declared `cache_outputs` are therefore stored beside the verdict store:
+
+```text
+CCID_RESULT_CACHE/
+  verdicts/<key>.json              the verdict record
+  outputs/
+    blobs/<sha256>                 file bytes, or a deterministic tar of a directory
+    verdicts/<key>.json            the output index, named by the SAME verdict key
+    prune.stamp                    last retention pass
+```
+
+* **Content-addressed.** Each declared output becomes one blob named by the SHA-256 of its
+  bytes; identical reports across runs, checks, repositories and branches share one blob. A
+  directory becomes a deterministic tar (sorted entries, zero mtime/uid/gid, explicit 0644/0755)
+  so the same tree always produces the same digest.
+* **Complete before the verdict.** A producer stores every blob and the index first, and writes
+  the verdict record only after that transaction succeeds. A declared output that is missing,
+  a symlink, a special file or larger than the store bound leaves **no verdict**: the check
+  itself may still pass, but the next run recomputes instead of hitting an unrestorable pass.
+* **Restore is the hit.** A hit reads the index, verifies every blob digest, and installs each
+  output into its declared path (files atomically, directories by staged swap). If the index is
+  absent (a record from an older release), a blob is missing or corrupt, or the restored bytes
+  differ, the lookup becomes a miss and the check runs. After the restore the job sees exactly
+  what a real run left: `coverage.json`, `coverage.lcov`, `coverage.txt`, ... are archived or
+  uploaded unchanged.
+* **Safety.** Outputs must be plain repository-relative paths, never `../`, absolute, a
+  generated/operational directory (`.git`, `.ccid`, `.moon`, `target`, `node_modules`) or
+  tracked source input. Directories may not contain symlinks or special files. The store is
+  bounded at 64 MiB per output and 256 MiB per declared set.
+* **Retention.** The newest output set per repository+branch is always kept, plus a bounded
+  window of `8` older sets (nine in total). Only `outputs/` is pruned:
+  unreferenced blobs are garbage-collected after a one-hour grace period so a producer cannot
+  lose a blob between writing it and publishing its index. Verdict records, the moon cache and
+  every other cache are never touched. A coverage set is a few megabytes, so the window is tens
+  of megabytes per repository+branch.
+* **Provenance only.** The branch in the index comes from `CCID_BRANCH`, otherwise the CI branch
+  variables, otherwise `HEAD`; it groups retention and is never part of the verdict key.
+
 ## Coverage
 
 Coverage is a check like any other. A repository that declares its coverage work in a check (or
-in the `verify` check that contains it) gets one verdict per tree. A later nightly coverage run
-that selects the same check finds the record and builds nothing, so an unchanged tree is never
-built twice.
+in the `verify` check that contains it) gets one verdict per tree, with the same key components as
+every other check: the tree content, the resolved dependency commits, the **bytes of the nightly
+compiler and `cargo-llvm-cov`** the check declares in `cache_tools`, the profile and the declared
+environment. A nightly toolchain update therefore changes the key exactly once, and an unchanged
+tree is never instrumented twice. The declared coverage reports are in the output store above, so
+a later nightly run restores the identical reports without a second full build.
 
 ## Producing, planning, inspecting
 
 * `ccid cached --check <name>` — look up, then run the ordinary cached transaction on a miss and
   record a success. Events: `verdict-plan`, `verdict-inspect`, `verdict-record`,
-  `verdict-skipped`, `verdict-disabled`, `verdict-unavailable`. A hit emits a `cache-check` with
-  `status: cached` and `computed: 0`, and leaves the declared receipt (`<check>.jsonl`).
+  `verdict-skipped`, `verdict-disabled`, `verdict-unavailable`, `verdict-outputs-stored`,
+  `verdict-outputs-restored`, `verdict-outputs-prune`. A hit restores the declared outputs and
+  emits a `cache-check` with `status: cached` and `computed: 0`, and leaves the declared receipt
+  (`<check>.jsonl`).
 * `ccid cached --check <name> --plan` — print each check's verdict and its bypass reason (a
   declaration opt-out or a purity-scan finding such as a network tool) without running anything.
+  A pass whose stored outputs are absent reports `miss` and the missing set.
 * `ccid job-run --local --source <dir> --sha <commit>` — run exactly CI's declared job against an
   existing export of the commit. This is the land gate's producer entry point; it uses the same
   job plan, environment, adapter check and command as `ccid job-run` on a runner.
@@ -111,6 +161,8 @@ built twice.
 ## Store operation
 
 `CCID_RESULT_CACHE` is provisioned by the runner (CI) or the operator (land gate). The
-`verdicts/` directory is created on first write with mode `2775`; records are `0660` when the
-store is group-writable. Both producers must be in the store's group. Records are immutable in
-practice; a corrupted, symlinked or oversized record is refused, never parsed as a pass.
+`verdicts/` and `outputs/` directories are created on first write with mode `2775`; records,
+indexes and blobs are `0660` when the store is group-writable. Both producers must be in the
+store's group. Records are immutable in practice; a corrupted, symlinked or oversized record or
+index is refused, never parsed as a pass, and a corrupted blob is never restored. Retention is
+automatic and idempotent; there is no operator step that can delete another cache.

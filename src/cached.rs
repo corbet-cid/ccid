@@ -118,7 +118,7 @@ fn plan(
         let entry = prepared.iter().find(|entry| &entry.check == name);
         let (status, reason) = match entry {
             Some(entry) => {
-                let lookup = cached_verdict::lookup(entry, environment);
+                let lookup = cached_verdict::lookup_ready(entry, environment);
                 (lookup.status.as_str().to_owned(), lookup.reason)
             }
             None => (
@@ -300,23 +300,39 @@ pub(crate) fn run_cached_with_environment(
                     for entry in &prepared {
                         let lookup = cached_verdict::lookup(entry, &environment);
                         if lookup.status == cached_verdict::Status::Hit {
-                            event(json!({
-                                "event": "cache-check",
-                                "check": entry.check,
-                                "key": entry.key,
-                                "status": "cached",
-                                "computed": 0,
-                                "verdict": "hit",
-                            }));
-                            write_hit_receipt(&root, &entry.check, entry)?;
-                            hit_metrics.push(json!({
-                                "event": "cache-check",
-                                "check": entry.check,
-                                "key": entry.key,
-                                "status": "cached",
-                                "computed": 0,
-                            }));
-                            hits.insert(entry.check.clone());
+                            // The verdict answers for the check; its declared outputs are the
+                            // evidence later steps archive. Restore them byte-for-byte first, or
+                            // treat the lookup as a miss so a real run produces them.
+                            match cached_verdict::restore_outputs(entry, &environment) {
+                                Ok(()) => {
+                                    event(json!({
+                                        "event": "cache-check",
+                                        "check": entry.check,
+                                        "key": entry.key,
+                                        "status": "cached",
+                                        "computed": 0,
+                                        "verdict": "hit",
+                                    }));
+                                    write_hit_receipt(&root, &entry.check, entry)?;
+                                    hit_metrics.push(json!({
+                                        "event": "cache-check",
+                                        "check": entry.check,
+                                        "key": entry.key,
+                                        "status": "cached",
+                                        "computed": 0,
+                                    }));
+                                    hits.insert(entry.check.clone());
+                                }
+                                Err(error) => event(json!({
+                                    "event": "verdict-inspect",
+                                    "check": entry.check,
+                                    "key": entry.key,
+                                    "status": "miss",
+                                    "reason": format!(
+                                        "the verdict's stored outputs are unavailable: {error}"
+                                    ),
+                                })),
+                            }
                         } else if lookup.status != cached_verdict::Status::Miss {
                             event(json!({
                                 "event": "verdict-inspect",

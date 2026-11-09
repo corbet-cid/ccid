@@ -264,11 +264,17 @@ pub struct Prepared {
     pub components: KeyComponents,
     pub commit: String,
     repository: String,
+    /// The producer's branch, provenance for output retention only. It never enters the key.
+    branch: String,
     root: PathBuf,
     /// The exact tree list the key was built from, so the post-run check re-reads the same
     /// paths and ignores outputs the check wrote beside them.
     tree_entries: Vec<TreeEntry>,
+    /// `CCID_RESULT_CACHE`; the verdict store is its `verdicts/` child.
+    cache: Option<PathBuf>,
     store: Option<PathBuf>,
+    /// The check's declared `cache_outputs`, normalized and validated.
+    outputs: Vec<String>,
 }
 
 /// One lookup result, with the reason a record was not accepted.
@@ -1031,7 +1037,36 @@ fn applicable(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prepare(
+/// The check's declared outputs, validated before they can name a restore
+/// destination: a plain relative path that is not tracked source and not a
+/// generated/operational directory. A declared output that would overwrite
+/// source input never gets a verdict (the ordinary cached run still works).
+fn check_outputs(root: &Path, check: &crate::Check) -> Result<Vec<String>> {
+    if check.cache_outputs.len() > crate::cached_outputs::MAX_OUTPUTS {
+        return Err(failure("The check declares too many cache outputs"));
+    }
+    let mut outputs = Vec::new();
+    for output in &check.cache_outputs {
+        let relative = crate::cached_outputs::output_relative(output)?;
+        if is_repository(root) {
+            let tracked = git(root, &["ls-files", "--cached", "-z", "--", output.as_str()])?;
+            if !tracked.is_empty() {
+                return Err(failure(format!(
+                    "A declared cache output must not overwrite tracked source: {output:?}"
+                )));
+            }
+        }
+        outputs.push(
+            relative
+                .to_str()
+                .ok_or_else(|| failure("Declared cache output must be valid UTF-8"))?
+                .to_owned(),
+        );
+    }
+    Ok(outputs)
+}
+
+pub(crate) fn prepare(
     root: &Path,
     check_name: &str,
     check: &crate::Check,
@@ -1051,17 +1086,56 @@ fn prepare(
         check_identity: check_identity(check, environment)?,
     };
     let key = components.key_hex()?;
-    let store = store_root(environment).map(|root| root.join(STORE_DIR));
+    let cache = store_root(environment);
+    let store = cache.as_ref().map(|root| root.join(STORE_DIR));
     Ok(Prepared {
         check: check_name.to_owned(),
         key,
         components,
         commit: commit_id.to_owned(),
         repository: repository_identity(root, environment),
+        branch: crate::cached_outputs::branch(root, environment),
         root: root.to_path_buf(),
         tree_entries: entries,
+        cache,
         store,
+        outputs: check_outputs(root, check)?,
     })
+}
+
+/// The output-store subject of one prepared check.
+fn output_subject<'a>(
+    prepared: &'a Prepared,
+    cache: &'a Path,
+) -> crate::cached_outputs::Subject<'a> {
+    crate::cached_outputs::Subject {
+        cache,
+        root: &prepared.root,
+        key: &prepared.key,
+        check: &prepared.check,
+        repository: &prepared.repository,
+        branch: &prepared.branch,
+        commit: &prepared.commit,
+        outputs: &prepared.outputs,
+    }
+}
+
+/// Restore a hit's declared outputs. `Ok(())` means every declared output is
+/// byte-identical to the recorded content; any error makes the caller treat
+/// the lookup as a miss.
+pub fn restore_outputs(prepared: &Prepared, _environment: &Environment) -> Result<()> {
+    let Some(cache) = &prepared.cache else {
+        return Err(failure("CCID_RESULT_CACHE is not provisioned"));
+    };
+    crate::cached_outputs::restore(&output_subject(prepared, cache))
+}
+
+/// Whether a hit's declared outputs are present without reading them whole.
+pub fn outputs_ready(prepared: &Prepared, _environment: &Environment) -> Result<()> {
+    let Some(cache) = &prepared.cache else {
+        return Err(failure("CCID_RESULT_CACHE is not provisioned"));
+    };
+    crate::cached_outputs::ready(&output_subject(prepared, cache))
 }
 
 /// Prepare every selected check. A check whose key cannot be computed is simply absent: the
@@ -1174,17 +1248,9 @@ fn lock_key(directory: &Path, key: &str) -> Result<File> {
     }
 }
 
-fn write_record(directory: &Path, record: &Record) -> Result<()> {
-    ensure_store(directory)?;
+/// Publish the record while the caller holds the key's lock.
+fn write_record_locked(directory: &Path, record: &Record) -> Result<()> {
     let key = &record.key;
-    let _lock = lock_key(directory, key)?;
-    // First success wins: two producers that agree on the key agree on the result, and a later
-    // failure must never erase a pass.
-    if let Ok(Some(existing)) = read_record(directory, key) {
-        if existing.result == ResultWord::Success {
-            return Ok(());
-        }
-    }
     let mut file = tempfile::NamedTempFile::new_in(directory)?;
     #[cfg(unix)]
     {
@@ -1206,8 +1272,61 @@ fn write_record(directory: &Path, record: &Record) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn write_record(directory: &Path, record: &Record) -> Result<()> {
+    ensure_store(directory)?;
+    let key = &record.key;
+    let _lock = lock_key(directory, key)?;
+    // First success wins: two producers that agree on the key agree on the result, and a later
+    // failure must never erase a pass.
+    if let Ok(Some(existing)) = read_record(directory, key) {
+        if existing.result == ResultWord::Success {
+            return Ok(());
+        }
+    }
+    write_record_locked(directory, record)
+}
+
+/// Publish a pass and its declared outputs as one transaction, under the key's lock: every
+/// output blob and the output index are durable first, and only then the verdict record. A
+/// failure before that point leaves no verdict, so no later hit can report success without its
+/// artefacts. An existing pass keeps winning the verdict; its output set is still (re)written,
+/// which repairs a set left incomplete by an older release or a damaged store.
+fn publish_record(
+    directory: &Path,
+    record: &Record,
+    prepared: &Prepared,
+    producer: &Producer,
+) -> Result<()> {
+    ensure_store(directory)?;
+    let key = &record.key;
+    let _lock = lock_key(directory, key)?;
+    let first = !matches!(
+        read_record(directory, key),
+        Ok(Some(existing)) if existing.result == ResultWord::Success
+    );
+    if !prepared.outputs.is_empty() {
+        let cache = prepared
+            .cache
+            .as_deref()
+            .ok_or_else(|| failure("CCID_RESULT_CACHE is not provisioned"))?;
+        crate::cached_outputs::store(
+            &output_subject(prepared, cache),
+            producer.kind.as_str(),
+            record.finished_at,
+        )?;
+    }
+    if first {
+        write_record_locked(directory, record)?;
+    }
+    if let Some(cache) = prepared.cache.as_deref() {
+        crate::cached_outputs::maybe_prune(cache);
+    }
+    Ok(())
+}
+
 /// The producing binary's own identity: SHA-256 of its bytes and the revision compiled into it.
-fn own_tool() -> Result<Tool> {
+pub(crate) fn own_tool() -> Result<Tool> {
     static TOOL: OnceLock<std::result::Result<Tool, String>> = OnceLock::new();
     TOOL.get_or_init(|| {
         let exe = std::env::current_exe()
@@ -1330,6 +1449,24 @@ pub fn lookup(prepared: &Prepared, environment: &Environment) -> Lookup {
     }
 }
 
+/// The lookup a plan reports: a pass whose declared outputs are not present is a miss, because
+/// a hit would leave the archive/upload steps without the report the check promised.
+pub fn lookup_ready(prepared: &Prepared, environment: &Environment) -> Lookup {
+    let lookup = lookup(prepared, environment);
+    if lookup.status != Status::Hit {
+        return lookup;
+    }
+    match outputs_ready(prepared, environment) {
+        Ok(()) => lookup,
+        Err(error) => Lookup {
+            status: Status::Miss,
+            reason: Some(format!(
+                "the verdict's stored outputs are unavailable: {error}"
+            )),
+        },
+    }
+}
+
 /// Record a successful run of every prepared check that actually went through the result cache.
 /// `bypassed` names checks that ran uncached for a semantic reason; their result is not reused.
 /// The record is written only when the working tree still names the inputs the key was built
@@ -1399,7 +1536,7 @@ pub fn record_success(
             finished_at,
             duration_seconds: finished_at.saturating_sub(started_at),
         };
-        match write_record(directory, &record) {
+        match publish_record(directory, &record, entry, producer) {
             Ok(()) => event(json!({
                 "event": "verdict-record",
                 "check": entry.check,
@@ -1407,8 +1544,10 @@ pub fn record_success(
                 "producer": producer.kind.as_str(),
                 "tool": tool.sha256,
                 "result": "success",
+                "outputs": entry.outputs.len(),
             })),
-            // The check itself passed; a store failure must not turn it red. CI will recompute.
+            // The check itself passed; a store failure must not turn it red. CI will recompute,
+            // and a declared output set that cannot be stored deliberately leaves no verdict.
             Err(error) => event(json!({
                 "event": "verdict-store-error",
                 "check": entry.check,
@@ -1473,7 +1612,7 @@ pub fn bypassed(root: &Path) -> BTreeSet<String> {
 
 /// A one-line plan event for `ccid cached --plan`.
 pub fn plan_event(prepared: &Prepared, environment: &Environment) {
-    let lookup = lookup(prepared, environment);
+    let lookup = lookup_ready(prepared, environment);
     event(json!({
         "event": "verdict-plan",
         "check": prepared.check,
