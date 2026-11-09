@@ -10,6 +10,7 @@ use crate::{failure, set, value, Environment, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     ffi::OsStr,
     fs,
@@ -22,6 +23,10 @@ pub const FLEET_FILE_ENV: &str = "CCID_FLEET_FILE";
 pub const FLEET_DIGEST_ENV: &str = "CCID_FLEET_DIGEST";
 /// `1` inside a check that declares `fleet = true`.
 pub const FLEET_KEYED_ENV: &str = "CCID_FLEET_KEYED";
+/// Further spellings of the forge host that this machine uses (comma-separated, e.g. an
+/// in-cluster name). Set by the runner, never by a repository; merged after the channel's
+/// `forge_hosts` and never part of the fleet digest.
+pub const FORGE_HOSTS_ENV: &str = "CCID_FORGE_HOSTS";
 /// The fleet data schema this ccid understands.
 pub const SCHEMA: u32 = 1;
 
@@ -36,11 +41,18 @@ const CHANGED: &str = "fleet data changed after the check was keyed";
 #[serde(deny_unknown_fields)]
 pub struct Fleet {
     pub schema: u32,
+    /// Every host name of the one forge that serves `first_party`; the first is canonical.
+    #[serde(default)]
+    pub forge_hosts: Vec<String>,
     /// Canonical owner prefixes `https://<host>/<owner>/`, strictly ascending.
     pub first_party: Vec<String>,
     /// Legacy owner prefix -> the canonical prefix it moved to.
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
+    /// This machine's further spellings of the forge host (`CCID_FORGE_HOSTS`, added by `load`).
+    /// Not channel data: never serialized, so never part of the canonical bytes or the digest.
+    #[serde(skip)]
+    runtime_hosts: Vec<String>,
 }
 
 /// Where a URL belongs according to the fleet data.
@@ -50,6 +62,28 @@ pub enum Origin<'a> {
     Canonical { prefix: &'a str },
     /// Under a legacy prefix that moved to `canonical`.
     Alias { legacy: &'a str, canonical: &'a str },
+}
+
+/// A forge host name: a lowercase DNS name (`[a-z0-9.-]+`), no scheme, port or path.
+fn validate_host(kind: &str, host: &str) -> Result<()> {
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-.".contains(&b))
+    {
+        return Err(failure(format!(
+            "fleet {kind} {host:?}: must be a lowercase DNS name ([a-z0-9.-], no scheme, port or path)"
+        )));
+    }
+    Ok(())
+}
+
+/// The host of a validated prefix (`https://<host>/<owner>/`).
+fn prefix_host(prefix: &str) -> &str {
+    prefix
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default()
 }
 
 /// A fleet prefix: `https://<lowercase host>/<segment>/` in canonical URL form, no credentials,
@@ -137,6 +171,26 @@ impl Fleet {
         for prefix in &self.first_party {
             validate_prefix("first_party prefix", prefix)?;
         }
+        for (index, host) in self.forge_hosts.iter().enumerate() {
+            validate_host("forge host", host)?;
+            if self.forge_hosts[..index].contains(host) {
+                return Err(failure(format!(
+                    "fleet forge host {host:?} is listed twice"
+                )));
+            }
+        }
+        if let Some(canonical) = self.forge_hosts.first() {
+            for prefix in &self.first_party {
+                if prefix_host(prefix) != canonical {
+                    return Err(failure(format!(
+                        "fleet first_party prefix {prefix:?} is not on the canonical forge host {canonical:?} (forge_hosts[0])"
+                    )));
+                }
+            }
+        }
+        for host in &self.runtime_hosts {
+            validate_host(&format!("forge host from {FORGE_HOSTS_ENV}"), host)?;
+        }
         for (legacy, canonical) in &self.aliases {
             validate_prefix("alias", legacy)?;
             validate_prefix("alias target", canonical)?;
@@ -150,12 +204,22 @@ impl Fleet {
                     "fleet alias {legacy:?} is itself a first_party prefix"
                 )));
             }
+            if self
+                .all_forge_hosts()
+                .any(|host| host == prefix_host(legacy))
+            {
+                return Err(failure(format!(
+                    "fleet alias {legacy:?} is on a forge host: aliases name other forges"
+                )));
+            }
         }
         Ok(())
     }
 
-    /// The bytes the digest names: the validated data serialized in field order (`first_party`
-    /// is sorted by validation, `aliases` is ordered by key), so JSON spelling never matters.
+    /// The bytes the digest names: the validated channel data serialized in field order
+    /// (`schema`, `forge_hosts`, `first_party` sorted by validation, `aliases` ordered by key), so
+    /// JSON spelling never matters. This machine's `CCID_FORGE_HOSTS` are not part of them: a host
+    /// spelling names a route to the forge, never what a check computes.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
         self.validate()?;
         Ok(serde_json::to_vec(self)?)
@@ -165,9 +229,67 @@ impl Fleet {
         Ok(format!("{:x}", Sha256::digest(self.canonical_bytes()?)))
     }
 
-    /// Classify a dependency or remote URL by byte prefix after one optional `git+`.
+    /// The forge's host names: the channel's `forge_hosts`, then this machine's
+    /// `CCID_FORGE_HOSTS`. The first is canonical.
+    pub fn all_forge_hosts(&self) -> impl Iterator<Item = &str> {
+        self.forge_hosts
+            .iter()
+            .chain(&self.runtime_hosts)
+            .map(String::as_str)
+    }
+
+    /// Whether two host names name the same forge: equal, or both spellings of the fleet's forge.
+    pub fn same_forge(&self, a: &str, b: &str) -> bool {
+        a == b
+            || (self.all_forge_hosts().any(|host| host == a)
+                && self.all_forge_hosts().any(|host| host == b))
+    }
+
+    /// Add this machine's further spellings of the forge host (`CCID_FORGE_HOSTS`: comma-separated
+    /// lowercase DNS names). They need a canonical host in the channel's `forge_hosts`; a spelling
+    /// the fleet already knows is skipped. The canonical bytes and the digest never change.
+    pub fn add_forge_hosts(&mut self, list: &str) -> Result<()> {
+        if self.forge_hosts.is_empty() {
+            return Err(failure(format!(
+                "{FORGE_HOSTS_ENV} needs a canonical forge host, but the release channel's fleet data has no forge_hosts"
+            )));
+        }
+        let mut added = self.clone();
+        for host in list.split(',').map(str::trim) {
+            validate_host(&format!("forge host from {FORGE_HOSTS_ENV}"), host)?;
+            if !added.all_forge_hosts().any(|known| known == host) {
+                added.runtime_hosts.push(host.to_owned());
+            }
+        }
+        added.validate()?;
+        *self = added;
+        Ok(())
+    }
+
+    /// One spelling per forge: `https://<any forge host>/` becomes `https://<forge_hosts[0]>/`.
+    fn canonical_spelling<'u>(&self, url: &'u str) -> Cow<'u, str> {
+        let Some(canonical) = self.forge_hosts.first() else {
+            return Cow::Borrowed(url);
+        };
+        match url
+            .strip_prefix("https://")
+            .and_then(|rest| rest.split_once('/'))
+        {
+            Some((host, path))
+                if host != canonical && self.all_forge_hosts().any(|known| known == host) =>
+            {
+                Cow::Owned(format!("https://{canonical}/{path}"))
+            }
+            _ => Cow::Borrowed(url),
+        }
+    }
+
+    /// Classify a dependency or remote URL by byte prefix after one optional `git+`, with every
+    /// spelling of the forge host read as the canonical one.
     pub fn classify<'a>(&'a self, url: &str) -> Option<Origin<'a>> {
         let url = url.strip_prefix("git+").unwrap_or(url);
+        let url = self.canonical_spelling(url);
+        let url = url.as_ref();
         if let Some(prefix) = self
             .first_party
             .iter()
@@ -211,7 +333,8 @@ pub fn from_channel(bytes: &[u8]) -> Result<Fleet> {
     Ok(fleet)
 }
 
-/// The fleet data of the channel document `CCID_FLEET_FILE` names, and that path.
+/// The fleet data of the channel document `CCID_FLEET_FILE` names, and that path; this
+/// machine's `CCID_FORGE_HOSTS` are added to its forge host names.
 pub fn load(environment: &Environment) -> Result<(Fleet, PathBuf)> {
     let path = value(environment, FLEET_FILE_ENV).ok_or_else(|| {
         failure(format!(
@@ -225,8 +348,13 @@ pub fn load(environment: &Environment) -> Result<(Fleet, PathBuf)> {
             path.display()
         ))
     })?;
-    let fleet = from_channel(&bytes)
+    let mut fleet = from_channel(&bytes)
         .map_err(|error| failure(format!("{error} ({FLEET_FILE_ENV} {})", path.display())))?;
+    if let Some(hosts) = value(environment, FORGE_HOSTS_ENV) {
+        fleet
+            .add_forge_hosts(&hosts)
+            .map_err(|error| failure(format!("fleet data unusable: {error}")))?;
+    }
     Ok((fleet, path))
 }
 
@@ -317,7 +445,8 @@ pub(crate) fn bind_selection(
 /// `ccid fleet` subcommands.
 #[derive(Debug, clap::Subcommand)]
 pub enum Action {
-    /// Print the fleet data CCID_FLEET_FILE names as one JSON line with its digest and source.
+    /// Print the fleet data CCID_FLEET_FILE names as one JSON line with its digest, its source and
+    /// the forge host spellings CCID_FORGE_HOSTS adds.
     /// Inside a ccid check it requires fleet = true on that check.
     Show,
     /// Validate the fleet data of a release channel document and print its digest.
@@ -337,9 +466,10 @@ pub fn run(action: &Action) -> Result<u8> {
             // `fleet` is the canonical bytes themselves, so the line's own member hashes to `digest`.
             let canonical = String::from_utf8(fleet.canonical_bytes()?)?;
             println!(
-                "{{\"fleet\":{canonical},\"digest\":{},\"source\":{}}}",
+                "{{\"fleet\":{canonical},\"digest\":{},\"source\":{},\"runtime_forge_hosts\":{}}}",
                 serde_json::Value::from(fleet.digest()?),
-                serde_json::Value::from(source.to_string_lossy())
+                serde_json::Value::from(source.to_string_lossy()),
+                serde_json::Value::from(fleet.runtime_hosts.clone())
             );
         }
         Action::Validate { channel } => {

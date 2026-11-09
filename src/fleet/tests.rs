@@ -1,9 +1,11 @@
 use super::*;
 use std::ffi::OsString;
 
+/// A fleet without `forge_hosts` (the field is optional).
 fn fleet() -> Fleet {
     Fleet {
         schema: 1,
+        forge_hosts: Vec::new(),
         first_party: vec![
             "https://forge.example/org/".into(),
             "https://forge.example/other-org/".into(),
@@ -12,14 +14,25 @@ fn fleet() -> Fleet {
             "https://mirror.example/org/".to_owned(),
             "https://forge.example/org/".to_owned(),
         )]),
+        runtime_hosts: Vec::new(),
+    }
+}
+
+/// The same fleet with its forge's host spellings, the canonical one first.
+fn hosted() -> Fleet {
+    Fleet {
+        forge_hosts: vec!["forge.example".into(), "forge-alt.example".into()],
+        ..fleet()
     }
 }
 
 fn with_prefix(prefix: &str) -> Fleet {
     Fleet {
         schema: 1,
+        forge_hosts: Vec::new(),
         first_party: vec![prefix.to_owned()],
         aliases: BTreeMap::new(),
+        runtime_hosts: Vec::new(),
     }
 }
 
@@ -522,24 +535,30 @@ fn the_moon_task_key_and_environment_carry_the_fleet_digest() {
     );
 }
 
-/// The cached task must also find the fleet data itself. cmnp 6dc3929 forwards only its
-/// plumbing list, SEMANTIC_ENV, cache_env and non-`CCID_` ambient names, so CCID_FLEET_FILE is
-/// dropped and a cached `fleet = true` check fails closed in its moon task. The fix belongs in
-/// cmnp (forward CCID_FLEET_FILE as unkeyed plumbing).
+/// The cached task must also find the fleet data itself: cmnp forwards the file's location and
+/// this machine's forge host spellings to moon tasks as plumbing (never keyed). With cmnp
+/// 6dc3929 both were dropped and a cached `fleet = true` check failed closed in its moon task.
 #[test]
-#[ignore = "cmnp 6dc3929 drops CCID_FLEET_FILE from moon tasks; enable with the cmnp fix"]
 fn the_moon_task_environment_forwards_the_fleet_file() {
     let mut parsed = checks("[checks.reads]\nkind='commands'\nfleet=true\ncommands=[['true']]\n");
     normalise(&mut parsed).unwrap();
     let reads = crate::cached::executor_check(&parsed["reads"]);
-    let forwarded = cmnp::inputs::execution_environment(
-        &reads,
-        &environment(&[(FLEET_DIGEST_ENV, "a"), (FLEET_FILE_ENV, "/channel.json")]),
-    );
+    let env = environment(&[
+        (FLEET_DIGEST_ENV, "a"),
+        (FLEET_FILE_ENV, "/channel.json"),
+        (FORGE_HOSTS_ENV, "forge.internal.example"),
+    ]);
+    let forwarded = cmnp::inputs::execution_environment(&reads, &env);
     assert_eq!(
         forwarded.get(OsStr::new(FLEET_FILE_ENV)),
         Some(&OsString::from("/channel.json"))
     );
+    assert_eq!(
+        forwarded.get(OsStr::new(FORGE_HOSTS_ENV)),
+        Some(&OsString::from("forge.internal.example"))
+    );
+    let keyed = cmnp::inputs::semantic_environment(&reads, &env);
+    assert!(!keyed.contains_key(FLEET_FILE_ENV) && !keyed.contains_key(FORGE_HOSTS_ENV));
 }
 
 /// The repository's own release channel carries valid fleet data.
@@ -548,4 +567,201 @@ fn the_release_channel_of_this_repository_carries_valid_fleet_data() {
     let fleet = from_channel(include_bytes!("../../channel.json")).unwrap();
     assert_eq!(fleet.schema, SCHEMA);
     assert!(!fleet.first_party.is_empty());
+}
+
+#[test]
+fn forge_hosts_are_lowercase_dns_names_and_the_first_is_the_prefixes_host() {
+    assert!(hosted().validate().is_ok());
+    assert!(fleet().validate().is_ok(), "forge_hosts is optional");
+    for (hosts, reason) in [
+        (vec!["Forge.example"], "must be a lowercase DNS name"),
+        (vec!["forge.example", ""], "must be a lowercase DNS name"),
+        (
+            vec!["https://forge.example"],
+            "must be a lowercase DNS name",
+        ),
+        (vec!["forge.example:443"], "must be a lowercase DNS name"),
+        (vec!["forge.example/org"], "must be a lowercase DNS name"),
+        (vec!["forge_example"], "must be a lowercase DNS name"),
+        (vec!["forge.example", "forge.example"], "is listed twice"),
+        (
+            vec!["forge-alt.example", "forge.example"],
+            "is not on the canonical forge host \"forge-alt.example\"",
+        ),
+        (
+            vec!["forge.example", "mirror.example"],
+            "aliases name other forges",
+        ),
+    ] {
+        let fleet = Fleet {
+            forge_hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+            ..fleet()
+        };
+        let error = fleet.validate().unwrap_err().to_string();
+        assert!(error.contains(reason), "{hosts:?}: {error}");
+    }
+}
+
+#[test]
+fn every_forge_host_spelling_classifies_as_the_canonical_prefix() {
+    let mut fleet = hosted();
+    fleet.add_forge_hosts("forge.internal.example").unwrap();
+    let canonical = Some(Origin::Canonical {
+        prefix: "https://forge.example/org/",
+    });
+    for host in [
+        "forge.example",
+        "forge-alt.example",
+        "forge.internal.example",
+    ] {
+        assert_eq!(
+            fleet.classify(&format!(
+                "git+https://{host}/org/repo?branch=main#{}",
+                "a".repeat(40)
+            )),
+            canonical,
+            "{host}"
+        );
+        assert_eq!(
+            fleet.classify(&format!("https://{host}/org-evil/repo")),
+            None,
+            "{host}"
+        );
+    }
+    // Only the exact host spelling is rewritten: no user, port or other scheme.
+    for outside in [
+        "https://user@forge-alt.example/org/repo",
+        "https://forge-alt.example:443/org/repo",
+        "http://forge-alt.example/org/repo",
+        "https://forge-alt.example.evil/org/repo",
+        "https://xforge-alt.example/org/repo",
+    ] {
+        assert_eq!(fleet.classify(outside), None, "{outside}");
+    }
+    // Without forge_hosts nothing is rewritten.
+    assert_eq!(
+        self::fleet().classify("https://forge-alt.example/org/repo"),
+        None
+    );
+    // Aliases still classify as aliases.
+    assert_eq!(
+        fleet.classify("https://mirror.example/org/repo"),
+        Some(Origin::Alias {
+            legacy: "https://mirror.example/org/",
+            canonical: "https://forge.example/org/"
+        })
+    );
+}
+
+#[test]
+fn same_forge_compares_forge_identities() {
+    let mut fleet = hosted();
+    fleet.add_forge_hosts("forge.internal.example").unwrap();
+    assert!(fleet.same_forge("forge.example", "forge.internal.example"));
+    assert!(fleet.same_forge("forge-alt.example", "forge.example"));
+    assert!(fleet.same_forge("mirror.example", "mirror.example"));
+    assert!(!fleet.same_forge("forge.example", "mirror.example"));
+    assert!(!hosted().same_forge("forge.example", "forge.internal.example"));
+    assert!(!self::fleet().same_forge("forge.example", "forge-alt.example"));
+}
+
+#[test]
+fn runtime_forge_hosts_never_change_the_data_or_its_digest() {
+    let digest = hosted().digest().unwrap();
+    let mut extended = hosted();
+    extended
+        .add_forge_hosts(" forge.internal.example ,forge-alt.example")
+        .unwrap();
+    assert_eq!(
+        extended.all_forge_hosts().collect::<Vec<_>>(),
+        vec![
+            "forge.example",
+            "forge-alt.example",
+            "forge.internal.example"
+        ],
+        "merged after the channel's list; a known spelling is skipped"
+    );
+    assert_eq!(extended.digest().unwrap(), digest);
+    assert_eq!(
+        extended.canonical_bytes().unwrap(),
+        hosted().canonical_bytes().unwrap()
+    );
+    assert!(!String::from_utf8(extended.canonical_bytes().unwrap())
+        .unwrap()
+        .contains("forge.internal.example"));
+    for (list, reason) in [
+        ("Forge.Internal.example", "must be a lowercase DNS name"),
+        ("forge.internal.example,", "must be a lowercase DNS name"),
+        (
+            "forge.internal.example:8443",
+            "must be a lowercase DNS name",
+        ),
+        ("mirror.example", "aliases name other forges"),
+    ] {
+        let error = hosted().add_forge_hosts(list).unwrap_err().to_string();
+        assert!(error.contains(reason), "{list}: {error}");
+    }
+    let error = fleet()
+        .add_forge_hosts("forge.internal.example")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("has no forge_hosts"), "{error}");
+}
+
+#[test]
+fn load_adds_this_machines_forge_hosts_and_keeps_the_digest() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = channel_file(directory.path(), &hosted());
+    let path = file.to_str().unwrap();
+    let (plain, _) = load(&environment(&[(FLEET_FILE_ENV, path)])).unwrap();
+    let (extended, _) = load(&environment(&[
+        (FLEET_FILE_ENV, path),
+        (FORGE_HOSTS_ENV, "forge.internal.example"),
+    ]))
+    .unwrap();
+    assert_eq!(plain.digest().unwrap(), extended.digest().unwrap());
+    assert!(extended.same_forge("forge.internal.example", "forge.example"));
+    assert!(!plain.same_forge("forge.internal.example", "forge.example"));
+    let error = load(&environment(&[
+        (FLEET_FILE_ENV, path),
+        (FORGE_HOSTS_ENV, "https://forge.internal.example"),
+    ]))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.starts_with("fleet data unusable: fleet forge host from CCID_FORGE_HOSTS"),
+        "{error}"
+    );
+    // A selection binds the same digest with or without this machine's spellings.
+    let mut parsed = checks("[checks.reads]\nkind='commands'\nfleet=true\ncommands=[['true']]\n");
+    normalise(&mut parsed).unwrap();
+    let mut without = environment(&[(FLEET_FILE_ENV, path)]);
+    let mut with = environment(&[
+        (FLEET_FILE_ENV, path),
+        (FORGE_HOSTS_ENV, "forge.internal.example"),
+    ]);
+    bind_selection(&parsed, &["reads".into()], &mut without, false).unwrap();
+    bind_selection(&parsed, &["reads".into()], &mut with, false).unwrap();
+    assert_eq!(
+        value(&without, FLEET_DIGEST_ENV),
+        value(&with, FLEET_DIGEST_ENV)
+    );
+}
+
+/// After the legacy orgs are retired, one channel edit drops their prefixes and the aliases: the
+/// smaller fleet is still valid data, so the move needs no ccid change.
+#[test]
+fn retiring_owners_and_all_aliases_is_a_pure_data_change() {
+    let mut retired = hosted();
+    retired
+        .first_party
+        .retain(|prefix| prefix != "https://forge.example/other-org/");
+    retired.aliases.clear();
+    assert!(retired.validate().is_ok());
+    assert_ne!(retired.digest().unwrap(), hosted().digest().unwrap());
+    let retired = from_channel(
+        br#"{"fleet":{"schema":1,"forge_hosts":["forge.example"],"first_party":["https://forge.example/org/"],"aliases":{}}}"#,
+    )
+    .unwrap();
+    assert!(retired.insteadof_pairs().is_empty());
 }

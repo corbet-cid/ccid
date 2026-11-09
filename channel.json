@@ -12,6 +12,7 @@
   },
   "fleet": {
     "schema": 1,
+    "forge_hosts": ["git.corbet.ch", "forge.corbet.ch"],
     "first_party": [
       "https://git.corbet.ch/cmtymeet/",
       "https://git.corbet.ch/cmtymt/",

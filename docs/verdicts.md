@@ -70,7 +70,8 @@ passes — so a runner with `kache-corbet`/`sccache-corbet cc`/`en_US.UTF-8` and
 `fleet = true` on a check adds `CCID_FLEET_DIGEST` (the SHA-256 of the release channel's
 canonical fleet data) to its `cache_env` when the manifest is loaded, so its verdict and its moon
 task are keyed by the fleet data it reads and an edit of that data misses once. The data's
-location (`CCID_FLEET_FILE`) is never keyed. A check without the field keys exactly as before;
+location (`CCID_FLEET_FILE`) and a runner's extra forge host spellings (`CCID_FORGE_HOSTS`) are
+never keyed. A check without the field keys exactly as before;
 see [fleet data](fleet.md).
 
 ## The record

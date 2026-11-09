@@ -13,6 +13,7 @@ const BINARY: &str = env!("CARGO_BIN_EXE_ccid");
 
 const CHANNEL: &str = r#"{"default":{"revision":"r","sha256":"s"},"fleet":{"schema":1,"first_party":["https://forge.example/org/"],"aliases":{"https://mirror.example/org/":"https://forge.example/org/"}}}"#;
 const OTHER_CHANNEL: &str = r#"{"default":{"revision":"r","sha256":"s"},"fleet":{"schema":1,"first_party":["https://forge.example/moved/"]}}"#;
+const HOSTED_CHANNEL: &str = r#"{"default":{"revision":"r","sha256":"s"},"fleet":{"schema":1,"forge_hosts":["forge.example","forge-alt.example"],"first_party":["https://forge.example/org/"]}}"#;
 const FLEETLESS: &str = r#"{"default":{"revision":"r","sha256":"s"}}"#;
 
 /// A repository whose `.ci/ccid.toml` declares the given checks (TOML tables).
@@ -52,6 +53,7 @@ fn ccid(root: &Path, fleet_file: Option<&Path>) -> Command {
         "CCID_FLEET_FILE",
         "CCID_FLEET_DIGEST",
         "CCID_FLEET_KEYED",
+        "CCID_FORGE_HOSTS",
         "CI_MIN_AVAILABLE_MB",
         "CI_MEMORY_MB",
         "CI_MEMORY_PER_JOB_MB",
@@ -224,6 +226,28 @@ fn fleet_show_and_validate_report_the_digest() {
         .unwrap_or_else(|| panic!("{line}"));
     use sha2::Digest;
     assert_eq!(format!("{:x}", sha2::Sha256::digest(canonical)), digest);
+    assert_eq!(shown["runtime_forge_hosts"], serde_json::json!([]));
+
+    // This machine's forge host spellings are reported, and never change the data or its digest.
+    let output = ccid(root, Some(&repository_channel))
+        .env("CCID_FORGE_HOSTS", "forge.internal.example")
+        .args(["fleet", "show"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    let extended: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(extended["digest"], serde_json::json!(digest));
+    assert_eq!(extended["fleet"], shown["fleet"]);
+    assert_eq!(
+        extended["runtime_forge_hosts"],
+        serde_json::json!(["forge.internal.example"])
+    );
+    let output = ccid(root, Some(&repository_channel))
+        .env("CCID_FORGE_HOSTS", "Forge.Internal.example")
+        .args(["fleet", "show"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", text(&output));
 
     let fleetless = channel(root, "fleetless.json", FLEETLESS);
     let output = ccid(root, None)
@@ -239,16 +263,17 @@ fn fleet_show_and_validate_report_the_digest() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("ccid fleet: fleet data unavailable"));
 }
 
-/// The moon pass-through: a cached run of a `fleet = true` check, as CI runs it. Needs a
-/// preinstalled moon (like `cache_acceptance`). With cmnp 6dc3929 the moon task loses
-/// `CCID_FLEET_FILE` (cmnp forwards only its plumbing list, SEMANTIC_ENV and cache_env), so
-/// this fails closed until cmnp forwards the variable.
+/// The moon pass-through: a cached run of `fleet = true` checks, as CI runs them, through moon
+/// (cmnp's moon task forwards `CCID_FLEET_FILE` and `CCID_FORGE_HOSTS` as plumbing and keys the
+/// digest). The cold run computes in the moon task, where a consumer (`ccid fleet show`) accepts
+/// the data; the warm run is answered by the verdict. Needs a preinstalled moon, like
+/// `cache_acceptance`.
 #[test]
-#[ignore = "Run explicitly on a worker with CCID_TEST_MOON; fails closed until cmnp forwards CCID_FLEET_FILE"]
+#[ignore = "Run explicitly on a worker with CCID_TEST_MOON (a preinstalled moon)"]
 fn a_cached_fleet_check_runs_in_its_moon_task_and_replays_its_verdict() {
     let moon = PathBuf::from(std::env::var_os("CCID_TEST_MOON").expect("preinstalled moon binary"));
     let repo = repository(
-        "[checks.reads]\nkind = 'commands'\nfleet = true\ncache_tools = [['sh', '--version']]\ncommands = [['sh', '-c', 'test \"$CCID_FLEET_KEYED\" = 1 && test -n \"$CCID_FLEET_DIGEST\" && test -f \"$CCID_FLEET_FILE\"']]\n",
+        "[checks.reads]\nkind = 'commands'\nfleet = true\ncache_tools = [['sh', '--version']]\ncommands = [['sh', '-c', 'test \"$CCID_FLEET_KEYED\" = 1 && test -n \"$CCID_FLEET_DIGEST\" && test -f \"$CCID_FLEET_FILE\" && test \"$CCID_FORGE_HOSTS\" = forge.internal.example && ccid fleet show']]\n",
     );
     let root = repo.path();
     fs::write(
@@ -280,8 +305,11 @@ fn a_cached_fleet_check_runs_in_its_moon_task_and_replays_its_verdict() {
             .success());
     }
     let store = TempDir::new().unwrap();
-    let channel_dir = TempDir::new().unwrap();
-    let file = channel(channel_dir.path(), "channel.json", CHANNEL);
+    let scratch = TempDir::new().unwrap();
+    // The shared result root and the compile cache root exist on a worker; never created by ccid.
+    fs::create_dir(store.path().join("results")).unwrap();
+    fs::create_dir(store.path().join("compile")).unwrap();
+    let file = channel(store.path(), "channel.json", HOSTED_CHANNEL);
     let mut paths = vec![
         Path::new(BINARY).parent().unwrap().to_path_buf(),
         moon.parent().unwrap().to_path_buf(),
@@ -292,18 +320,32 @@ fn a_cached_fleet_check_runs_in_its_moon_task_and_replays_its_verdict() {
         command
             .args(["check", "--repo", ".", "--check", "reads"])
             .env("PATH", std::env::join_paths(&paths).unwrap())
+            .env("TMPDIR", scratch.path())
+            .env("CCID_FORGE_HOSTS", "forge.internal.example")
             .env("CI_CACHE_ROOT", store.path().join("compile"))
             .env(
                 "CI_REPOSITORY_URL",
                 "https://example.invalid/test/fleet-fixture",
             )
             .env("CCID_RESULT_CACHE", store.path().join("results"));
-        command.output().unwrap()
+        let output = command.output().unwrap();
+        let metrics: serde_json::Value = fs::read(root.join(".ccid/cache-metrics.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        (output, metrics)
     };
-    let cold = run();
-    println!("{}", text(&cold));
+    let (cold, cold_metrics) = run();
+    println!("{}\nmetrics={cold_metrics}", text(&cold));
     assert!(cold.status.success(), "{}", text(&cold));
-    let warm = run();
-    println!("{}", text(&warm));
+    assert!(
+        String::from_utf8_lossy(&cold.stdout).contains(r#"{"fleet":{"schema":1"#),
+        "the consumer ran in the moon task: {}",
+        text(&cold)
+    );
+    assert_eq!(cold_metrics["checks"][0]["computed"], serde_json::json!(1));
+    let (warm, warm_metrics) = run();
+    println!("{}\nmetrics={warm_metrics}", text(&warm));
     assert!(warm.status.success(), "{}", text(&warm));
+    assert_eq!(warm_metrics["checks"][0]["computed"], serde_json::json!(0));
 }
