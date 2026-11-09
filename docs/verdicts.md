@@ -13,23 +13,54 @@ components, in this order:
 
 | Component | Meaning |
 |---|---|
-| `schema` | Key schema (`1`). Unknown schemas are refused. |
+| `schema` | Key schema (`2`). Unknown schemas are refused. |
 | `tree` | SHA-256 of the tree's content: path, kind (regular/executable/symlink/submodule) and bytes of every committed file. A `git archive` export of a commit and a checkout of the same commit produce the same value; generated directories (`.git`, `.moon`, `.ccid`, `target`, `node_modules`) are not part of it. |
 | `git_dependencies` | Every git-sourced package of every `Cargo.lock` (root and nested), keyed `<lock path>:<package>:<url>`, mapped to the commit the build resolves it to. Read **after** the producer's dependency resolution, so it is the resolved commit, not the committed pin. |
-| `toolchain` | Stable role → SHA-256 of the executable's bytes (for example `rustc`, `cargo`, `cargo-llvm-cov`, `rustup`, `git`, the declared `cache_tools`, `cc`, `cxx`, `linker`, `rustc-wrapper`). |
+| `toolchain` | Stable role → SHA-256 of the tool's **semantic identity** (its release and target), never its installed bytes. See [Tool identity](#tool-identity). |
 | `profile` | SHA-256 of the shared build profile (`profiles/dev.toml`) compiled into the producing binary. |
-| `epoch` | `VERDICT_EPOCH`: what a verdict *means*. A release that checks the same things the same way keeps every verdict; only a semantic change raises it. |
+| `epoch` | `VERDICT_EPOCH`: what a verdict *means*. A release that checks the same things the same way keeps every verdict; only a semantic change raises it (`2`). |
 | `check` | The selected check's name. |
-| `check_identity` | SHA-256 of the check declaration plus the **declared** environment: the values of `SEMANTIC_ENV` and the check's `cache_env`. An absent variable and an empty one differ. Ambient variables never enter the key. |
+| `check_identity` | SHA-256 of the check declaration plus the **declared** environment: the values of `SEMANTIC_ENV` and the check's `cache_env`, with producer-local path entries normalised away (see [Declared environment](#declared-environment)). An absent variable and an empty one differ. Ambient variables never enter the key. |
 
 No path, URL, commit id, run id, timestamp or host name is part of the key. Two producers on
 different hosts therefore compute the same key for the same content.
+
+### Tool identity
+
+The toolchain is identified by what a tool **is**, not by how it was installed:
+
+| Tool | Identity |
+|---|---|
+| `rustc`, `cargo`, `rustdoc` (stable and nightly) | `<tool> -vV`: release, commit hash, commit date, host and LLVM version. |
+| C/C++ compilers (`cc`, `cxx`, `clang`, `gcc`, …) | `--version` (installation-directory and configure-prefix lines removed) plus `-dumpmachine`. |
+| `git`, `bash`, `python3`, `pkg-config`, `node`, `npm`, `deno`, `nix`, `cargo-llvm-cov`, other Cargo subcommands | the tool's `--version` output. |
+| `rustup` | **not part of the key.** It only dispatches to a selected toolchain and compiles nothing. The compiler rustup selects is keyed by its own semantic identity, so a rustup update that changes no compiler release changes nothing a build sees. A declared `rustup` probe is likewise not a build input. |
+
+An upstream rustup install, a distribution package and a Nix package whose binaries are
+patchelf'd therefore agree when they are the same release with the same target. A different
+release, commit or target still changes the key.
+
+### Declared environment
+
+`SEMANTIC_ENV` and `cache_env` are hashed by value, except that path lists
+(`LD_LIBRARY_PATH`, `LIBRARY_PATH`, `PKG_CONFIG_PATH`, `PYTHONPATH`, `NODE_PATH`, `CPATH`,
+`C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `CMAKE_PREFIX_PATH`) are normalised first:
+
+* entries inside the checkout are build state; the tree digest already names the source,
+* entries inside the producer's Cargo target or any `target/<profile>` directory are build
+  outputs,
+* entries under the selected Rust toolchain's `lib` trees are locators for libraries whose
+  release the semantic toolchain identity already names.
+
+Empty and duplicate entries are removed; order is preserved, so a genuinely different library
+search path still changes the key. This is what lets a land gate that inherited its own xtask
+`LD_LIBRARY_PATH` and a CI runner that did not agree when the actual build inputs are equal.
 
 Per-run scheduler and systemd state (`FORGEJO_*`, `ACTIONS_*`, `RUNNER_*`, `GITHUB_*`, `CI_*`,
 `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`, `*_PRESSURE_*`, `nix-shell` attributes)
 is never keyed. `GIT_CONFIG_*` `url.*.insteadOf` rewrites are forwarded to cached work as plumbing
 so a land can serve unpushed commits from mirrors; they are not keyed, because the resolved
-commits they lead to are. `RUSTC_WRAPPER`, a plain `CC`/`CXX` selector (its compiler's bytes are
+commits they lead to are. `RUSTC_WRAPPER`, a plain `CC`/`CXX` selector (its compiler's identity is
 keyed through the toolchain; a selector that carries flags is keyed verbatim) and the presentation
 locale (`LANG`, `LC_ALL`, `TZ`) are plumbing too — a compiler cache, a cache wrapper in front of
 the same compiler, or a locale changes how a result is produced or presented, not whether the check
@@ -42,11 +73,11 @@ One JSON file per key: `<CCID_RESULT_CACHE>/verdicts/<key>.json`.
 
 | Field | Meaning |
 |---|---|
-| `schema` | Record schema (`1`). |
+| `schema` | Record schema (`2`). |
 | `key` | The key above. |
 | `components` | The exact components; they must hash to `key`, or the record is refused. |
 | `commit` | The commit the tree came from (provenance only). |
-| `repository` | Canonical repository identity (provenance only). |
+| `repository` | Canonical repository path (`owner/name`), provenance only. Scheme, user, host, port and `.git` are stripped: `git.example`, `forge.example`, `forge.example.internal` and the in-cluster service name are transport aliases of the same repository, and the tree digest names the content. |
 | `result` | `success` or `failure`. **Only `success` is ever accepted.** |
 | `producer` | `lane` or `ci`, plus free-form identity (host, lane, pipeline URL). Provenance only. |
 | `tool` | The producing ccid binary: SHA-256 of its bytes and the source revision compiled into it. |
@@ -143,7 +174,7 @@ CCID_RESULT_CACHE/
 
 Coverage is a check like any other. A repository that declares its coverage work in a check (or
 in the `verify` check that contains it) gets one verdict per tree, with the same key components as
-every other check: the tree content, the resolved dependency commits, the **bytes of the nightly
+every other check: the tree content, the resolved dependency commits, the **semantic release of the nightly
 compiler and `cargo-llvm-cov`** the check declares in `cache_tools`, the profile and the declared
 environment. A nightly toolchain update therefore changes the key exactly once, and an unchanged
 tree is never instrumented twice. The declared coverage reports are in the output store above, so
@@ -163,6 +194,10 @@ a later nightly run restores the identical reports without a second full build.
 * `ccid job-run --local --source <dir> --sha <commit>` — run exactly CI's declared job against an
   existing export of the commit. This is the land gate's producer entry point; it uses the same
   job plan, environment, adapter check and command as `ccid job-run` on a runner.
+* `CCID_VERDICT_DEBUG=1` — emit a `verdict-debug` event with the exact `check_identity` input
+  (declaration and normalised declared environment) and the toolchain digests beside the key.
+  Values are the declared build environment; the switch is off unless a producer asks for it.
+  When two producers disagree, this prints what they disagree on instead of guessing.
 
 ## Store operation
 

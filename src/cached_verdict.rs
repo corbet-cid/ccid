@@ -2,9 +2,9 @@
 //!
 //! A verdict answers exactly one question for exactly one check: "did this check pass on this
 //! content?" Its key is content only (see [`KeyComponents`]): the content of the committed tree,
-//! every git dependency commit the builds resolve to, the bytes of the tools the check uses, the
-//! shared build profile, the check's declaration and declared environment, and the verdict epoch.
-//! No path, URL, commit, run id, timestamp or host name is part of the key.
+//! every git dependency commit the builds resolve to, the semantic identity of the tools the
+//! check uses, the shared build profile, the check's declaration and declared environment, and
+//! the verdict epoch. No path, URL, commit, run id, timestamp or host name is part of the key.
 //!
 //! The record names the ccid binary that produced it (bytes and source revision), the repository
 //! and commit it came from, and whether a lane or CI produced it. CI accepts a record only when
@@ -33,7 +33,7 @@ use std::{
 };
 
 /// Schema of the key and the record. Unknown schemas are refused, never guessed.
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 /// Namespace below `CCID_RESULT_CACHE` that holds the verdict records.
 pub const STORE_DIR: &str = "verdicts";
 /// An attempt-state or verdict record is tiny; anything larger is refused without parsing.
@@ -51,7 +51,8 @@ const GENERATED: &[&str] = &[".git", ".moon", ".ccid", "target", "node_modules"]
 /// `git_dependencies` maps every git-sourced package of every `Cargo.lock` (root and nested) to
 /// the commit the build resolves it to, keyed `<lock path>:<package>:<url>`; reading it after the
 /// producer's dependency resolution makes it the RESOLVED commit, not the committed pin.
-/// `toolchain` maps a stable role to the SHA-256 of the executable's bytes. `profile` is the
+/// `toolchain` maps a stable role to the SHA-256 of the tool's semantic identity (release and
+/// target; never the installed bytes). `profile` is the
 /// SHA-256 of the shared build profile (`profiles/dev.toml`) compiled into the producing binary.
 /// `check_identity` is the SHA-256 of the check declaration plus the values of the declared
 /// environment (`SEMANTIC_ENV` plus the check's `cache_env`), never of ambient run state.
@@ -721,9 +722,9 @@ fn find_program(name: &str, environment: &Environment) -> Result<PathBuf> {
         crate::compile_cache::executable(environment, name)
             .ok_or_else(|| failure(format!("Verdict key cannot resolve tool {name:?}")))?
     };
-    let path = path
-        .canonicalize()
-        .map_err(|error| failure(format!("Verdict key cannot resolve tool {name:?}: {error}")))?;
+    // Do NOT canonicalize: a rustup proxy is an executable whose argv[0] selects the toolchain.
+    // Resolving the symlink to `rustup` would run rustup itself instead of the compiler. The
+    // check below follows symlinks and refuses a missing or non-file target.
     if !path.is_file() {
         return Err(failure(format!("Verdict key tool {name:?} is not a file")));
     }
@@ -750,19 +751,137 @@ fn run_tool(program: &Path, args: &[&str], environment: &Environment) -> Result<
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Some tools (notably older Python) print their version on stderr. Either stream is the
+    // tool's answer; both empty is not an answer.
+    let text = if stdout.trim().is_empty() {
+        stderr
+    } else {
+        stdout
+    };
+    Ok(text.trim().replace("\r\n", "\n"))
 }
 
-fn add_tool(tools: &mut BTreeMap<String, String>, role: &str, path: &Path) -> Result<()> {
+/// The program name a role resolves to. The role names the tool, but a role like `nightly-rustc`
+/// or `cargo-llvm-cov` still runs `rustc` or `cargo-llvm-cov`; the probe follows the program.
+fn program_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("tool")
+        .to_owned()
+}
+
+/// The release-identifying lines of `cargo -vV`. Cargo also prints the host's libgit2,
+/// libcurl, OpenSSL and OS detection; those are properties of the host build, not of the
+/// release that orchestrates a build, and a distribution and an upstream install of the same
+/// cargo disagree on them.
+fn rust_verbose_identity(program: &str, text: &str) -> String {
+    if program != "cargo" {
+        return text.to_owned();
+    }
+    let keep = [
+        "cargo ",
+        "release:",
+        "commit-hash:",
+        "commit-date:",
+        "host:",
+    ];
+    text.lines()
+        .filter(|line| keep.iter().any(|prefix| line.starts_with(prefix)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Tools whose semantic release is printed by `-vV` (Rust) rather than `--version`.
+fn uses_rust_verbose_version(program: &str) -> bool {
+    program == "rustc" || program == "cargo" || program == "rustdoc"
+}
+
+/// C-family compilers: `--version` plus `-dumpmachine`, because the target triple is part of
+/// what a compiler produces and is not in the version line of every compiler.
+fn is_c_family(program: &str) -> bool {
+    matches!(
+        program,
+        "cc" | "c++" | "cxx" | "gcc" | "g++" | "clang" | "clang++" | "clang-cpp"
+    )
+}
+
+/// The SEMANTIC identity of one tool: what release it is and what target it produces, never the
+/// host-specific bytes of the installed file or an installation path. The same tool release
+/// installed by upstream rustup, by a Nix package (with patchelf'd binaries) or by a distribution
+/// therefore gets the same identity on every host.
+///
+/// `rustup` is deliberately not identified: it only dispatches to a toolchain. The selected
+/// compiler is probed below, and a rustup update that does not change that compiler changes
+/// nothing a build sees.
+fn tool_identity(program: &str, path: &Path, environment: &Environment) -> Result<String> {
+    if program == "rustup" {
+        return Err(failure(
+            "Verdict key does not identify rustup: it compiles nothing",
+        ));
+    }
+    let mut text = if uses_rust_verbose_version(program) {
+        run_tool(path, &["-vV"], environment)?
+    } else {
+        match run_tool(path, &["--version"], environment) {
+            Ok(text) => text,
+            Err(first) => {
+                // A `cargo-*` external subcommand is normally invoked by cargo as
+                // `cargo-<name> <name> ...`; some (cargo-llvm-cov) accept `--version` only in
+                // that form.
+                match program.strip_prefix("cargo-") {
+                    Some(subcommand) if !subcommand.is_empty() => {
+                        run_tool(path, &[subcommand, "--version"], environment)
+                            .map_err(|_| first)?
+                    }
+                    _ => return Err(first),
+                }
+            }
+        }
+    };
+    if uses_rust_verbose_version(program) {
+        text = rust_verbose_identity(program, &text);
+    }
+    if is_c_family(program) {
+        // `clang --version` and some GCC builds append the installation directory or the
+        // configure prefix. Those are host build facts, not the compiler's identity.
+        text = text
+            .lines()
+            .filter(|line| {
+                !line.starts_with("InstalledDir:")
+                    && !line.starts_with("Configured with:")
+                    && !line.starts_with("InstalledDir ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let target = run_tool(path, &["-dumpmachine"], environment)?;
+        text = format!("{text}\n{target}");
+    }
+    Ok(text)
+}
+
+fn add_tool(
+    tools: &mut BTreeMap<String, String>,
+    role: &str,
+    path: &Path,
+    environment: &Environment,
+) -> Result<String> {
     if !is_plain(role) {
         return Err(failure(format!(
             "Verdict key tool role {role:?} is not plain"
         )));
     }
-    let digest = file_sha256(path)?;
+    let program = program_name(path);
+    let identity = tool_identity(&program, path, environment).map_err(|error| {
+        failure(format!(
+            "Verdict key cannot identify tool {role:?}: {error}"
+        ))
+    })?;
+    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
     match tools.insert(role.to_owned(), digest.clone()) {
-        None => Ok(()),
-        Some(existing) if existing == digest => Ok(()),
+        None => Ok(identity),
+        Some(existing) if existing == digest => Ok(identity),
         Some(_) => Err(failure(format!(
             "Verdict key has two different tools for role {role:?}"
         ))),
@@ -812,32 +931,47 @@ fn add_command_tool(
                 "Verdict key cannot identify `rustup run` without a program",
             ));
         };
-        let rustup = find_program("rustup", environment)?;
-        add_tool(tools, "rustup", &rustup)?;
         let path = rustup_tool(toolchain, selected, environment)?;
+        // `rustup` itself is not part of the key: it dispatches to the selected toolchain and
+        // never compiles anything. The selected compiler is identified semantically below, so a
+        // rustup update that changes no compiler release changes nothing a build sees.
         // The toolchain qualifies the role: stable rustc and nightly rustc are different
-        // binaries and both can appear in one check's tools.
-        add_tool(tools, &format!("{toolchain}-{selected}"), &path)?;
-        // `cargo llvm-cov` and friends are external subcommands; their bytes matter too.
+        // compilers and both can appear in one check's tools.
+        add_tool(
+            tools,
+            &format!("{toolchain}-{selected}"),
+            &path,
+            environment,
+        )?;
+        // `cargo llvm-cov` and friends are external subcommands; their version matters too.
         if selected == "cargo" {
             if let Some(subcommand) = argv.get(4).filter(|arg| !arg.starts_with('-')) {
                 if let Some(path) =
                     crate::compile_cache::executable(environment, &format!("cargo-{subcommand}"))
                 {
-                    add_tool(tools, &format!("{toolchain}-cargo-{subcommand}"), &path)?;
+                    add_tool(
+                        tools,
+                        &format!("{toolchain}-cargo-{subcommand}"),
+                        &path,
+                        environment,
+                    )?;
                 }
             }
         }
         return Ok(());
     }
+    if base == "rustup" {
+        // A declared probe of rustup is not a build input; see `tool_identity`.
+        return Ok(());
+    }
     let path = find_program(program, environment)?;
-    add_tool(tools, base, &path)?;
+    add_tool(tools, base, &path, environment)?;
     if base == "cargo" {
         if let Some(subcommand) = argv.get(1).filter(|arg| !arg.starts_with('-')) {
             if let Some(path) =
                 crate::compile_cache::executable(environment, &format!("cargo-{subcommand}"))
             {
-                add_tool(tools, &format!("cargo-{subcommand}"), &path)?;
+                add_tool(tools, &format!("cargo-{subcommand}"), &path, environment)?;
             }
         }
     }
@@ -855,7 +989,7 @@ fn add_compiler_tools(
         let program = value(environment, variable);
         let program = program.as_deref().map(program_of).unwrap_or(default);
         if let Ok(path) = find_program(program, environment) {
-            add_tool(tools, role, &path)?;
+            add_tool(tools, role, &path, environment)?;
         }
     }
     Ok(())
@@ -877,22 +1011,33 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                     rustup_tool(toolchain, "cargo", environment)?,
                 ),
             };
-            add_tool(&mut tools, "rustc", &rustc)?;
-            add_tool(&mut tools, "cargo", &cargo)?;
+            add_tool(&mut tools, "rustc", &rustc, environment)?;
+            add_tool(&mut tools, "cargo", &cargo, environment)?;
             if check.test_runner.as_deref() == Some("nextest") {
                 add_tool(
                     &mut tools,
                     "cargo-nextest",
                     &find_program("cargo-nextest", environment)?,
+                    environment,
                 )?;
             }
             for (role, variable) in [("cc", "CC"), ("cxx", "CXX")] {
                 if let Some(program) = value(environment, variable) {
-                    add_tool(&mut tools, role, &find_program(&program, environment)?)?;
+                    add_tool(
+                        &mut tools,
+                        role,
+                        &find_program(&program, environment)?,
+                        environment,
+                    )?;
                 }
             }
             if let Some(linker) = value(environment, "CI_LINKER") {
-                add_tool(&mut tools, "linker", &find_program(&linker, environment)?)?;
+                add_tool(
+                    &mut tools,
+                    "linker",
+                    &find_program(&linker, environment)?,
+                    environment,
+                )?;
             }
             // A compiler cache wrapper changes no result, only how it was produced: it is
             // cache plumbing, deliberately outside the verdict key.
@@ -904,16 +1049,16 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
             for argv in &check.cache_tools {
                 add_command_tool(&mut tools, argv, environment)?;
             }
-            // A check script resolves dependencies with Git; its bytes decide the resolution.
+            // A check script resolves dependencies with Git; its release decides the resolution.
             if let Some(path) = crate::compile_cache::executable(environment, "git") {
-                add_tool(&mut tools, "git", &path)?;
+                add_tool(&mut tools, "git", &path, environment)?;
             }
             if check.cache_tools.is_empty() {
                 // A custom command that declares no tools is keyed by the common toolchains it
                 // can find, exactly as the ordinary cached key does.
                 for name in ["rustc", "cargo", "node", "python3", "nix"] {
                     if let Some(path) = crate::compile_cache::executable(environment, name) {
-                        add_tool(&mut tools, name, &path)?;
+                        add_tool(&mut tools, name, &path, environment)?;
                     }
                 }
             }
@@ -923,18 +1068,34 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                     &mut tools,
                     "linker",
                     &find_program(program_of(&linker), environment)?,
+                    environment,
                 )?;
             }
         }
         "javascript" => {
             let manager = check.manager.as_deref().unwrap_or("npm");
             if manager != "deno" {
-                add_tool(&mut tools, "node", &find_program("node", environment)?)?;
+                add_tool(
+                    &mut tools,
+                    "node",
+                    &find_program("node", environment)?,
+                    environment,
+                )?;
             }
-            add_tool(&mut tools, manager, &find_program(manager, environment)?)?;
+            add_tool(
+                &mut tools,
+                manager,
+                &find_program(manager, environment)?,
+                environment,
+            )?;
         }
         "nix" => {
-            add_tool(&mut tools, "nix", &find_program("nix", environment)?)?;
+            add_tool(
+                &mut tools,
+                "nix",
+                &find_program("nix", environment)?,
+                environment,
+            )?;
         }
         other => {
             return Err(failure(format!(
@@ -948,14 +1109,92 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
     Ok(tools)
 }
 
+/// Path-list variables whose entries may be locators rather than semantic inputs.
+const PATH_LISTS: &[&str] = &[
+    "LD_LIBRARY_PATH",
+    "LIBRARY_PATH",
+    "PKG_CONFIG_PATH",
+    "PYTHONPATH",
+    "NODE_PATH",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "CMAKE_PREFIX_PATH",
+];
+
+/// A Cargo build-output directory: a `target` component followed by a profile (or `deps`).
+fn is_build_output(path: &Path) -> bool {
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    components.windows(2).any(|pair| {
+        pair[0] == "target"
+            && matches!(
+                pair[1],
+                "debug" | "release" | "test" | "bench" | "deps" | "doc"
+            )
+    })
+}
+
+/// Normalise a declared path list to the entries that describe content, not a producer's
+/// process state:
+///
+/// * entries inside the checkout are build state (the tree digest already names the source),
+/// * entries inside the producer's Cargo target directory, its manifest's `target` directory or
+///   any `target/<profile>` are build outputs,
+/// * entries under the selected Rust toolchain's `lib` trees are locators for libraries whose
+///   release the semantic toolchain identity already names.
+///
+/// Duplicate and empty entries are removed. The result is order-preserving, so a genuinely
+/// different library search path still changes the key.
+fn normalise_path_list(list: &str, root: &Path, environment: &Environment) -> String {
+    let rustup_libs =
+        value_os(environment, "RUSTUP_HOME").map(|home| Path::new(&home).join("toolchains"));
+    let cargo_target = value(environment, "CARGO_TARGET_DIR").map(PathBuf::from);
+    let manifest_target = value(environment, "CARGO_MANIFEST_DIR")
+        .map(|manifest| Path::new(&manifest).join("target"));
+    let mut seen = BTreeSet::new();
+    list.split(':')
+        .filter(|entry| !entry.is_empty())
+        .filter(|entry| {
+            let path = Path::new(entry);
+            !path.starts_with(root)
+                && !rustup_libs
+                    .as_ref()
+                    .is_some_and(|libraries| path.starts_with(libraries))
+                && !cargo_target
+                    .as_ref()
+                    .is_some_and(|target| path.starts_with(target))
+                && !manifest_target
+                    .as_ref()
+                    .is_some_and(|target| path.starts_with(target))
+                && !is_build_output(path)
+                && seen.insert((*entry).to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn value_os(environment: &Environment, name: &str) -> Option<std::ffi::OsString> {
+    environment.get(OsStr::new(name)).cloned()
+}
+
 /// The check declaration plus the exact values of the environment variables it declares
 /// (`SEMANTIC_ENV` plus `cache_env`). An empty declared variable and an absent one are different
 /// inputs, as they are for the ordinary result cache. Ambient environment never enters the key.
-fn check_identity(check: &crate::Check, environment: &Environment) -> Result<String> {
+///
+/// The payload is built once so `CCID_VERDICT_DEBUG=1` can print exactly what the identity hashes;
+/// without that, two producers that disagree have no way to name the disagreeing input.
+fn check_identity_payload(
+    check: &crate::Check,
+    environment: &Environment,
+    root: &Path,
+) -> Result<serde_json::Value> {
     // Process plumbing that the fleet's workstation and its runner disagree on without any
     // effect on what a check computes: the compiler cache wrapper and the presentation locale.
     // A check that really depends on one declares it in `cache_env`, which is never filtered.
-    // `CC`/`CXX` select a compiler; the compiler's bytes are keyed through the toolchain. A
+    // `CC`/`CXX` select a compiler; the compiler's identity is keyed through the toolchain. A
     // plain selector (`cc`, `clang`, `sccache-corbet cc`) is therefore not a separate input,
     // which lets a runner with a cache wrapper and a land without it agree. A selector that
     // carries flags is different: those flags are keyed verbatim.
@@ -978,20 +1217,42 @@ fn check_identity(check: &crate::Check, environment: &Environment) -> Result<Str
         {
             continue;
         }
+        let value = match value {
+            Some(value) if PATH_LISTS.contains(&name) => {
+                Some(normalise_path_list(&value, root, environment))
+            }
+            other => other,
+        };
         declared.insert(name.to_owned(), value);
     }
-    let payload = json!({"declaration": check, "env": declared});
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&payload)?)
-    ))
+    Ok(json!({"declaration": check, "env": declared}))
 }
 
 fn store_root(environment: &Environment) -> Option<PathBuf> {
     value(environment, "CCID_RESULT_CACHE").map(PathBuf::from)
 }
 
-/// The repository identity as provenance: the canonical URL CI was handed, else the origin.
+/// Canonical repository provenance: the repository path (`owner/name`), never the transport.
+///
+/// The same repository is reachable as `git.example`, `forge.example`,
+/// `forge.example.internal` or an in-cluster service name, and the content tree digest already
+/// identifies the content. A scheme, user, host, port or `.git` suffix is therefore a transport
+/// alias, not part of the identity: strip them all. This is provenance only and never a key input.
+fn canonical_repository(raw: &str) -> String {
+    let path = if let Ok(url) = url::Url::parse(raw) {
+        url.path().trim_start_matches('/').to_owned()
+    } else if let Some((_, path)) = raw.rsplit_once(':') {
+        // scp-style `git@host:owner/name.git`; a plain `owner/name` has no colon.
+        path.trim_start_matches('/').to_owned()
+    } else {
+        raw.trim_start_matches('/').to_owned()
+    };
+    let path = path.trim_end_matches('/');
+    path.strip_suffix(".git").unwrap_or(path).to_owned()
+}
+
+/// The repository identity as provenance: the canonical path of `CI_REPOSITORY_URL`, else the
+/// checkout's origin, else `unknown`.
 fn repository_identity(root: &Path, environment: &Environment) -> String {
     value(environment, "CI_REPOSITORY_URL")
         .or_else(|| {
@@ -1001,6 +1262,8 @@ fn repository_identity(root: &Path, environment: &Environment) -> String {
                 None
             }
         })
+        .map(|raw| canonical_repository(&raw))
+        .filter(|canonical| !canonical.is_empty())
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -1089,6 +1352,8 @@ pub(crate) fn prepare(
     ignore.extend(outputs.iter().cloned());
     applicable(root, &ignore)?;
     let entries = tree_entries(root, commit_id)?;
+    let identity = check_identity_payload(check, environment, root)?;
+    let check_identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&identity)?));
     let components = KeyComponents {
         schema: SCHEMA,
         tree: entries_digest(root, &entries)?,
@@ -1097,9 +1362,21 @@ pub(crate) fn prepare(
         profile: format!("{:x}", Sha256::digest(DEV_PROFILE.as_bytes())),
         epoch: crate::cached::VERDICT_EPOCH,
         check: check_name.to_owned(),
-        check_identity: check_identity(check, environment)?,
+        check_identity,
     };
     let key = components.key_hex()?;
+    if value(environment, "CCID_VERDICT_DEBUG").as_deref() == Some("1") {
+        // Opt-in: print the exact identity input whose hash is in the key. Values are the
+        // check's declared environment; they never leave the producer unless this asks.
+        event(json!({
+            "event": "verdict-debug",
+            "check": check_name,
+            "key": key,
+            "identity": identity,
+            "check_identity": components.check_identity,
+            "toolchain": components.toolchain,
+        }));
+    }
     let cache = store_root(environment);
     let store = cache.as_ref().map(|root| root.join(STORE_DIR));
     Ok(Prepared {

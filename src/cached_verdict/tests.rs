@@ -211,10 +211,10 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
     }
     assert_eq!(prepared(root, &ambient, "verify").key, key);
 
-    // A changed tool's bytes are part of the key.
+    // A tool's SEMANTIC release is part of the key; its installed bytes are not.
     let tools = tempfile::tempdir().unwrap();
     let script = tools.path().join("sh");
-    fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(&script, "#!/bin/sh\necho 'sh 9.9 (fixture one)'\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -229,7 +229,18 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
         )
         .unwrap(),
     );
-    assert_ne!(prepared(root, &with_tool, "verify").key, key);
+    let semantic_one = prepared(root, &with_tool, "verify").key;
+    assert_ne!(semantic_one, key);
+    // Same release installed differently (different bytes, same version output) keys the same.
+    fs::write(
+        &script,
+        "#!/bin/sh\n# a different install of the same release\necho 'sh 9.9 (fixture one)'\n",
+    )
+    .unwrap();
+    assert_eq!(prepared(root, &with_tool, "verify").key, semantic_one);
+    // A different release changes the key even when the file is otherwise identical.
+    fs::write(&script, "#!/bin/sh\necho 'sh 10.0 (fixture two)'\n").unwrap();
+    assert_ne!(prepared(root, &with_tool, "verify").key, semantic_one);
 }
 
 #[test]
@@ -800,4 +811,212 @@ fn a_pass_from_another_producing_binary_is_refreshed_not_kept_forever() {
             .tool,
         own_tool().unwrap()
     );
+}
+
+/// Two installations of the same tool release with different bytes: the upstream rustup /
+/// nixpkgs split the verdict key must not see. Same semantic output, different files.
+fn host_profile(directory: &Path, marker: &str, rustc_release: &str) {
+    fs::create_dir_all(directory).unwrap();
+    let write = |name: &str, body: String| {
+        let path = directory.join(name);
+        fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    };
+    write(
+        "sh",
+        format!("#!/bin/sh\n# {marker}\necho 'sh 5.2.37 (fixture release)'\n"),
+    );
+    write(
+        "rustc",
+        format!(
+            "#!/bin/sh\n# {marker}\ncat <<'EOF'\nrustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nchannel: {rustc_release}\nLLVM version: 23.1.1\nEOF\n"
+        ),
+    );
+    write(
+        "cargo",
+        format!(
+            "#!/bin/sh\n# {marker}\ncat <<'EOF'\ncargo 1.99.1 (5f94df478 2026-08-27)\nrelease: 1.99.1\ncommit-hash: 5f94df478b2b4a5c4c9a9f9c8f9e1d2c3b4a5f60\ncommit-date: 2026-08-27\nhost: x86_64-unknown-linux-gnu\nlibgit2: 1.9.2 (sys:0.20.2 vendored)\nlibcurl: 8.14.1 (sys:0.4.83+curl-8.14.1)\nssl: OpenSSL 3.5.1 1 Jul 2025\nos: {marker}\nEOF\n"
+        ),
+    );
+}
+
+#[test]
+fn two_host_profiles_of_the_same_release_share_a_verdict_key() {
+    let fixture = fixture("profiles");
+    let root = fixture.path();
+    let tools = tempfile::tempdir().unwrap();
+    let upstream = tools.path().join("upstream");
+    let nixpkgs = tools.path().join("nixpkgs");
+    host_profile(&upstream, "upstream rustup install", "stable");
+    host_profile(&nixpkgs, "nixpkgs rustup install (patchelf'd)", "stable");
+    let mut check = check();
+    check.commands = vec![vec!["sh".into(), "-c".into(), "true".into()]];
+    check.cache_tools = vec![
+        vec!["sh".into(), "--version".into()],
+        vec!["rustc".into(), "-vV".into()],
+        vec!["cargo".into(), "-vV".into()],
+    ];
+    let commit_id = commit(root, None, &environment()).unwrap();
+    let with_path = |directory: &Path| {
+        let mut env = environment();
+        env.insert(
+            "PATH".into(),
+            std::env::join_paths(
+                std::iter::once(directory.to_path_buf())
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap(),
+        );
+        env
+    };
+    let key = |directory: &Path| {
+        prepare(
+            root,
+            "verify",
+            &check,
+            &with_path(directory),
+            &commit_id,
+            &[],
+        )
+        .unwrap()
+        .key
+    };
+    assert_eq!(
+        key(&upstream),
+        key(&nixpkgs),
+        "the same tool release on two hosts keys the same"
+    );
+    // A different compiler release on one host still changes the key.
+    host_profile(&nixpkgs, "nixpkgs rustup install (patchelf'd)", "different");
+    assert_ne!(key(&upstream), key(&nixpkgs));
+}
+
+#[test]
+fn rustup_never_enters_the_key() {
+    let fixture = fixture("rustup-drop");
+    let root = fixture.path();
+    let tools = tempfile::tempdir().unwrap();
+    let nightly = tools.path().join("nightly-rustc");
+    let write_nightly = |release: &str| {
+        fs::write(
+            &nightly,
+            format!(
+                "#!/bin/sh\ncat <<'EOF'\nrustc 1.99.0-nightly ({release} 2026-01-01)\nbinary: rustc\ncommit-hash: {}\ncommit-date: 2026-01-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0-nightly\nLLVM version: 21.1.8\nEOF\n",
+                "b".repeat(40)
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&nightly, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    };
+    write_nightly("one");
+    let with_rustup = |directory: &Path, marker: &str| {
+        let rustup = directory.join("rustup");
+        fs::write(
+            &rustup,
+            format!("#!/bin/sh\n# {marker}\necho '{}'\n", nightly.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = environment();
+        env.insert(
+            "PATH".into(),
+            std::env::join_paths(
+                std::iter::once(directory.to_path_buf())
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap(),
+        );
+        env
+    };
+    let profile_a = tempfile::tempdir().unwrap();
+    let profile_b = tempfile::tempdir().unwrap();
+    let env_a = with_rustup(profile_a.path(), "rustup release one");
+    let env_b = with_rustup(profile_b.path(), "a patchelf'd rustup release one");
+    let mut check = check();
+    check.cache_tools = vec![vec![
+        "rustup".into(),
+        "run".into(),
+        "nightly".into(),
+        "rustc".into(),
+        "-vV".into(),
+    ]];
+    let commit_id = commit(root, None, &environment()).unwrap();
+    let key_a = prepare(root, "verify", &check, &env_a, &commit_id, &[])
+        .unwrap()
+        .key;
+    let key_b = prepare(root, "verify", &check, &env_b, &commit_id, &[])
+        .unwrap()
+        .key;
+    assert_eq!(
+        key_a, key_b,
+        "rustup's own bytes and version are not a build input"
+    );
+    write_nightly("two");
+    let key_c = prepare(root, "verify", &check, &env_a, &commit_id, &[])
+        .unwrap()
+        .key;
+    assert_ne!(
+        key_a, key_c,
+        "the nightly compiler release is a build input"
+    );
+}
+
+#[test]
+fn producer_build_paths_do_not_enter_check_identity() {
+    let fixture = fixture("identity-paths");
+    let root = fixture.path();
+    let env = environment();
+    let check = crate::Check {
+        kind: "commands".into(),
+        cache_env: vec!["LD_LIBRARY_PATH".into()],
+        ..Default::default()
+    };
+    let mut ci = env.clone();
+    ci.insert("LD_LIBRARY_PATH".into(), "/nix/store/clang/lib:".into());
+    let mut lane = env.clone();
+    lane.insert(
+        "LD_LIBRARY_PATH".into(),
+        format!(
+            "/nix/store/clang/lib:{}:/home/lane/.rustup/toolchains/stable/lib:",
+            root.join("target/release").display()
+        )
+        .into(),
+    );
+    lane.insert("CARGO_TARGET_DIR".into(), root.join("target").into());
+    lane.insert("RUSTUP_HOME".into(), "/home/lane/.rustup".into());
+    let first = check_identity_payload(&check, &ci, root).unwrap();
+    let second = check_identity_payload(&check, &lane, root).unwrap();
+    assert_eq!(first, second, "producer build locators are not inputs");
+    // A genuinely different library path is still an input.
+    let mut other = ci.clone();
+    other.insert("LD_LIBRARY_PATH".into(), "/nix/store/other/lib:".into());
+    assert_ne!(first, check_identity_payload(&check, &other, root).unwrap());
+}
+
+#[test]
+fn repository_provenance_is_the_path_not_the_transport_alias() {
+    for raw in [
+        "https://git.example/org/repo",
+        "https://git.example/org/repo.git",
+        "https://forge.example/org/repo",
+        "https://forge.example.internal/org/repo.git",
+        "https://user@git.example:8443/org/repo.git",
+        "git@git.example:org/repo.git",
+        "org/repo",
+    ] {
+        assert_eq!(canonical_repository(raw), "org/repo", "{raw}");
+    }
+    assert_eq!(canonical_repository("unknown"), "unknown");
 }

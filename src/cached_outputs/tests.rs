@@ -472,9 +472,19 @@ fn a_coverage_toolchain_is_keyed_by_the_nightly_binaries() {
     let rustc = nightly.join("rustc");
     let cargo = nightly.join("cargo");
     let llvm_cov = tool_dir.join("cargo-llvm-cov");
-    fs::write(&rustc, b"nightly rustc one\n").unwrap();
-    fs::write(&cargo, b"nightly cargo\n").unwrap();
-    fs::write(&llvm_cov, b"llvm-cov\n").unwrap();
+    let rustc_script = |release: &str| {
+        format!(
+            "#!/bin/sh\ncat <<'EOF'\nrustc 1.99.0-nightly ({release} 2026-01-01)\nbinary: rustc\ncommit-hash: {}\nrelease: 1.99.0-nightly\nhost: x86_64-unknown-linux-gnu\nLLVM version: 21.1.8\nEOF\n",
+            "a".repeat(40)
+        )
+    };
+    fs::write(&rustc, rustc_script("one")).unwrap();
+    fs::write(
+        &cargo,
+        "#!/bin/sh\necho 'cargo 1.99.0-nightly (one 2026-01-01)'\n",
+    )
+    .unwrap();
+    fs::write(&llvm_cov, "#!/bin/sh\necho 'cargo-llvm-cov 0.8.7'\n").unwrap();
     let rustup = tool_dir.join("rustup");
     fs::write(
         &rustup,
@@ -526,11 +536,11 @@ fn a_coverage_toolchain_is_keyed_by_the_nightly_binaries() {
     let first = crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id, &[])
         .unwrap()
         .key;
-    fs::write(&rustc, b"nightly rustc two\n").unwrap();
+    fs::write(&rustc, rustc_script("two")).unwrap();
     let second = crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id, &[])
         .unwrap()
         .key;
-    assert_ne!(first, second, "the nightly compiler's bytes are keyed");
+    assert_ne!(first, second, "the nightly compiler's release is keyed");
 }
 
 #[test]

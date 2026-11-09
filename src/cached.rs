@@ -424,7 +424,7 @@ pub(crate) fn run_cached_with_environment(
 /// ccid build that checks the same things the same way reuses every existing verdict, so a release does not invalidate the
 /// whole result cache. Raise it ONLY when the semantics of a check change (what a check runs, or what counts as passing),
 /// so older verdicts can no longer answer for the new meaning.
-pub const VERDICT_EPOCH: u32 = 1;
+pub const VERDICT_EPOCH: u32 = 2;
 
 /// What the result cache binds into every verdict key (cmnp's `tool_revision`, the caller's version of the semantics).
 pub(crate) fn verdict_epoch_label() -> String {
