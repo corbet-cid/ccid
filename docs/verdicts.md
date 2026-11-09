@@ -52,8 +52,12 @@ One JSON file per key: `<CCID_RESULT_CACHE>/verdicts/<key>.json`.
 | `tool` | The producing ccid binary: SHA-256 of its bytes and the source revision compiled into it. |
 | `started_at`, `finished_at`, `duration_seconds` | Unix seconds. |
 
-Records are written atomically under a per-key lock. The first success wins: two producers that
-agree on the key agree on the result, and a later failure never erases a pass. New records are
+Records are written atomically under a per-key lock. A pass wins over a failure forever: two
+producers that agree on the key agree on the result, and a later failure never erases a pass. A
+**success from a different producing binary may refresh the record** (same key and components,
+new `tool`/provenance/timestamps). Without that, after a channel bump the previous channel's
+record would be refused as foreign and the run that recomputes could never leave a record the
+new channel accepts — every later run would miss forever. New records are
 group-readable/group-writable when the store is group-writable (`0660`, store mode `2775`).
 
 ## Acceptance (CI)

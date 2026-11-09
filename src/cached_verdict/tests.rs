@@ -725,3 +725,78 @@ fn a_plan_reports_bypass_reasons_without_running_anything() {
     // A plain deterministic check has no bypass reason.
     assert!(plan_bypass(&check(), &crate::cached::executor_check(&check()), root).is_none());
 }
+
+#[test]
+fn a_pass_from_another_producing_binary_is_refreshed_not_kept_forever() {
+    let fixture = fixture("refresh");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let mut env = environment();
+    env.insert(
+        "CI_REPOSITORY_URL".into(),
+        "https://example.invalid/checks/refresh".into(),
+    );
+    env.insert(
+        "CCID_RESULT_CACHE".into(),
+        store.path().as_os_str().to_owned(),
+    );
+    let commit_id = commit(root, None, &env).unwrap();
+    let prepared = prepare(root, "verify", &check(), &env, &commit_id).unwrap();
+    let producer = Producer {
+        kind: ProducerKind::Lane,
+        identity: Some("lane".into()),
+    };
+    let previous = Tool {
+        sha256: "a".repeat(64),
+        source_revision: "b".repeat(40),
+    };
+    write_record(
+        &store.path().join(STORE_DIR),
+        &Record {
+            schema: SCHEMA,
+            key: prepared.key.clone(),
+            components: prepared.components.clone(),
+            commit: prepared.commit.clone(),
+            repository: "https://example.invalid/checks/refresh".into(),
+            result: ResultWord::Success,
+            producer: producer.clone(),
+            tool: previous.clone(),
+            started_at: 10,
+            finished_at: 20,
+            duration_seconds: 10,
+        },
+    )
+    .unwrap();
+    // A different producing binary computes the same pass (as after a channel bump): its own
+    // success must replace the provenance so its channel accepts the record.
+    record_success(
+        std::slice::from_ref(&prepared),
+        &BTreeSet::new(),
+        &producer,
+        30,
+        &env,
+    )
+    .unwrap();
+    let record = read_record(&store.path().join(STORE_DIR), &prepared.key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.result, ResultWord::Success);
+    assert_ne!(record.tool, previous);
+    assert_eq!(record.tool, own_tool().unwrap());
+    // A second success from the same binary keeps the record (idempotent).
+    record_success(
+        std::slice::from_ref(&prepared),
+        &BTreeSet::new(),
+        &producer,
+        40,
+        &env,
+    )
+    .unwrap();
+    assert_eq!(
+        read_record(&store.path().join(STORE_DIR), &prepared.key)
+            .unwrap()
+            .unwrap()
+            .tool,
+        own_tool().unwrap()
+    );
+}

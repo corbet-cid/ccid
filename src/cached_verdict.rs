@@ -1290,8 +1290,12 @@ pub(crate) fn write_record(directory: &Path, record: &Record) -> Result<()> {
 /// Publish a pass and its declared outputs as one transaction, under the key's lock: every
 /// output blob and the output index are durable first, and only then the verdict record. A
 /// failure before that point leaves no verdict, so no later hit can report success without its
-/// artefacts. An existing pass keeps winning the verdict; its output set is still (re)written,
-/// which repairs a set left incomplete by an older release or a damaged store.
+/// artefacts. An existing pass at the same key always wins on the result, and a later failure
+/// never erases it. Its provenance may be refreshed by a success from a different producing
+/// binary: CI accepts only its channel binary's records, so after a channel bump the first run
+/// that recomputes must be able to leave a record the new binary accepts (otherwise every later
+/// run would miss forever). Finally, the output set is (re)written, which repairs a set left
+/// incomplete by an older release or a damaged store.
 fn publish_record(
     directory: &Path,
     record: &Record,
@@ -1301,10 +1305,16 @@ fn publish_record(
     ensure_store(directory)?;
     let key = &record.key;
     let _lock = lock_key(directory, key)?;
-    let first = !matches!(
-        read_record(directory, key),
-        Ok(Some(existing)) if existing.result == ResultWord::Success
-    );
+    let replace = match read_record(directory, key) {
+        // The same producing binary already published this exact pass.
+        Ok(Some(existing))
+            if existing.result == ResultWord::Success && existing.tool == record.tool =>
+        {
+            false
+        }
+        // No pass, a failure record, or a pass from another producing binary.
+        _ => true,
+    };
     if !prepared.outputs.is_empty() {
         let cache = prepared
             .cache
@@ -1316,7 +1326,7 @@ fn publish_record(
             record.finished_at,
         )?;
     }
-    if first {
+    if replace {
         write_record_locked(directory, record)?;
     }
     if let Some(cache) = prepared.cache.as_deref() {
