@@ -791,14 +791,16 @@ fn add_command_tool(
         let rustup = find_program("rustup", environment)?;
         add_tool(tools, "rustup", &rustup)?;
         let path = rustup_tool(toolchain, selected, environment)?;
-        add_tool(tools, selected, &path)?;
+        // The toolchain qualifies the role: stable rustc and nightly rustc are different
+        // binaries and both can appear in one check's tools.
+        add_tool(tools, &format!("{toolchain}-{selected}"), &path)?;
         // `cargo llvm-cov` and friends are external subcommands; their bytes matter too.
         if selected == "cargo" {
             if let Some(subcommand) = argv.get(4).filter(|arg| !arg.starts_with('-')) {
                 if let Some(path) =
                     crate::compile_cache::executable(environment, &format!("cargo-{subcommand}"))
                 {
-                    add_tool(tools, &format!("cargo-{subcommand}"), &path)?;
+                    add_tool(tools, &format!("{toolchain}-cargo-{subcommand}"), &path)?;
                 }
             }
         }
@@ -909,11 +911,15 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
 /// (`SEMANTIC_ENV` plus `cache_env`). An empty declared variable and an absent one are different
 /// inputs, as they are for the ordinary result cache. Ambient environment never enters the key.
 fn check_identity(check: &crate::Check, environment: &Environment) -> Result<String> {
+    // Process plumbing that the fleet's workstation and its runner disagree on without any
+    // effect on what a check computes: the compiler cache wrapper and the presentation locale.
+    // A check that really depends on one declares it in `cache_env`, which is never filtered.
+    const PRESENTATION: &[&str] = &["RUSTC_WRAPPER", "LANG", "LC_ALL", "LANGUAGE", "TZ"];
     let mut declared: BTreeMap<String, Option<String>> = BTreeMap::new();
     for name in cmnp::inputs::SEMANTIC_ENV
         .iter()
         .copied()
-        .filter(|name| *name != "RUSTC_WRAPPER")
+        .filter(|name| !PRESENTATION.contains(name))
         .chain(check.cache_env.iter().map(String::as_str))
     {
         declared.insert(

@@ -29,9 +29,10 @@ Per-run scheduler and systemd state (`FORGEJO_*`, `ACTIONS_*`, `RUNNER_*`, `GITH
 `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`, `*_PRESSURE_*`, `nix-shell` attributes)
 is never keyed. `GIT_CONFIG_*` `url.*.insteadOf` rewrites are forwarded to cached work as plumbing
 so a land can serve unpushed commits from mirrors; they are not keyed, because the resolved
-commits they lead to are. `RUSTC_WRAPPER` is compile-cache plumbing too (a wrapper changes how a
-result is produced, never whether the check passes), so a runner with `kache-corbet` and a lane
-without it still share verdicts.
+commits they lead to are. `RUSTC_WRAPPER` and the presentation locale (`LANG`, `LC_ALL`, `TZ`)
+are plumbing too — a compiler cache or a locale changes how a result is presented, not whether
+the check passes — so a runner with `kache-corbet` and `en_US.UTF-8` and a workstation with
+`C.UTF-8` still share verdicts. A check that really depends on one declares it in `cache_env`.
 
 ## The record
 

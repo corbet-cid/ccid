@@ -154,6 +154,25 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
     rustflags.insert("RUSTFLAGS".into(), "-C target-cpu=native".into());
     assert_ne!(prepared(root, &rustflags, "verify").key, key);
 
+    // Presentation plumbing (locale, compiler-cache wrapper) never enters the key, unless the
+    // check declares it explicitly.
+    let mut locale = env.clone();
+    locale.insert("LANG".into(), "en_US.UTF-8".into());
+    locale.insert("LC_ALL".into(), "en_US.UTF-8".into());
+    locale.insert("TZ".into(), "Europe/Zurich".into());
+    locale.insert("RUSTC_WRAPPER".into(), "kache-corbet".into());
+    assert_eq!(prepared(root, &locale, "verify").key, key);
+    let mut declared_locale = check();
+    declared_locale.cache_env = vec!["LANG".into()];
+    let commit_id = commit(root, None, &env).unwrap();
+    let without = prepare(root, "verify", &declared_locale, &env, &commit_id)
+        .unwrap()
+        .key;
+    let with = prepare(root, "verify", &declared_locale, &locale, &commit_id)
+        .unwrap()
+        .key;
+    assert_ne!(without, with);
+
     // Per-run ambient state never enters the key.
     let mut ambient = env.clone();
     for name in [
