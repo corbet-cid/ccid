@@ -172,9 +172,27 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
     let without = prepare(root, "verify", &declared_locale, &env, &commit_id)
         .unwrap()
         .key;
-    let with = prepare(root, "verify", &declared_locale, &locale, &commit_id)
-        .unwrap()
-        .key;
+    // The declared value must differ from whatever the host already exports.
+    let base_lang = env
+        .get(OsStr::new("LANG"))
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let changed_lang = if base_lang == "en_US.UTF-8" {
+        "fr_FR.UTF-8"
+    } else {
+        "en_US.UTF-8"
+    };
+    let mut declared_changed = env.clone();
+    declared_changed.insert("LANG".into(), changed_lang.into());
+    let with = prepare(
+        root,
+        "verify",
+        &declared_locale,
+        &declared_changed,
+        &commit_id,
+    )
+    .unwrap()
+    .key;
     assert_ne!(without, with);
 
     // Per-run ambient state never enters the key.
