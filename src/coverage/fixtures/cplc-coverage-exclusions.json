@@ -1,0 +1,42 @@
+[
+  {
+    "path": "src/policy.rs",
+    "line": 279,
+    "context": [
+      "        cgts::gates::define_settings(&mut change.rulebook)",
+      "            .map_err(|_| Error::Invalid(\"gate settings\"))?;",
+      "        change.rulebook.validate()?;"
+    ],
+    "reason": "The maintained cgts catalogue installer skips an existing voucher setting and otherwise defines one fixed valid key, integer default and bounds. Its crbk validation cannot fail for these constants. Retain the defensive upstream error mapping; reassess when that owner changes the catalogue contract."
+  },
+  {
+    "path": "src/policy.rs",
+    "line": 644,
+    "context": [
+      "                next.schema.clone().ok_or(Error::Missing)?,",
+      "            )?,",
+      "            SnapshotKind::SchemaVersions => {"
+    ],
+    "reason": "The schema snapshot was already encoded and size-checked by set_schema using maximal u64 counters before durable replacement. Publication uses smaller positive signed-64-bit counters and the identical concrete schema serializer, so this second encoding cannot fail. Missing schema and the reachable settings/history size refusals remain measured."
+  },
+  {
+    "path": "src/storage.rs",
+    "line": 186,
+    "context": [
+      "        if serde_json::to_vec(&document)",
+      "            .map_err(|_| Error::Corrupt)?",
+      "            .len()"
+    ],
+    "reason": "StoredPolicy and its nested owned schema/configuration types use derived serialization with string or unit-enum JSON map keys and valid JSON numbers. No custom fallible serializer exists. This serde error mapping is defensive; encoded-size validation remains measured and allocation failure does not return a serde error."
+  },
+  {
+    "path": "src/storage/sql.rs",
+    "line": 248,
+    "context": [
+      "                .unwrap_or_default(),",
+      "        )?;",
+      "        let new_entries = entries(&next.revocations)?;"
+    ],
+    "reason": "entries serializes only concrete 32-byte device arrays and constructs owned member strings. Those serde serializers cannot fail; this old-entry conversion propagates only that impossible error. Real malformed revocation decoding and SQL write/refusal paths remain measured."
+  }
+]

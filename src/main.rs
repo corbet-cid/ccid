@@ -197,6 +197,11 @@ enum Action {
         #[command(subcommand)]
         action: ccid::toolchain::Action,
     },
+    /// Coverage gates over LLVM reports with manifest-declared exclusions.
+    Coverage {
+        #[command(subcommand)]
+        action: ccid::coverage::Action,
+    },
 }
 
 fn main() -> ExitCode {
@@ -621,6 +626,15 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid toolchain: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::Coverage { action } => {
+            return match ccid::coverage::run(action) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid coverage: {error}");
                     ExitCode::from(2)
                 }
             };

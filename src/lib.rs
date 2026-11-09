@@ -30,6 +30,7 @@ mod cached_verdict;
 pub mod check_shell;
 mod checks;
 pub mod compile_cache;
+pub mod coverage;
 mod dependency;
 pub mod fleet;
 #[cfg(unix)]
@@ -143,6 +144,14 @@ struct Manifest {
     /// Which jobs gate landing (see `verdict`). Absent: `verify`, if declared.
     #[serde(default)]
     verdict: Option<Verdict>,
+    /// Coverage exclusions for the emitted-source gate. Nothing consumes this
+    /// field yet: the coverage command reads the same table through a partial
+    /// probe so that manifests without a check section keep working. Adding
+    /// the key is still a rollout event: an older ccid refuses it because
+    /// this struct denies unknown fields.
+    #[serde(default)]
+    #[allow(dead_code)]
+    coverage: Option<coverage::Config>,
 }
 /// The jobs whose success is the commit's aggregated verdict; every other job
 /// (release, publish, scheduled gates) reports under its own non-gating context.

@@ -1,0 +1,132 @@
+[
+  {
+    "file": "src/gates.rs",
+    "line": 251,
+    "source": ".map_err(|_| Error::Policy)?;",
+    "target": "native",
+    "reason": "The exclusive Rulebook is missing the fixed valid integer definition; current define has no other failures.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/gates.rs": "c3e8d90d65229aed373fa28e4247ac22647bb6292638f10692e676cb1d8b1bc4"
+    },
+    "evidence_packages": {
+      "crbk": {
+        "version": "0.0.0",
+        "source": "git+https://forge.example/org/crbk?branch=main#864e14d8de1f2b3e4039f4ac4d3289e75867cd95"
+      }
+    }
+  },
+  {
+    "file": "src/gates.rs",
+    "line": 115,
+    "source": "} if community == context.snapshot.community",
+    "target": "native",
+    "reason": "Both this adapter and the actual cgrd verifier bind the admitted community to the same policy.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/gates.rs": "c3e8d90d65229aed373fa28e4247ac22647bb6292638f10692e676cb1d8b1bc4"
+    },
+    "branch": {
+      "block": 0,
+      "id": 1
+    },
+    "evidence_packages": {
+      "cgrd": {
+        "version": "0.0.0",
+        "source": "git+https://forge.example/org/cgrd?branch=main#fb8322374bc0579a39c22f277f89cdde83cd155f"
+      }
+    }
+  },
+  {
+    "file": "src/passport.rs",
+    "line": 36,
+    "source": "|| self.valid_until <= context.now",
+    "target": "native",
+    "reason": "The sole immutable capability constructor checks expiry above checked_at, and the preceding guard binds checked_at to now.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/passport.rs": "919fe1878d150c16795b28f0fca186dcf82cf558fb1e598cebfb5088098cc5bd"
+    },
+    "branch": {
+      "block": 0,
+      "id": 0
+    }
+  },
+  {
+    "file": "src/pins.rs",
+    "line": 25,
+    "source": "async fn verify_spent(",
+    "target": "native",
+    "reason": "Safe production code cannot obtain the sealed SpentChange argument while both verification entry points refuse; no verified G2 acceptance is claimed.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/pins.rs": "3d45c3322a344db24b3dae20de2197cf1b2c4c6b6db7c86f90270c0e8f1cad87"
+    }
+  },
+  {
+    "file": "src/pins.rs",
+    "line": 26,
+    "source": "&self,",
+    "target": "native",
+    "reason": "Safe production code cannot obtain the sealed SpentChange argument while both verification entry points refuse; no verified G2 acceptance is claimed.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/pins.rs": "3d45c3322a344db24b3dae20de2197cf1b2c4c6b6db7c86f90270c0e8f1cad87"
+    }
+  },
+  {
+    "file": "src/pins.rs",
+    "line": 27,
+    "source": "_: &Change<'_>,",
+    "target": "native",
+    "reason": "Safe production code cannot obtain the sealed SpentChange argument while both verification entry points refuse; no verified G2 acceptance is claimed.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/pins.rs": "3d45c3322a344db24b3dae20de2197cf1b2c4c6b6db7c86f90270c0e8f1cad87"
+    }
+  },
+  {
+    "file": "src/pins.rs",
+    "line": 28,
+    "source": "_: &SpentChange,",
+    "target": "native",
+    "reason": "Safe production code cannot obtain the sealed SpentChange argument while both verification entry points refuse; no verified G2 acceptance is claimed.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/pins.rs": "3d45c3322a344db24b3dae20de2197cf1b2c4c6b6db7c86f90270c0e8f1cad87"
+    }
+  },
+  {
+    "file": "src/pins.rs",
+    "line": 29,
+    "source": ") -> std::result::Result<(), TokenRejected> {",
+    "target": "native",
+    "reason": "Safe production code cannot obtain the sealed SpentChange argument while both verification entry points refuse; no verified G2 acceptance is claimed.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/pins.rs": "3d45c3322a344db24b3dae20de2197cf1b2c4c6b6db7c86f90270c0e8f1cad87"
+    }
+  },
+  {
+    "file": "src/pins.rs",
+    "line": 30,
+    "source": "Err(TokenRejected)",
+    "target": "native",
+    "reason": "Safe production code cannot obtain the sealed SpentChange argument while both verification entry points refuse; no verified G2 acceptance is claimed.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/pins.rs": "3d45c3322a344db24b3dae20de2197cf1b2c4c6b6db7c86f90270c0e8f1cad87"
+    }
+  },
+  {
+    "file": "src/pins.rs",
+    "line": 31,
+    "source": "}",
+    "target": "native",
+    "reason": "Safe production code cannot obtain the sealed SpentChange argument while both verification entry points refuse; no verified G2 acceptance is claimed.",
+    "evidence": "docs/COVERAGE.md#proposed-invariant-exceptions",
+    "evidence_sources": {
+      "src/pins.rs": "3d45c3322a344db24b3dae20de2197cf1b2c4c6b6db7c86f90270c0e8f1cad87"
+    }
+  }
+]
