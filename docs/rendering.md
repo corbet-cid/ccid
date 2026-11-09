@@ -70,6 +70,25 @@ with `secrets` must run on Crow. The inventory records each job's `secrets`. The
 Crow secret itself, restricted to the manual event, is provisioned by the
 operator; ccid never distributes tokens.
 
+## The one check-shell
+
+A repository opts in with an empty table:
+
+```toml
+[check_shell]
+```
+
+Rendering then writes `.ci/check-shell.nix`, one generated file with one C
+toolchain family (clang/LLVM), one nixpkgs pin and the native libraries the
+build scripts discover through pkg-config. `ccid check`, `ccid cached` and the
+declared command of `ccid job-run` run inside exactly that file whenever it
+carries the render marker; a lane that evaluates the same file builds with the
+same toolchain and libraries. A hand-written `.ci/check-shell.nix` is foreign
+and is never entered or overwritten; a repository that removes `[check_shell]`
+loses only the renderer-owned file. The generated file's content is the
+release's template, so the pin and the library set cannot drift between
+repositories.
+
 `--check` fails on missing, changed or obsolete generated files without writing
 anything. Normal rendering updates only files marked as renderer-owned and
 removes obsolete generated Crow adapters after a workflow rename. Foreign

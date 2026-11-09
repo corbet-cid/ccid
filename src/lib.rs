@@ -27,6 +27,7 @@ mod cache;
 mod cached;
 mod cached_outputs;
 mod cached_verdict;
+pub mod check_shell;
 mod checks;
 pub mod compile_cache;
 mod dependency;
@@ -122,6 +123,11 @@ struct Manifest {
     jobs: BTreeMap<String, jobs::Job>,
     #[serde(default)]
     render: Option<render::Config>,
+    /// Opt in to the one rendered check-shell. Presence of the table enables
+    /// it; an older ccid (which does not know the key) still parses the
+    /// manifest because this struct ignores unknown fields.
+    #[serde(default)]
+    check_shell: Option<render::CheckShell>,
     /// Dependency push fan-out declarations, keyed by local name. Each entry
     /// renders a push adapter in THIS repository that runs the consumer's
     /// repository-owned job with this event commit pinned as expected.

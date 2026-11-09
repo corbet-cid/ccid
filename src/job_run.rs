@@ -470,21 +470,30 @@ fn execute_job(
     }
     // The generated adapters must be the ones this binary renders (a stale render fails here, with the fix named).
     render::render(Path::new("."), manifest, true)?;
-    let mut command;
+    // The job command as one argv, so the rendered check-shell can run it as a
+    // whole. Without a generated shell this is byte-identical to before.
+    let mut argv: Vec<std::ffi::OsString> = Vec::new();
     if jobs::is_self_checks_command(&plan.command) {
-        command = Command::new(exe);
-        command.args(["check", "--repo", "."]);
+        argv.push(exe.into());
+        argv.extend(["check", "--repo", "."].into_iter().map(Into::into));
         for check in &plan.checks {
-            command.args(["--check", check]);
+            argv.push("--check".into());
+            argv.push(check.into());
         }
     } else {
-        let (program, args) = plan
-            .command
-            .split_first()
-            .ok_or_else(|| failure("the job declares no command"))?;
-        command = Command::new(program);
-        command.args(args);
+        argv.extend(plan.command.iter().map(Into::into));
     }
+    let mut command = match crate::check_shell::command(Path::new("."), &argv)? {
+        Some(command) => command,
+        None => {
+            let (program, args) = argv
+                .split_first()
+                .ok_or_else(|| failure("the job declares no command"))?;
+            let mut command = Command::new(program);
+            command.args(args);
+            command
+        }
+    };
     command
         .envs(&extra)
         .env("CCID_SOURCE_REVISION", &options.sha);

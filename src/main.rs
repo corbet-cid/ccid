@@ -413,6 +413,15 @@ fn main() -> ExitCode {
             plan,
             parent_watch,
         } => {
+            // A repository with a rendered check-shell builds inside it: one C
+            // toolchain and one set of native libraries for CI and for a lane
+            // that sources the same file. Plans stay outside (they run nothing).
+            if !plan && archive.is_none() {
+                if let Err(error) = ccid::check_shell::enter(&repo) {
+                    eprintln!("ccid: {error}");
+                    return ExitCode::from(2);
+                }
+            }
             if let Err(error) =
                 ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
             {
@@ -461,6 +470,14 @@ fn main() -> ExitCode {
             plan,
             force,
         } => {
+            // The moon tasks this starts are ordinary `ccid check` runs; enter
+            // the one rendered shell here so every task inherits it.
+            if !plan {
+                if let Err(error) = ccid::check_shell::enter(&repo) {
+                    eprintln!("ccid: {error}");
+                    return ExitCode::from(2);
+                }
+            }
             if let Err(error) = ctrlc::set_handler(|| {
                 ccid::INTERRUPTED.store(true, Ordering::SeqCst);
                 cmnp::INTERRUPTED.store(true, Ordering::SeqCst);
