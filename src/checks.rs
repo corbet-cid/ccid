@@ -374,6 +374,12 @@ mod tests {
             table["profile"]["dev"]["package"]["*"]["opt-level"].as_integer(),
             Some(1)
         );
+        // No incremental compilation: PATH crates are the only incremental units and they are uncacheable. A job that
+        // deliberately wants incremental builds sets CARGO_INCREMENTAL=1, which Cargo applies over the profile.
+        assert_eq!(
+            table["profile"]["dev"]["incremental"].as_bool(),
+            Some(false)
+        );
         let mut commands = vec![
             strings(&["rustup", "run", "1.94.0", "cargo", "clippy", "--locked"]),
             strings(&["rustup", "run", "1.94.0", "cargo"]),

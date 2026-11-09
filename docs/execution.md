@@ -198,8 +198,11 @@ check's verdict and bypass reason without running, and `ccid job-run --local --s
 ## Incremental compilation
 
 A cargo check whose target is persistent and runs at the stable source path (a cached, cargo-only selection without a
-caller-declared target) gets `CARGO_INCREMENTAL=1` unless the job sets `CARGO_INCREMENTAL` itself; any other check keeps Cargo's
-own default. Cargo applies it to workspace members only, so registry and git dependencies stay non-incremental and keep
-their compile-cache hits. The incremental state of a target is capped (2048 MiB, `CCID_INCREMENTAL_CAP_MB`): above the cap ccid
+caller-declared target) gets `CARGO_INCREMENTAL=1` unless the job sets `CARGO_INCREMENTAL` itself; any other check keeps the
+shared profile's `incremental = false`. Cargo applies incremental compilation to workspace members only, so registry and git
+dependencies stay non-incremental and keep their compile-cache hits; the profile disables it for the PATH crates too, because
+an incremental compile is not cacheable (the cmtymeet lane measurement: 642 uncacheable units with it on, 6 with it off).
+`CARGO_INCREMENTAL` in the job environment wins over the profile, which is what gives the heavy runner's persistent slot
+targets their incremental builds. The incremental state of a target is capped (2048 MiB, `CCID_INCREMENTAL_CAP_MB`): above the cap ccid
 removes only the `incremental` directories before the run, never build outputs or other caches, and logs an
 `incremental-trimmed` event. Debug information stays off (`CARGO_PROFILE_*_DEBUG` is the job's declaration).

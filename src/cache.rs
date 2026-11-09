@@ -233,7 +233,8 @@ const INCREMENTAL_CAP_MB: u64 = 2048;
 /// Whether rustc may keep incremental state in this target: only a persistent target at a stable source path
 /// (`persistent`) keeps it between runs, and only there does it pay (a fresh or seeded directory gets nothing from it).
 /// A job that sets `CARGO_INCREMENTAL` itself keeps its value (`None`); otherwise 1 for a persistent target and no
-/// opinion (Cargo's own default) for any other. Dependencies from registries and git stay non-incremental (Cargo applies it to workspace members only), so
+/// opinion for any other (the shared profile then applies its `incremental = false`, because PATH crates are uncacheable
+/// incrementally). Dependencies from registries and git stay non-incremental (Cargo applies it to workspace members only), so
 /// their compile-cache hits are unaffected.
 pub(crate) fn incremental_default(env: &Environment, persistent: bool) -> Option<&'static str> {
     if value(env, "CARGO_INCREMENTAL").is_some() {
