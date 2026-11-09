@@ -361,6 +361,61 @@ fn command_environment(
     env
 }
 
+/// The copy of the release channel the rendered shim keeps: `${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ccid-channel/last-good.json`.
+fn shim_channel_copy(process: &crate::Environment) -> PathBuf {
+    let base = match crate::value(process, "XDG_CACHE_HOME") {
+        Some(cache) => PathBuf::from(cache),
+        None => PathBuf::from(crate::value(process, "HOME").unwrap_or_else(|| "/tmp".into()))
+            .join(".cache"),
+    };
+    base.join("ccid-channel/last-good.json")
+}
+
+/// What `job-run` hands a job about fleet data.
+#[derive(Debug, PartialEq, Eq)]
+enum JobFleet {
+    /// The runner or the job already names `CCID_FLEET_FILE`: nothing is added.
+    Provided,
+    /// No channel copy exists: `fleet = true` checks fail closed.
+    Absent,
+    /// A channel copy carries valid fleet data: the job gets `CCID_FLEET_FILE=<path>`.
+    Found { path: String, digest: String },
+    /// A channel copy exists but carries no valid fleet data.
+    Invalid { error: String },
+}
+
+/// The channel copy a job reads fleet data from: the runner's `CCID_CHANNEL_FILE`, else the
+/// shim's last fetched channel. `CCID_CHANNEL_FILE` itself is never set here.
+fn job_fleet(process: &crate::Environment, declared: &BTreeMap<String, String>) -> JobFleet {
+    let name = crate::fleet::FLEET_FILE_ENV;
+    if crate::value(process, name).is_some() || declared.get(name).is_some_and(|v| !v.is_empty()) {
+        return JobFleet::Provided;
+    }
+    let path = crate::value(process, "CCID_CHANNEL_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| shim_channel_copy(process));
+    if fs::symlink_metadata(&path).is_err() {
+        return JobFleet::Absent;
+    }
+    let Some(text) = path.to_str() else {
+        return JobFleet::Invalid {
+            error: format!("{} is not a UTF-8 path", path.display()),
+        };
+    };
+    match crate::fleet::read_regular(&path)
+        .and_then(|bytes| crate::fleet::from_channel(&bytes))
+        .and_then(|fleet| fleet.digest())
+    {
+        Ok(digest) => JobFleet::Found {
+            path: text.to_owned(),
+            digest,
+        },
+        Err(error) => JobFleet::Invalid {
+            error: format!("{text}: {error}"),
+        },
+    }
+}
+
 /// The profile variables (debug levels, colour) an older rendered workflow exports and the shared table replaces; a job that declares one itself keeps it.
 fn stripped_profile_variables(declared: &BTreeMap<String, String>) -> Vec<&'static str> {
     [
@@ -458,6 +513,18 @@ fn execute_job(
     use std::os::unix::process::CommandExt;
     let manifest = Path::new(".ci/ccid.toml");
     let mut extra = command_environment(&plan, options, exe);
+    // Fleet data rides on the release channel the shim fetched; only `fleet = true` checks need
+    // it, and they fail closed without it, so a missing or invalid copy never stops the job here.
+    match job_fleet(&std::env::vars_os().collect(), &plan.environment) {
+        JobFleet::Found { path, digest } => {
+            eprintln!("ccid job-run: fleet data {digest} from {path}");
+            extra.insert(crate::fleet::FLEET_FILE_ENV.into(), path);
+        }
+        JobFleet::Invalid { error } => {
+            eprintln!("ccid job-run: the release channel carries no fleet data ({error})");
+        }
+        JobFleet::Provided | JobFleet::Absent => {}
+    }
     if !plan.siblings.is_empty() {
         let Some((token, dir)) = push else {
             return Err(failure(
@@ -636,5 +703,123 @@ mod tests {
         let stripped = stripped_profile_variables(&declared);
         assert_eq!(stripped.len(), 3);
         assert!(!stripped.contains(&"CARGO_PROFILE_DEV_DEBUG"));
+    }
+
+    fn process(items: &[(&str, &Path)]) -> crate::Environment {
+        items
+            .iter()
+            .map(|(key, value)| ((*key).into(), value.as_os_str().to_owned()))
+            .collect()
+    }
+
+    const CHANNEL: &str = r#"{"default":{"revision":"r","sha256":"s"},"fleet":{"schema":1,"first_party":["https://forge.example/org/"]}}"#;
+
+    #[test]
+    fn the_job_gets_the_shims_channel_copy_as_its_fleet_file() {
+        let home = tempfile::tempdir().unwrap();
+        let copy = home.path().join(".cache/ccid-channel/last-good.json");
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::write(&copy, CHANNEL).unwrap();
+        let digest = crate::fleet::from_channel(CHANNEL.as_bytes())
+            .unwrap()
+            .digest()
+            .unwrap();
+        let none = BTreeMap::new();
+        assert_eq!(
+            job_fleet(&process(&[("HOME", home.path())]), &none),
+            JobFleet::Found {
+                path: copy.to_str().unwrap().to_owned(),
+                digest: digest.clone()
+            }
+        );
+        // XDG_CACHE_HOME wins over HOME, exactly like the shim's ${XDG_CACHE_HOME:-...}.
+        let xdg = tempfile::tempdir().unwrap();
+        let xdg_copy = xdg.path().join("ccid-channel/last-good.json");
+        fs::create_dir_all(xdg_copy.parent().unwrap()).unwrap();
+        fs::write(&xdg_copy, CHANNEL).unwrap();
+        assert_eq!(
+            job_fleet(
+                &process(&[("HOME", home.path()), ("XDG_CACHE_HOME", xdg.path())]),
+                &none
+            ),
+            JobFleet::Found {
+                path: xdg_copy.to_str().unwrap().to_owned(),
+                digest: digest.clone()
+            }
+        );
+        // A runner's CCID_CHANNEL_FILE is the channel copy when it names one.
+        let runner = home.path().join("runner-channel.json");
+        fs::write(&runner, CHANNEL).unwrap();
+        assert_eq!(
+            job_fleet(
+                &process(&[("HOME", home.path()), ("CCID_CHANNEL_FILE", &runner)]),
+                &none
+            ),
+            JobFleet::Found {
+                path: runner.to_str().unwrap().to_owned(),
+                digest
+            }
+        );
+        // An explicit CCID_FLEET_FILE (runner or job) is never replaced.
+        assert_eq!(
+            job_fleet(
+                &process(&[("HOME", home.path()), ("CCID_FLEET_FILE", &runner)]),
+                &none
+            ),
+            JobFleet::Provided
+        );
+        let declared = BTreeMap::from([("CCID_FLEET_FILE".to_owned(), "/declared".to_owned())]);
+        assert_eq!(
+            job_fleet(&process(&[("HOME", home.path())]), &declared),
+            JobFleet::Provided
+        );
+    }
+
+    #[test]
+    fn a_missing_or_fleetless_channel_copy_adds_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let none = BTreeMap::new();
+        assert_eq!(
+            job_fleet(&process(&[("HOME", home.path())]), &none),
+            JobFleet::Absent
+        );
+        let copy = home.path().join(".cache/ccid-channel/last-good.json");
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        fs::write(&copy, r#"{"default":{"revision":"r","sha256":"s"}}"#).unwrap();
+        let JobFleet::Invalid { error } = job_fleet(&process(&[("HOME", home.path())]), &none)
+        else {
+            panic!("a channel without fleet data is reported");
+        };
+        assert!(
+            error.contains("the release channel carries no fleet data"),
+            "{error}"
+        );
+        // A symbolic link is refused, like the runner's channel file.
+        fs::remove_file(&copy).unwrap();
+        let target = home.path().join("target.json");
+        fs::write(&target, CHANNEL).unwrap();
+        std::os::unix::fs::symlink(&target, &copy).unwrap();
+        assert!(matches!(
+            job_fleet(&process(&[("HOME", home.path())]), &none),
+            JobFleet::Invalid { .. }
+        ));
+    }
+
+    #[test]
+    fn the_shim_copy_falls_back_to_tmp_without_a_home() {
+        assert_eq!(
+            shim_channel_copy(&crate::Environment::new()),
+            Path::new("/tmp/.cache/ccid-channel/last-good.json")
+        );
+        let empty: crate::Environment = [
+            ("HOME".into(), "".into()),
+            ("XDG_CACHE_HOME".into(), "".into()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            shim_channel_copy(&empty),
+            Path::new("/tmp/.cache/ccid-channel/last-good.json")
+        );
     }
 }

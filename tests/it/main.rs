@@ -19,6 +19,7 @@ mod cargo_target;
 mod channel;
 mod cli;
 mod dependency_resolution;
+mod fleet;
 mod freshness;
 mod job_execution;
 mod native_compile_cache;

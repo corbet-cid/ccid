@@ -424,3 +424,71 @@ impl Drop for FixtureGroupCleanup {
         }
     }
 }
+
+/// `fleet` is skipped while false: every existing check keeps its exact serialized identity.
+#[test]
+fn the_fleet_field_serializes_only_when_declared() {
+    let plain: Check = toml::from_str("kind='commands'\ncommands=[['true']]").unwrap();
+    let value = serde_json::to_value(&plain).unwrap();
+    assert!(value.get("fleet").is_none(), "{value}");
+    assert_eq!(
+        serde_json::to_string(&plain).unwrap(),
+        r#"{"kind":"commands","actions":null,"toolchain":null,"workspace":false,"all_features":false,"all_targets":false,"release":false,"features":[],"packages":[],"exclude":[],"test_runner":null,"mode":null,"expected_checks":null,"checks":[],"manager":null,"scripts":null,"install":null,"commands":[["true"]],"cache_outputs":[],"cache_tools":[],"cache_env":[],"cache_commit":false,"cache_inputs":null,"cache":null}"#
+    );
+    let reads: Check = toml::from_str("kind='commands'\nfleet=true\ncommands=[['true']]").unwrap();
+    assert_eq!(serde_json::to_value(&reads).unwrap()["fleet"], json!(true));
+    let explicit: Check =
+        toml::from_str("kind='commands'\nfleet=false\ncommands=[['true']]").unwrap();
+    assert_eq!(
+        serde_json::to_vec(&explicit).unwrap(),
+        serde_json::to_vec(&plain).unwrap()
+    );
+}
+
+#[test]
+fn a_fleet_check_declares_the_digest_in_cache_env_exactly_once() {
+    let temp = TempDir::new().unwrap();
+    fs::write(
+        temp.path().join("ccid.toml"),
+        "schema=1\nproject='fleet'\n\
+         [checks.reads]\nkind='commands'\nfleet=true\ncommands=[['true']]\n\
+         [checks.listed]\nkind='commands'\nfleet=true\ncache_env=['CCID_FLEET_DIGEST','X']\ncommands=[['true']]\n\
+         [checks.plain]\nkind='commands'\ncommands=[['true']]\n",
+    )
+    .unwrap();
+    let (manifest, _) = load_manifest(temp.path(), Path::new("ccid.toml")).unwrap();
+    let count = |name: &str| {
+        manifest.checks[name]
+            .cache_env
+            .iter()
+            .filter(|entry| entry.as_str() == fleet::FLEET_DIGEST_ENV)
+            .count()
+    };
+    assert_eq!(count("reads"), 1);
+    assert_eq!(count("listed"), 1);
+    assert_eq!(
+        manifest.checks["listed"].cache_env,
+        strings(&["CCID_FLEET_DIGEST", "X"])
+    );
+    assert_eq!(count("plain"), 0);
+    assert!(manifest.checks["plain"].cache_env.is_empty());
+}
+
+/// ccid's own manifest: no check declares fleet data, so no declaration changes.
+#[test]
+fn this_repositorys_checks_keep_their_declarations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (manifest, _) = load_manifest(root, Path::new(".ci/ccid.toml")).unwrap();
+    for (name, check) in &manifest.checks {
+        assert!(!check.fleet, "{name}");
+        let value = serde_json::to_value(check).unwrap();
+        assert!(value.get("fleet").is_none(), "{name}: {value}");
+        assert!(
+            !check
+                .cache_env
+                .iter()
+                .any(|entry| entry == fleet::FLEET_DIGEST_ENV),
+            "{name}"
+        );
+    }
+}

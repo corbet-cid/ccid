@@ -31,6 +31,7 @@ pub mod check_shell;
 mod checks;
 pub mod compile_cache;
 mod dependency;
+pub mod fleet;
 #[cfg(unix)]
 pub mod job_run;
 pub mod jobs;
@@ -181,11 +182,16 @@ pub struct Check {
     /// serialized into any key.
     #[serde(skip_serializing)]
     cache_pure: Option<bool>,
+    /// The check reads the release channel's fleet data: its keys include the fleet digest and it refuses to run without fleet data.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    fleet: bool,
 }
 /// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
 fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
     let bytes = fs::read(root.join(manifest))?;
-    let parsed: Manifest = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    let mut parsed: Manifest = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    // `fleet = true` keys the fleet digest through the existing cache_env path (verdict store and moon).
+    fleet::normalise(&mut parsed.checks)?;
     let slug = &parsed.project;
     if parsed.schema != 1
         || slug.is_empty()
@@ -333,6 +339,9 @@ fn run_checks_inner(
     ] {
         environment.remove(std::ffi::OsStr::new(key));
     }
+    // Before any key is computed or any check runs: a `fleet = true` check fails closed without
+    // fleet data, and every key of this selection sees the digest of the data it will read.
+    fleet::bind_selection(&manifest.checks, &selected, &mut environment, cache_child)?;
     if !cache_child && value(&environment, "CCID_RESULT_CACHE").is_some() {
         let requested = Instant::now()
             .checked_add(Duration::from_secs(budget(&environment)?.timeout))
@@ -556,6 +565,14 @@ fn run_checks_inner(
     };
     for name in &selected {
         let check = &manifest.checks[name];
+        // Fleet consumers accept the data only inside a check that declared it (and was keyed with it).
+        if check.fleet {
+            set(&mut runner.environment, fleet::FLEET_KEYED_ENV, "1");
+        } else {
+            runner
+                .environment
+                .remove(std::ffi::OsStr::new(fleet::FLEET_KEYED_ENV));
+        }
         let started = Instant::now();
         event(json!({"event":"check-start","check":name}));
         match check.kind.as_str() {

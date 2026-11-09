@@ -1020,3 +1020,71 @@ fn repository_provenance_is_the_path_not_the_transport_alias() {
     }
     assert_eq!(canonical_repository("unknown"), "unknown");
 }
+
+/// A `fleet = true` verdict is specific to its fleet data: the digest enters the key through the
+/// normalised `cache_env`, a check without the field keys exactly as before, and a fleet check
+/// is never keyed without a digest.
+#[test]
+fn the_fleet_digest_keys_fleet_checks_and_only_them() {
+    let fixture = fixture("fleet-key");
+    let root = fixture.path();
+    let mut env = environment();
+    for name in [
+        crate::fleet::FLEET_DIGEST_ENV,
+        crate::fleet::FLEET_FILE_ENV,
+        crate::fleet::FLEET_KEYED_ENV,
+    ] {
+        env.remove(OsStr::new(name));
+    }
+    env.insert(
+        "CI_REPOSITORY_URL".into(),
+        "https://example.invalid/checks/fleet-key".into(),
+    );
+    let commit_id = commit(root, None, &env).unwrap();
+    let key = |check: &crate::Check, env: &Environment| {
+        prepare(root, "verify", check, env, &commit_id, &[]).map(|entry| entry.key)
+    };
+    let plain = check();
+    let mut reads = check();
+    reads.fleet = true;
+    let mut checks = BTreeMap::from([("verify".to_owned(), reads)]);
+    crate::fleet::normalise(&mut checks).unwrap();
+    let reads = checks.remove("verify").unwrap();
+    let with = |digest: &str| {
+        let mut env = env.clone();
+        env.insert(crate::fleet::FLEET_DIGEST_ENV.into(), digest.into());
+        env
+    };
+    let error = key(&reads, &env).unwrap_err().to_string();
+    assert!(
+        error.contains("never keyed without CCID_FLEET_DIGEST"),
+        "{error}"
+    );
+    let first = key(&reads, &with(&"a".repeat(64))).unwrap();
+    assert_eq!(first, key(&reads, &with(&"a".repeat(64))).unwrap());
+    assert_ne!(first, key(&reads, &with(&"b".repeat(64))).unwrap());
+    // A check without fleet = true never sees the digest in its key.
+    let baseline = key(&plain, &env).unwrap();
+    assert_eq!(baseline, key(&plain, &with(&"a".repeat(64))).unwrap());
+    assert_ne!(baseline, first);
+    let identity = check_identity_payload(&plain, &with(&"a".repeat(64)), root).unwrap();
+    assert!(identity["declaration"].get("fleet").is_none(), "{identity}");
+    let identity = check_identity_payload(&reads, &with(&"a".repeat(64)), root).unwrap();
+    assert_eq!(identity["declaration"]["fleet"], json!(true));
+    assert_eq!(
+        identity["env"][crate::fleet::FLEET_DIGEST_ENV],
+        json!("a".repeat(64))
+    );
+}
+
+/// The release channel with fleet data still parses for record acceptance (`channel_accepts`).
+#[test]
+fn the_release_channel_with_fleet_data_still_names_its_releases() {
+    let channel: Channel = serde_json::from_slice(include_bytes!("../../channel.json")).unwrap();
+    assert!(is_hex(&channel.default.revision, 40));
+    assert!(is_hex(&channel.default.sha256, 64));
+    assert!(channel
+        .classes
+        .values()
+        .all(|entry| is_hex(&entry.sha256, 64)));
+}

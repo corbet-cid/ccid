@@ -237,6 +237,9 @@ pub(crate) fn run_cached_with_environment(
     let root = repo.canonicalize()?;
     let (parsed, bytes) = load_manifest(&root, manifest)?;
     let selected = select_checks(&parsed, selectors)?;
+    // Before any verdict key or moon task is computed: the digest of the fleet data a
+    // `fleet = true` check will read (declared in its cache_env by the manifest load).
+    crate::fleet::bind_selection(&parsed.checks, &selected, &mut environment, false)?;
     let mut executor_checks = BTreeMap::new();
     for name in &selected {
         executor_checks.insert(name.clone(), executor_check(&parsed.checks[name]));

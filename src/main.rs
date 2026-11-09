@@ -186,6 +186,11 @@ enum Action {
         #[arg(long, hide = true)]
         parent_watch: bool,
     },
+    /// Fleet data from the release channel: first-party owner prefixes and their legacy aliases.
+    Fleet {
+        #[command(subcommand)]
+        action: ccid::fleet::Action,
+    },
 }
 
 fn main() -> ExitCode {
@@ -594,6 +599,15 @@ fn main() -> ExitCode {
                 }
                 Err(error) => Err(error),
             }
+        }
+        Action::Fleet { action } => {
+            return match ccid::fleet::run(&action) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid fleet: {error}");
+                    ExitCode::from(2)
+                }
+            };
         }
     };
     match outcome {

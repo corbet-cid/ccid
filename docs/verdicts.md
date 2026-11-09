@@ -67,6 +67,12 @@ the same compiler, or a locale changes how a result is produced or presented, no
 passes — so a runner with `kache-corbet`/`sccache-corbet cc`/`en_US.UTF-8` and a workstation with
 `C.UTF-8` still share verdicts. A check that really depends on one declares it in `cache_env`.
 
+`fleet = true` on a check adds `CCID_FLEET_DIGEST` (the SHA-256 of the release channel's
+canonical fleet data) to its `cache_env` when the manifest is loaded, so its verdict and its moon
+task are keyed by the fleet data it reads and an edit of that data misses once. The data's
+location (`CCID_FLEET_FILE`) is never keyed. A check without the field keys exactly as before;
+see [fleet data](fleet.md).
+
 ## The record
 
 One JSON file per key: `<CCID_RESULT_CACHE>/verdicts/<key>.json`.

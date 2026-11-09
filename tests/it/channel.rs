@@ -91,3 +91,17 @@ fn channel_json_entries_are_published_with_the_named_digest() {
 fn marker() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("channel-check.txt")
 }
+
+/// The channel also carries the fleet data (`fleet`), which must be valid: every `fleet = true` check of every repository reads it.
+#[test]
+fn channel_json_carries_valid_fleet_data() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("channel.json");
+    let bytes = std::fs::read(path).unwrap();
+    let fleet = ccid::fleet::from_channel(&bytes).unwrap();
+    assert_eq!(fleet.schema, ccid::fleet::SCHEMA);
+    assert_eq!(fleet.digest().unwrap().len(), 64);
+    // The release selection the shim reads sits beside it, unchanged in shape.
+    let channel: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(channel["default"]["revision"].is_string());
+    assert!(channel["classes"].is_object());
+}

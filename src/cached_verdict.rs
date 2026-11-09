@@ -1345,6 +1345,14 @@ pub(crate) fn prepare(
     commit_id: &str,
     ignore_untracked: &[String],
 ) -> Result<Prepared> {
+    // The digest is what makes a `fleet = true` verdict specific to its fleet data: never key
+    // such a check without it (an absent value would name every fleet at once).
+    if check.fleet && value(environment, crate::fleet::FLEET_DIGEST_ENV).is_none() {
+        return Err(failure(format!(
+            "A fleet = true check is never keyed without {}",
+            crate::fleet::FLEET_DIGEST_ENV
+        )));
+    }
     let outputs = check_outputs(root, check)?;
     // The check's own declared outputs are always evidence, whether or not a wider selection
     // named them too.
