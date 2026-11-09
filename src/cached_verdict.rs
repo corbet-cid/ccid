@@ -1108,6 +1108,14 @@ fn lock_key(directory: &Path, key: &str) -> Result<File> {
         .create(true)
         .truncate(false)
         .open(directory.join(format!("{key}.lock")))?;
+    // Both producers must be able to take the same key's lock, whoever created it first.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if fs::metadata(directory).is_ok_and(|meta| meta.mode() & 0o020 != 0) {
+            let _ = lock.set_permissions(fs::Permissions::from_mode(0o660));
+        }
+    }
     let deadline = Instant::now() + LOCK_WAIT;
     loop {
         match lock.try_lock() {
