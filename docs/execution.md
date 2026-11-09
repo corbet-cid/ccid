@@ -174,6 +174,16 @@ supported Nix host. No macOS or Windows hosted build is triggered by this repo.
 
 See the [code quality baseline](docs/code-quality.md) for enforced checks and review principles.
 
+## Shared verdicts
+
+`ccid cached` first consults the content-keyed verdict store
+(`CCID_RESULT_CACHE/verdicts/`) that a land gate and CI share. The key is the tree's content,
+the resolved git-dependency commits, the tool bytes, the shared profile, the check declaration
+and declared environment, and the verdict epoch; CI accepts only an exact full-key match whose
+producing binary is on the release channel. `--plan` reports each check's verdict and bypass
+reason without running, and `ccid job-run --local --source <dir> --sha <commit>` runs exactly
+CI's job against an existing export. The interface is [docs/verdicts.md](verdicts.md).
+
 ## Incremental compilation
 
 A cargo check whose target is persistent and runs at the stable source path (a cached, cargo-only selection without a

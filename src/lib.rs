@@ -25,6 +25,7 @@ mod admission;
 mod budget;
 mod cache;
 mod cached;
+mod cached_verdict;
 mod checks;
 pub mod compile_cache;
 mod dependency;
@@ -140,7 +141,7 @@ struct Manifest {
 struct Verdict {
     jobs: Vec<String>,
 }
-#[derive(Debug, Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Deserialize, serde::Serialize, Default, Clone)]
 #[serde(default, deny_unknown_fields)]
 pub struct Check {
     kind: String,

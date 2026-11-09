@@ -37,6 +37,9 @@ pub struct Options {
     pub server_url: String,
     /// The owner of the repository (for unqualified sibling names).
     pub owner: String,
+    /// Run the job against this existing source export instead of fetching the commit. The land
+    /// gate is the second producer of CI's job and must use the same entry point (P5).
+    pub local: Option<PathBuf>,
 }
 
 /// Timing knobs; tests shorten them.
@@ -375,9 +378,10 @@ fn stripped_profile_variables(declared: &BTreeMap<String, String>) -> Vec<&'stat
 /// Run the whole job: claim, fetch, check the adapters, exec the declared command. Does not return on success of the exec.
 #[cfg(unix)]
 pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
-    use std::os::unix::process::CommandExt;
-    let token = std::env::var("CCID_FORGE_TOKEN")
-        .map_err(|_| failure("CCID_FORGE_TOKEN (the job token) is required"))?;
+    let token = std::env::var("CCID_FORGE_TOKEN").ok();
+    if token.is_none() && options.local.is_none() {
+        return Err(failure("CCID_FORGE_TOKEN (the job token) is required"));
+    }
     let exe = std::env::current_exe()?;
     eprintln!(
         "ccid job-run: tool revision {} for {} at {}",
@@ -385,6 +389,35 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
         options.job,
         options.sha
     );
+    if let Some(source) = &options.local {
+        if !source.is_dir() {
+            return Err(failure(format!(
+                "--source {} is not a directory",
+                source.display()
+            )));
+        }
+        if source.join(".git").exists() {
+            let head = git(pace, source)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .map_err(|error| failure(format!("git rev-parse: {error}")))?;
+            let head = String::from_utf8_lossy(&head.stdout).trim().to_owned();
+            if !head.is_empty() && head != options.sha {
+                return Err(failure(format!(
+                    "--source is {head}, not the declared {}",
+                    options.sha
+                )));
+            }
+        }
+        std::env::set_current_dir(source)?;
+        let plan = jobs::plan(
+            Path::new("."),
+            Path::new(".ci/ccid.toml"),
+            &options.job,
+            None,
+        )?;
+        return execute_job(options, &exe, plan, None, pace);
+    }
     let dir = match std::env::var_os("CCID_SOURCE_ROOT").filter(|value| !value.is_empty()) {
         Some(root) => {
             let slots = std::env::var("CCID_SOURCE_SLOTS")
@@ -405,13 +438,33 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
         }
         None => std::env::current_dir()?,
     };
+    let token = token.ok_or_else(|| failure("CCID_FORGE_TOKEN (the job token) is required"))?;
     std::env::set_current_dir(&dir)?;
     checkout(&dir, options, &token, pace)?;
     let manifest = Path::new(".ci/ccid.toml");
     let plan = jobs::plan(Path::new("."), manifest, &options.job, None)?;
-    let mut extra = command_environment(&plan, options, &exe);
+    execute_job(options, &exe, plan, Some((&token, &dir)), pace)
+}
+
+/// Run the declared job command after the source is staged. One definition for the scheduler
+/// (`job-run`) and the land gate (`job-run --local`).
+fn execute_job(
+    options: &Options,
+    exe: &Path,
+    plan: jobs::Plan,
+    push: Option<(&str, &Path)>,
+    pace: &Pace,
+) -> Result<ExitCode> {
+    use std::os::unix::process::CommandExt;
+    let manifest = Path::new(".ci/ccid.toml");
+    let mut extra = command_environment(&plan, options, exe);
     if !plan.siblings.is_empty() {
-        let (root, revisions) = stage_siblings(&dir, &plan.siblings, options, &token, pace)?;
+        let Some((token, dir)) = push else {
+            return Err(failure(
+                "--local cannot stage sibling repositories without a job token",
+            ));
+        };
+        let (root, revisions) = stage_siblings(dir, &plan.siblings, options, token, pace)?;
         extra.insert("CCID_SIBLINGS_DIR".into(), root.display().to_string());
         extra.insert("CCID_SIBLINGS_REVISIONS".into(), revisions);
     }
@@ -419,7 +472,7 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     render::render(Path::new("."), manifest, true)?;
     let mut command;
     if jobs::is_self_checks_command(&plan.command) {
-        command = Command::new(&exe);
+        command = Command::new(exe);
         command.args(["check", "--repo", "."]);
         for check in &plan.checks {
             command.args(["--check", check]);
@@ -546,6 +599,7 @@ mod tests {
             sha: "a".repeat(40),
             server_url: "https://forge.example/".into(),
             owner: "o".into(),
+            local: None,
         };
         let mut pace = quick();
         pace.git = bin.clone().into();

@@ -174,7 +174,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 [[package]]
 name = "cmnp"
 version = "0.1.0"
-source = "git+https://git.corbet.ch/corbet-cid/cmnp.git?rev=a68185da2008bc618192216999d9f9dc034b2d14#a68185da2008bc618192216999d9f9dc034b2d14"
+source = "git+https://git.corbet.ch/corbet-cid/cmnp.git?rev=6dc3929b1c19341be342eb8ff3c8b43f980c2228#6dc3929b1c19341be342eb8ff3c8b43f980c2228"
 dependencies = [
  "process-wrap",
  "serde",

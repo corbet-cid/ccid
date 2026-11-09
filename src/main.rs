@@ -54,6 +54,12 @@ enum Action {
         /// Owner of the repository (qualifies sibling names).
         #[arg(long)]
         owner: String,
+        /// Run the job against an existing source export instead of fetching the commit: the land gate's entry point.
+        #[arg(long)]
+        local: bool,
+        /// Source directory for --local (an export of the exact commit).
+        #[arg(long, requires = "local")]
+        source: Option<PathBuf>,
     },
     /// Generate owned scheduler adapters from the repository job manifest.
     Render {
@@ -356,17 +362,33 @@ fn main() -> ExitCode {
             sha,
             server_url,
             owner,
-        } => ccid::job_run::run(
-            &ccid::job_run::Options {
-                job,
-                repository,
-                sha,
-                server_url,
-                owner,
-            },
-            &ccid::job_run::Pace::default(),
-        )
-        .map(|_| ()),
+            local,
+            source,
+        } => {
+            let local = if local {
+                match source {
+                    Some(source) => Some(source),
+                    None => {
+                        eprintln!("ccid: --local requires --source");
+                        return ExitCode::from(2);
+                    }
+                }
+            } else {
+                None
+            };
+            ccid::job_run::run(
+                &ccid::job_run::Options {
+                    job,
+                    repository,
+                    sha,
+                    server_url,
+                    owner,
+                    local,
+                },
+                &ccid::job_run::Pace::default(),
+            )
+            .map(|_| ())
+        }
         Action::SourceRevision => {
             println!("{}", ccid::SOURCE_REVISION);
             Ok(())

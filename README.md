@@ -81,6 +81,23 @@ Declare `cache_tools = [["go", "version"], ["git", "--version"]]` on custom
 checks to hash the actual installed tools, and `cache_env = ["CGO_ENABLED"]`
 for environment settings that affect their results. These identities are per check;
 selecting an additional check does not add its environment or tools to the others.
+
+### Shared verdicts with CI
+
+Before moon runs, `ccid cached` consults the content-keyed verdict store in
+`CCID_RESULT_CACHE/verdicts/`: a land gate writes a verdict for the commit it is
+about to push, and CI's run of the same commit is a hit instead of a second
+verification. The key is the tree's content, the **resolved** git-dependency
+commits, the tool bytes, the shared profile, the check declaration and declared
+environment, and the verdict epoch — never a path, run id or ambient variable.
+CI accepts only an exact full-key match whose producing ccid binary is on the
+release channel. Coverage is a check like any other, so an unchanged tree is
+never built a second time. `--plan` prints the verdict and the bypass reason
+without running; `ccid job-run --local --source <dir> --sha <commit>` is the
+land gate's producer entry point and the one definition of CI's job. The full
+interface — key, record, acceptance rules, store layout — is
+[docs/verdicts.md](docs/verdicts.md).
+
 Commit and branch identity are absent by default. A check that stamps Git metadata
 must declare `cache_commit = true`, which requires an exact `CI_COMMIT_SHA` and
 hashes it for that check alone. Listing `CI_COMMIT_SHA` in `cache_env` without this
