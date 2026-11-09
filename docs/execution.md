@@ -133,7 +133,7 @@ their own identities and evidence.
 
 ## Building and platform evidence
 
-Crow builds the tool as an ordinary repository job: `compile` builds the release
+CI builds the tool as an ordinary repository job: `compile` builds the release
 binary from the exact commit on the worker, `verify` runs formatting, Clippy with
 warnings denied and the test suite on the same release profile. The binary of a
 commit is published once to the forge's generic package registry (`cfrg release`),
@@ -142,6 +142,14 @@ source revision, target triple and binary digest. A consumer verifies the receip
 and `source-revision` before it uses the binary, and only for the exact source,
 checks and Linux environment it records. This is a Linux lane, not native
 macOS/Windows evidence.
+
+The release binary is built by `.ci/release.sh` in the CI environment (the job
+image or a CI check-shell), never on a developer host: `cfrg release publish`
+refuses a Linux ELF whose program interpreter is not a Nix store path, because a
+host build may link a newer glibc than the job image runs. Run the script with
+`CCID_RELEASE_DRY_RUN=1` to print the URL, sha256 and size of the publication
+without uploading. A real publication needs `CFRG_RELEASE_TOKEN`; the same
+script then prints the digest that `channel.json` must name.
 
 A conflicting existing artifact is never overwritten. Consumers verify and
 reuse this artifact; they do not compile ccid per repository.
