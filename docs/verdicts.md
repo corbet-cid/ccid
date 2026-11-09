@@ -91,7 +91,9 @@ build the same commits.
 When resolution or keying is impossible — no forge identity, missing tools, a working tree
 modified outside `Cargo.lock`, an untracked file the check could read — the verdict layer is
 disabled for that run (`verdict-unavailable` / `verdict-disabled`), and CI behaves exactly as it
-did before. It never guesses.
+did before. It never guesses. A declared output left in the checkout by an earlier run is
+evidence the check produced, not an input it reads: it never disables a later lookup. An
+undeclared untracked file still refuses the key.
 
 After a successful check, the inputs are re-read; a dependency that moved while the check ran
 writes no record.
