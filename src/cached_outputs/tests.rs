@@ -64,6 +64,7 @@ fn environment(cache: &Path) -> Environment {
     let mut env: Environment = std::env::vars_os().collect();
     for name in [
         "CI",
+        "CI_COMMIT_SHA",
         "CI_REPOSITORY_URL",
         "CCID_CHANNEL_FILE",
         "CI_COMMIT_BRANCH",
