@@ -671,6 +671,13 @@ fn install_directory(root: &Path, entry: &Entry, bytes: &[u8]) -> Result<()> {
     let staged = staging.keep();
     fs::rename(&staged, &path)
         .map_err(|error| failure(format!("Cannot restore stored output: {error}")))?;
+    // The staging root is private tempdir mode; the restored tree is a declared
+    // artefact and must stay readable like the directory the check produced.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    }
     Ok(())
 }
 
