@@ -9,6 +9,10 @@ fn environment() -> Environment {
         "CCID_RESULT_CACHE",
         "CCID_CHANNEL_FILE",
         "CI_REPOSITORY_URL",
+        "CC",
+        "CXX",
+        "CI_LINKER",
+        "RUSTC_WRAPPER",
     ] {
         env.remove(OsStr::new(name));
     }
@@ -652,6 +656,22 @@ fn a_stored_verdict_makes_the_cached_run_skip_the_check_entirely() {
         serde_json::from_slice(&fs::read(root.join(".ccid/cache-metrics.json")).unwrap()).unwrap();
     assert_eq!(metrics["checks"][0]["status"], "cached");
     assert_eq!(metrics["checks"][0]["computed"], 0);
+}
+
+#[test]
+fn a_compiler_declared_as_a_command_line_is_resolved_by_its_program() {
+    let fixture = fixture("cc");
+    let root = fixture.path();
+    let mut env = environment();
+    env.insert("CC".into(), "sh -c true".into());
+    // The key is computable: the tool identity is the program (`sh`), the full value stays a
+    // declared semantic input.
+    let commit_id = commit(root, None, &env).unwrap();
+    let with = prepare(root, "verify", &check(), &env, &commit_id).unwrap();
+    let mut other = env.clone();
+    other.insert("CC".into(), "sh -c false".into());
+    let without = prepare(root, "verify", &check(), &other, &commit_id).unwrap();
+    assert_ne!(with.key, without.key);
 }
 
 #[test]

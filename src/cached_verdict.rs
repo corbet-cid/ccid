@@ -696,6 +696,18 @@ pub fn resolve_git_dependencies(root: &Path, environment: &Environment) -> Resul
     Ok(targets.len())
 }
 
+/// The executable of a declared compiler/linker value: `CC` may be a whole command line
+/// (`"sccache-corbet cc"`, `"cc -m32"`). The compiler is the program it runs, whose bytes are
+/// part of the toolchain; a compile-cache wrapper and flags are not the compiler (flags belong
+/// in `CFLAGS`, which stays a declared input).
+fn program_of(value: &str) -> &str {
+    value
+        .split_whitespace()
+        .rev()
+        .find(|token| !token.starts_with('-'))
+        .unwrap_or(value)
+}
+
 fn find_program(name: &str, environment: &Environment) -> Result<PathBuf> {
     let path = if name.contains('/') {
         PathBuf::from(name)
@@ -826,6 +838,23 @@ fn add_command_tool(
     Ok(())
 }
 
+/// The C/C++ compiler a build gets from `CC`/`CXX`, or the platform default when unset. A
+/// compile-cache wrapper in front of it (`sccache-corbet cc`) changes no result, so only the
+/// compiler's bytes are keyed. Commands that do not find one simply do not bind that role.
+fn add_compiler_tools(
+    tools: &mut BTreeMap<String, String>,
+    environment: &Environment,
+) -> Result<()> {
+    for (role, variable, default) in [("cc", "CC", "cc"), ("cxx", "CXX", "c++")] {
+        let program = value(environment, variable);
+        let program = program.as_deref().map(program_of).unwrap_or(default);
+        if let Ok(path) = find_program(program, environment) {
+            add_tool(tools, role, &path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Tools whose bytes can change one check's result, by role. A check that cannot identify its
 /// tools gets no verdict (the ordinary cached run still happens).
 fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap<String, String>> {
@@ -882,13 +911,13 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                     }
                 }
             }
-            for (role, variable) in [("cc", "CC"), ("cxx", "CXX")] {
-                if let Some(program) = value(environment, variable) {
-                    add_tool(&mut tools, role, &find_program(&program, environment)?)?;
-                }
-            }
+            add_compiler_tools(&mut tools, environment)?;
             if let Some(linker) = value(environment, "CI_LINKER") {
-                add_tool(&mut tools, "linker", &find_program(&linker, environment)?)?;
+                add_tool(
+                    &mut tools,
+                    "linker",
+                    &find_program(program_of(&linker), environment)?,
+                )?;
             }
         }
         "javascript" => {
@@ -920,7 +949,17 @@ fn check_identity(check: &crate::Check, environment: &Environment) -> Result<Str
     // Process plumbing that the fleet's workstation and its runner disagree on without any
     // effect on what a check computes: the compiler cache wrapper and the presentation locale.
     // A check that really depends on one declares it in `cache_env`, which is never filtered.
-    const PRESENTATION: &[&str] = &["RUSTC_WRAPPER", "LANG", "LC_ALL", "LANGUAGE", "TZ"];
+    // `CC`/`CXX` select a compiler; the compiler's bytes are keyed through the toolchain, so
+    // their wrapper spelling (a cache in front of `cc`, identical flags in `CFLAGS`) is not.
+    const PRESENTATION: &[&str] = &[
+        "RUSTC_WRAPPER",
+        "CC",
+        "CXX",
+        "LANG",
+        "LC_ALL",
+        "LANGUAGE",
+        "TZ",
+    ];
     let mut declared: BTreeMap<String, Option<String>> = BTreeMap::new();
     for name in cmnp::inputs::SEMANTIC_ENV
         .iter()
