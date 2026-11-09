@@ -33,9 +33,11 @@ commands = [["python3", ".ci/registry_publish_test.py"]]
 kind = "commands"
 commands = [["python3", "-I", ".ci/remote_ci_test.py"]]
 
+# The acceptance tiers live in the one integration-test binary (`tests/it`):
+# `--test it` plus the module filter selects exactly the former test file.
 [checks.cache-acceptance]
 kind = "commands"
-commands = [["cargo", "test", "--release", "--locked", "--test", "cache_acceptance", "--", "--ignored", "--nocapture"]]
+commands = [["cargo", "test", "--release", "--locked", "--test", "it", "--", "--ignored", "--nocapture", "cache_acceptance"]]
 
 [jobs.cache-acceptance]
 scheduler = "forgejo"
@@ -61,7 +63,7 @@ command = ["ccid:run-declared-checks"]
 
 [checks.native-compile-cache]
 kind = "commands"
-commands = [["cargo", "test", "--release", "--locked", "--test", "native_compile_cache", "--", "--ignored", "--nocapture"]]
+commands = [["cargo", "test", "--release", "--locked", "--test", "it", "--", "--ignored", "--nocapture", "native_compile_cache"]]
 
 [jobs.build]
 scheduler = "forgejo"
