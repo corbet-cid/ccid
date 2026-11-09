@@ -26,3 +26,11 @@ opt-level = 1
 # is invisible to the cache, so a lane or workstation with the same file hits CI's entries whatever its terminal is.
 [term]
 color = "never"
+
+# The ONE link driver on every host (Julian 2026-11-09: "we want to use wild everywhere. That is a decision by me. wild with
+# fallback mold."). It is the nix-packaged wild-cc (pkgs/wild-cc in infra): rustc's bundled-lld selection is rewritten to Wild per
+# link, and a link Wild refuses runs again with mold. The value is the bare name in every copy of this file, so the cargo config is
+# byte-identical on lanes, workstations and CI; kache leaves `-C linker` out of every key (rlib keys stay, linked units re-key on
+# the linker that really ran). No rustflags entry: the driver, not a rustc argument, selects the linker.
+[target.x86_64-unknown-linux-gnu]
+linker = "wild-cc"
