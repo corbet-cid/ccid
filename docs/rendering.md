@@ -78,9 +78,10 @@ A repository opts in with an empty table:
 [check_shell]
 ```
 
-Rendering then writes `.ci/check-shell.nix`, one generated file with one C
-toolchain family (clang/LLVM), one nixpkgs pin and the native libraries the
-build scripts discover through pkg-config. `ccid check`, `ccid cached` and the
+Rendering then writes `.ci/check-shell.nix`, one generated file with one native
+C/C++ toolchain family (nix gcc, with unwrapped clang for wasm32 targets and
+libclang for bindgen), one nixpkgs pin and the native libraries the build
+scripts discover through pkg-config. `ccid check`, `ccid cached` and the
 declared command of `ccid job-run` run inside exactly that file whenever it
 carries the render marker; a lane that evaluates the same file builds with the
 same toolchain and libraries. A hand-written `.ci/check-shell.nix` is foreign
