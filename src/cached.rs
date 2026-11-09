@@ -94,7 +94,10 @@ fn plan(
         })
         .cloned()
         .collect();
-    let prepared = cached_verdict::commit(root, None, environment)
+    // The key names the resolved dependency commits, so a plan resolves exactly like a run
+    // (Cargo only, no check) before it can answer hit or miss.
+    let prepared = cached_verdict::resolve_git_dependencies(root, environment)
+        .and_then(|_| cached_verdict::commit(root, None, environment))
         .map(|commit| {
             cached_verdict::prepare_selection(root, manifest_checks, &keyable, environment, &commit)
         })
