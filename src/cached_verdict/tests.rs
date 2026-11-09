@@ -659,19 +659,30 @@ fn a_stored_verdict_makes_the_cached_run_skip_the_check_entirely() {
 }
 
 #[test]
-fn a_compiler_declared_as_a_command_line_is_resolved_by_its_program() {
+fn a_compiler_selector_is_its_program_and_flags_stay_declared() {
     let fixture = fixture("cc");
     let root = fixture.path();
-    let mut env = environment();
-    env.insert("CC".into(), "sh -c true".into());
-    // The key is computable: the tool identity is the program (`sh`), the full value stays a
-    // declared semantic input.
+    let env = environment();
     let commit_id = commit(root, None, &env).unwrap();
-    let with = prepare(root, "verify", &check(), &env, &commit_id).unwrap();
-    let mut other = env.clone();
-    other.insert("CC".into(), "sh -c false".into());
-    let without = prepare(root, "verify", &check(), &other, &commit_id).unwrap();
-    assert_ne!(with.key, without.key);
+    let plain = prepare(root, "verify", &check(), &env, &commit_id).unwrap();
+    // A cache wrapper in front of the same compiler changes no result.
+    let mut wrapper = env.clone();
+    wrapper.insert("CC".into(), "sccache-corbet cc".into());
+    assert_eq!(
+        prepare(root, "verify", &check(), &wrapper, &commit_id)
+            .unwrap()
+            .key,
+        plain.key
+    );
+    // Flags in the selector are semantic and are keyed verbatim.
+    let mut flags = env.clone();
+    flags.insert("CC".into(), "cc -m32".into());
+    assert_ne!(
+        prepare(root, "verify", &check(), &flags, &commit_id)
+            .unwrap()
+            .key,
+        plain.key
+    );
 }
 
 #[test]

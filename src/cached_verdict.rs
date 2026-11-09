@@ -949,17 +949,12 @@ fn check_identity(check: &crate::Check, environment: &Environment) -> Result<Str
     // Process plumbing that the fleet's workstation and its runner disagree on without any
     // effect on what a check computes: the compiler cache wrapper and the presentation locale.
     // A check that really depends on one declares it in `cache_env`, which is never filtered.
-    // `CC`/`CXX` select a compiler; the compiler's bytes are keyed through the toolchain, so
-    // their wrapper spelling (a cache in front of `cc`, identical flags in `CFLAGS`) is not.
-    const PRESENTATION: &[&str] = &[
-        "RUSTC_WRAPPER",
-        "CC",
-        "CXX",
-        "LANG",
-        "LC_ALL",
-        "LANGUAGE",
-        "TZ",
-    ];
+    // `CC`/`CXX` select a compiler; the compiler's bytes are keyed through the toolchain. A
+    // plain selector (`cc`, `clang`, `sccache-corbet cc`) is therefore not a separate input,
+    // which lets a runner with a cache wrapper and a land without it agree. A selector that
+    // carries flags is different: those flags are keyed verbatim.
+    const SELECTOR: &[&str] = &["CC", "CXX"];
+    const PRESENTATION: &[&str] = &["RUSTC_WRAPPER", "LANG", "LC_ALL", "LANGUAGE", "TZ"];
     let mut declared: BTreeMap<String, Option<String>> = BTreeMap::new();
     for name in cmnp::inputs::SEMANTIC_ENV
         .iter()
@@ -967,12 +962,17 @@ fn check_identity(check: &crate::Check, environment: &Environment) -> Result<Str
         .filter(|name| !PRESENTATION.contains(name))
         .chain(check.cache_env.iter().map(String::as_str))
     {
-        declared.insert(
-            name.to_owned(),
-            environment
-                .get(OsStr::new(name))
-                .map(|v| v.to_string_lossy().into_owned()),
-        );
+        let value = environment
+            .get(OsStr::new(name))
+            .map(|v| v.to_string_lossy().into_owned());
+        if SELECTOR.contains(&name)
+            && value
+                .as_deref()
+                .is_none_or(|v| !v.split_whitespace().any(|token| token.starts_with('-')))
+        {
+            continue;
+        }
+        declared.insert(name.to_owned(), value);
     }
     let payload = json!({"declaration": check, "env": declared});
     Ok(format!(
