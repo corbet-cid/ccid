@@ -202,6 +202,8 @@ enum Action {
         #[command(subcommand)]
         action: ccid::coverage::Action,
     },
+    /// Check locked content pins (fixture digests, native artifact versions).
+    ContentPins(ccid::content_pins::Options),
 }
 
 fn main() -> ExitCode {
@@ -635,6 +637,15 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid coverage: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::ContentPins(options) => {
+            return match ccid::content_pins::run(&options) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid content-pins: {error}");
                     ExitCode::from(2)
                 }
             };

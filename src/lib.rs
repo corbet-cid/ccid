@@ -30,6 +30,7 @@ mod cached_verdict;
 pub mod check_shell;
 mod checks;
 pub mod compile_cache;
+pub mod content_pins;
 pub mod coverage;
 mod dependency;
 pub mod fleet;
@@ -152,6 +153,10 @@ struct Manifest {
     #[serde(default)]
     #[allow(dead_code)]
     coverage: Option<coverage::Config>,
+    /// Locked content pins checked by `ccid content-pins`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    content_pins: Vec<content_pins::Pin>,
 }
 /// The jobs whose success is the commit's aggregated verdict; every other job
 /// (release, publish, scheduled gates) reports under its own non-gating context.

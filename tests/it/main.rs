@@ -18,6 +18,7 @@ mod cache_acceptance;
 mod cargo_target;
 mod channel;
 mod cli;
+mod content_pins;
 mod dependency_resolution;
 mod fleet;
 mod freshness;
