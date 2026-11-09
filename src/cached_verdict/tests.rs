@@ -304,6 +304,18 @@ fn the_resolved_git_dependency_commit_is_keyed_not_the_committed_pin() {
 }
 
 #[test]
+fn a_git_package_spec_keeps_the_scheme_and_the_branch_query() {
+    assert_eq!(
+        git_spec(
+            "https://example.invalid/org/dep.git?branch=main",
+            "dep",
+            "0.1.0"
+        ),
+        "git+https://example.invalid/org/dep.git?branch=main#dep@0.1.0"
+    );
+}
+
+#[test]
 fn nested_locks_are_read_and_keyed_by_their_path() {
     let fixture = fixture("nested");
     let root = fixture.path();

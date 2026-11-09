@@ -593,6 +593,12 @@ fn git_dependencies(root: &Path, commit: &str) -> Result<BTreeMap<String, String
     Ok(resolved)
 }
 
+/// Cargo's package-id specification for one git package: the lock's source without its
+/// `#<commit>` fragment, keeping the `git+` scheme and the `?branch=` query.
+fn git_spec(url: &str, name: &str, version: &str) -> String {
+    format!("git+{url}#{name}@{version}")
+}
+
 /// The forge host of this repository (`CI_REPOSITORY_URL`, else the checkout's origin).
 fn repository_host(root: &Path, environment: &Environment) -> Option<String> {
     let url = value(environment, "CI_REPOSITORY_URL").or_else(|| {
@@ -663,7 +669,7 @@ pub fn resolve_git_dependencies(root: &Path, environment: &Environment) -> Resul
             {
                 continue;
             }
-            targets.insert((directory.clone(), format!("{url}#{name}@{version}")));
+            targets.insert((directory.clone(), git_spec(url, name, version)));
         }
     }
     if targets.is_empty() {
