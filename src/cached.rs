@@ -86,14 +86,32 @@ fn plan(
     selected: &[String],
     environment: &Environment,
 ) -> Result<()> {
+    let keyable: Vec<String> = selected
+        .iter()
+        .filter(|name| {
+            cached_verdict::plan_bypass(&manifest_checks[*name], &executor_checks[*name], root)
+                .is_none()
+        })
+        .cloned()
+        .collect();
     let prepared = cached_verdict::commit(root, None, environment)
         .map(|commit| {
-            cached_verdict::prepare_selection(root, manifest_checks, selected, environment, &commit)
+            cached_verdict::prepare_selection(root, manifest_checks, &keyable, environment, &commit)
         })
         .unwrap_or_default();
     for name in selected {
-        let bypass =
-            cached_verdict::plan_bypass(&manifest_checks[name], &executor_checks[name], root);
+        if let Some(bypass) =
+            cached_verdict::plan_bypass(&manifest_checks[name], &executor_checks[name], root)
+        {
+            event(json!({
+                "event": "cache-plan",
+                "check": name,
+                "cacheable": false,
+                "bypass": bypass,
+                "verdict": "uncached",
+            }));
+            continue;
+        }
         let entry = prepared.iter().find(|entry| &entry.check == name);
         let (status, reason) = match entry {
             Some(entry) => {
@@ -108,8 +126,8 @@ fn plan(
         event(json!({
             "event": "cache-plan",
             "check": name,
-            "cacheable": bypass.is_none(),
-            "bypass": bypass,
+            "cacheable": true,
+            "bypass": null,
             "verdict": status,
             "reason": reason,
         }));
