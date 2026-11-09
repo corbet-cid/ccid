@@ -1008,7 +1008,7 @@ fn repository_identity(root: &Path, environment: &Environment) -> String {
 /// checkout with unrelated local modifications has no exact tree to name, so it gets no verdict
 /// (the ordinary cache still works). Dependency resolution may rewrite `Cargo.lock`; that is the
 /// one tracked modification the key is meant to capture.
-fn applicable(root: &Path) -> Result<()> {
+fn applicable(root: &Path, outputs: &[String]) -> Result<()> {
     if !is_repository(root) {
         return Ok(());
     }
@@ -1023,6 +1023,14 @@ fn applicable(root: &Path) -> Result<()> {
     }
     let untracked = git(root, &["ls-files", "--others", "--exclude-standard"])?;
     for path in untracked.lines() {
+        // A declared output left by an earlier run in this checkout is evidence the check
+        // produced, not input it reads: a second selection or a plan must still key the tree.
+        if outputs
+            .iter()
+            .any(|output| path == output || path.starts_with(&format!("{output}/")))
+        {
+            continue;
+        }
         if path == "moon.yml"
             || GENERATED
                 .iter()
@@ -1073,7 +1081,8 @@ pub(crate) fn prepare(
     environment: &Environment,
     commit_id: &str,
 ) -> Result<Prepared> {
-    applicable(root)?;
+    let outputs = check_outputs(root, check)?;
+    applicable(root, &outputs)?;
     let entries = tree_entries(root, commit_id)?;
     let components = KeyComponents {
         schema: SCHEMA,
@@ -1099,7 +1108,7 @@ pub(crate) fn prepare(
         tree_entries: entries,
         cache,
         store,
-        outputs: check_outputs(root, check)?,
+        outputs,
     })
 }
 

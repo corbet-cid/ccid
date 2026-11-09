@@ -520,3 +520,25 @@ fn a_coverage_toolchain_is_keyed_by_the_nightly_binaries() {
         .key;
     assert_ne!(first, second, "the nightly compiler's bytes are keyed");
 }
+
+#[test]
+fn a_declared_output_left_in_the_checkout_does_not_disable_the_next_lookup() {
+    let repo_fixture = fixture(&["coverage.txt"]);
+    let root = repo_fixture.path();
+    let cache = tempfile::tempdir().unwrap();
+    let env = environment(cache.path());
+    let check = crate::Check {
+        kind: "commands".into(),
+        commands: vec![vec!["sh".into(), "-c".into(), "true".into()]],
+        cache_tools: vec![vec!["sh".into(), "--version".into()]],
+        cache_outputs: vec!["coverage.txt".into()],
+        ..Default::default()
+    };
+    let commit_id = crate::cached_verdict::commit(root, None, &env).unwrap();
+    // The first run's report is still here, untracked: it is evidence, not an input.
+    fs::write(root.join("coverage.txt"), b"lines: 90%\n").unwrap();
+    assert!(crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id).is_ok());
+    // An undeclared file the check could read still refuses the key, fail closed.
+    fs::write(root.join("stray.txt"), b"not an output\n").unwrap();
+    assert!(crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id).is_err());
+}
