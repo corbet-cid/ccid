@@ -1080,9 +1080,14 @@ pub(crate) fn prepare(
     check: &crate::Check,
     environment: &Environment,
     commit_id: &str,
+    ignore_untracked: &[String],
 ) -> Result<Prepared> {
     let outputs = check_outputs(root, check)?;
-    applicable(root, &outputs)?;
+    // The check's own declared outputs are always evidence, whether or not a wider selection
+    // named them too.
+    let mut ignore = ignore_untracked.to_vec();
+    ignore.extend(outputs.iter().cloned());
+    applicable(root, &ignore)?;
     let entries = tree_entries(root, commit_id)?;
     let components = KeyComponents {
         schema: SCHEMA,
@@ -1156,9 +1161,17 @@ pub fn prepare_selection(
     environment: &Environment,
     commit_id: &str,
 ) -> Vec<Prepared> {
+    // A selection may contain more than one output-producing check; every declared output of
+    // the selection is evidence a previous run may have left in this checkout, never input.
+    let ignored: Vec<String> = selected
+        .iter()
+        .flat_map(|name| checks[name].cache_outputs.iter())
+        .filter_map(|output| crate::cached_outputs::output_relative(output).ok())
+        .filter_map(|output| output.to_str().map(str::to_owned))
+        .collect();
     let mut prepared = Vec::new();
     for name in selected {
-        match prepare(root, name, &checks[name], environment, commit_id) {
+        match prepare(root, name, &checks[name], environment, commit_id, &ignored) {
             Ok(entry) => prepared.push(entry),
             Err(error) => event(json!({
                 "event": "verdict-unavailable",

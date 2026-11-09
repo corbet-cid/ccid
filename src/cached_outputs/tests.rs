@@ -339,9 +339,15 @@ fn declared_outputs_must_be_plain_relative_paths_outside_tracked_source() {
         cache_outputs: vec!["Cargo.toml".into()],
         ..Default::default()
     };
-    assert!(
-        crate::cached_verdict::prepare(fixture.path(), "verify", &check, &env, &commit_id).is_err()
-    );
+    assert!(crate::cached_verdict::prepare(
+        fixture.path(),
+        "verify",
+        &check,
+        &env,
+        &commit_id,
+        &[]
+    )
+    .is_err());
 }
 
 #[test]
@@ -359,7 +365,7 @@ fn a_verdict_is_published_only_after_every_declared_output_is_stored() {
     };
     let commit_id = crate::cached_verdict::commit(root, None, &env).unwrap();
     let prepared =
-        crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id).unwrap();
+        crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id, &[]).unwrap();
     let record_path = cache
         .path()
         .join(crate::cached_verdict::STORE_DIR)
@@ -418,9 +424,15 @@ fn a_verdict_is_published_only_after_every_declared_output_is_stored() {
         "CCID_RESULT_CACHE".into(),
         empty_cache.path().as_os_str().to_owned(),
     );
-    let other_prepared =
-        crate::cached_verdict::prepare(other_root, "verify", &check, &other_env, &other_commit)
-            .unwrap();
+    let other_prepared = crate::cached_verdict::prepare(
+        other_root,
+        "verify",
+        &check,
+        &other_env,
+        &other_commit,
+        &[],
+    )
+    .unwrap();
     crate::cached_verdict::write_record(
         &empty_cache.path().join(crate::cached_verdict::STORE_DIR),
         &crate::cached_verdict::Record {
@@ -511,11 +523,11 @@ fn a_coverage_toolchain_is_keyed_by_the_nightly_binaries() {
         ..Default::default()
     };
     let commit_id = crate::cached_verdict::commit(root, None, &env).unwrap();
-    let first = crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id)
+    let first = crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id, &[])
         .unwrap()
         .key;
     fs::write(&rustc, b"nightly rustc two\n").unwrap();
-    let second = crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id)
+    let second = crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id, &[])
         .unwrap()
         .key;
     assert_ne!(first, second, "the nightly compiler's bytes are keyed");
@@ -537,8 +549,8 @@ fn a_declared_output_left_in_the_checkout_does_not_disable_the_next_lookup() {
     let commit_id = crate::cached_verdict::commit(root, None, &env).unwrap();
     // The first run's report is still here, untracked: it is evidence, not an input.
     fs::write(root.join("coverage.txt"), b"lines: 90%\n").unwrap();
-    assert!(crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id).is_ok());
+    assert!(crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id, &[]).is_ok());
     // An undeclared file the check could read still refuses the key, fail closed.
     fs::write(root.join("stray.txt"), b"not an output\n").unwrap();
-    assert!(crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id).is_err());
+    assert!(crate::cached_verdict::prepare(root, "verify", &check, &env, &commit_id, &[]).is_err());
 }

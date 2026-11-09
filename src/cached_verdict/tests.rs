@@ -107,7 +107,7 @@ fn channel(path: &Path, sha256: &str) {
 
 fn prepared(root: &Path, env: &Environment, name: &str) -> Prepared {
     let commit = commit(root, None, env).unwrap();
-    prepare(root, name, &check(), env, &commit).unwrap()
+    prepare(root, name, &check(), env, &commit, &[]).unwrap()
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
     changed.commands = vec![vec!["sh".into(), "-c".into(), "false".into()]];
     let commit_id = commit(root, None, &env).unwrap();
     assert_ne!(
-        prepare(root, "verify", &changed, &env, &commit_id)
+        prepare(root, "verify", &changed, &env, &commit_id, &[])
             .unwrap()
             .key,
         key
@@ -141,13 +141,13 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
     let mut declared = check();
     declared.cache_env = vec!["VERDICT_TEST_FLAG".into()];
     let commit_id = commit(root, None, &env).unwrap();
-    let without = prepare(root, "verify", &declared, &env, &commit_id)
+    let without = prepare(root, "verify", &declared, &env, &commit_id, &[])
         .unwrap()
         .key;
     let mut with = env.clone();
     with.insert("VERDICT_TEST_FLAG".into(), "1".into());
     assert_ne!(
-        prepare(root, "verify", &declared, &with, &commit_id)
+        prepare(root, "verify", &declared, &with, &commit_id, &[])
             .unwrap()
             .key,
         without
@@ -169,7 +169,7 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
     let mut declared_locale = check();
     declared_locale.cache_env = vec!["LANG".into()];
     let commit_id = commit(root, None, &env).unwrap();
-    let without = prepare(root, "verify", &declared_locale, &env, &commit_id)
+    let without = prepare(root, "verify", &declared_locale, &env, &commit_id, &[])
         .unwrap()
         .key;
     // The declared value must differ from whatever the host already exports.
@@ -190,6 +190,7 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
         &declared_locale,
         &declared_changed,
         &commit_id,
+        &[],
     )
     .unwrap()
     .key;
@@ -269,11 +270,11 @@ fn a_committed_tree_not_the_working_tree_is_the_identity() {
     // An untracked file the check could read refuses a verdict rather than guessing.
     fs::write(root.join("untracked.txt"), "not committed\n").unwrap();
     let commit_id = commit(root, None, &env).unwrap();
-    assert!(prepare(root, "verify", &check(), &env, &commit_id).is_err());
+    assert!(prepare(root, "verify", &check(), &env, &commit_id, &[]).is_err());
     fs::remove_file(root.join("untracked.txt")).unwrap();
     // A tracked source edit is refused too; only resolved locks may differ.
     fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 3 }\n").unwrap();
-    assert!(prepare(root, "verify", &check(), &env, &commit_id).is_err());
+    assert!(prepare(root, "verify", &check(), &env, &commit_id, &[]).is_err());
     git(root, &["checkout", "--", "src/lib.rs"]);
     // A new commit moves the tree and the key.
     fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
@@ -624,7 +625,7 @@ fn a_stored_verdict_makes_the_cached_run_skip_the_check_entirely() {
         "-c".into(),
         "echo ran >> .ccid/counter".into(),
     ]];
-    let prepared = prepare(root, "verify", &manifest_check, &env, &commit_id).unwrap();
+    let prepared = prepare(root, "verify", &manifest_check, &env, &commit_id, &[]).unwrap();
     let tool = Tool {
         sha256: "c".repeat(64),
         source_revision: "a".repeat(40),
@@ -682,12 +683,12 @@ fn a_compiler_selector_is_its_program_and_flags_stay_declared() {
     let root = fixture.path();
     let env = environment();
     let commit_id = commit(root, None, &env).unwrap();
-    let plain = prepare(root, "verify", &check(), &env, &commit_id).unwrap();
+    let plain = prepare(root, "verify", &check(), &env, &commit_id, &[]).unwrap();
     // A cache wrapper in front of the same compiler changes no result.
     let mut wrapper = env.clone();
     wrapper.insert("CC".into(), "sccache-corbet cc".into());
     assert_eq!(
-        prepare(root, "verify", &check(), &wrapper, &commit_id)
+        prepare(root, "verify", &check(), &wrapper, &commit_id, &[])
             .unwrap()
             .key,
         plain.key
@@ -696,7 +697,7 @@ fn a_compiler_selector_is_its_program_and_flags_stay_declared() {
     let mut flags = env.clone();
     flags.insert("CC".into(), "cc -m32".into());
     assert_ne!(
-        prepare(root, "verify", &check(), &flags, &commit_id)
+        prepare(root, "verify", &check(), &flags, &commit_id, &[])
             .unwrap()
             .key,
         plain.key
@@ -741,7 +742,7 @@ fn a_pass_from_another_producing_binary_is_refreshed_not_kept_forever() {
         store.path().as_os_str().to_owned(),
     );
     let commit_id = commit(root, None, &env).unwrap();
-    let prepared = prepare(root, "verify", &check(), &env, &commit_id).unwrap();
+    let prepared = prepare(root, "verify", &check(), &env, &commit_id, &[]).unwrap();
     let producer = Producer {
         kind: ProducerKind::Lane,
         identity: Some("lane".into()),
