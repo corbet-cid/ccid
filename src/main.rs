@@ -186,6 +186,16 @@ enum Action {
         #[arg(long, hide = true)]
         parent_watch: bool,
     },
+    /// Resolve the npm lock outside the declared source and retain it as an artifact (manual job, never a verdict).
+    ResolveLock {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = ".ci/ccid.toml")]
+        manifest: PathBuf,
+        /// Resolve the npm lock (npm install --package-lock-only); without it Rust resolution is refused as retired.
+        #[arg(long)]
+        npm: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -594,6 +604,25 @@ fn main() -> ExitCode {
                 }
                 Err(error) => Err(error),
             }
+        }
+        Action::ResolveLock {
+            repo,
+            manifest,
+            npm,
+        } => {
+            if let Err(error) =
+                ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
+            {
+                eprintln!("ccid: cannot install cancellation handler: {error}");
+                return ExitCode::from(2);
+            }
+            return match ccid::resolve_lock::run(&repo, &manifest, npm) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid resolve-lock: {error}");
+                    ExitCode::from(2)
+                }
+            };
         }
     };
     match outcome {

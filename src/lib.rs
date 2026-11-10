@@ -36,6 +36,7 @@ pub mod job_run;
 pub mod jobs;
 pub mod push;
 pub mod render;
+pub mod resolve_lock;
 pub mod resolver;
 mod runner;
 pub mod rustc_diag;
@@ -140,6 +141,9 @@ struct Manifest {
     /// Which jobs gate landing (see `verdict`). Absent: `verify`, if declared.
     #[serde(default)]
     verdict: Option<Verdict>,
+    /// Data for `ccid resolve-lock` (npm lock retention). Absent: defaults.
+    #[serde(default)]
+    resolve: Option<resolve_lock::Config>,
 }
 /// The jobs whose success is the commit's aggregated verdict; every other job
 /// (release, publish, scheduled gates) reports under its own non-gating context.
@@ -199,6 +203,13 @@ fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
         ));
     }
     Ok((parsed, bytes))
+}
+
+/// Read the `[resolve]` table of a repository manifest for `ccid
+/// resolve-lock`; a missing table means defaults.
+pub(crate) fn resolve_config(root: &Path, manifest: &Path) -> Result<resolve_lock::Config> {
+    let (parsed, _) = load_manifest(root, manifest)?;
+    Ok(parsed.resolve.unwrap_or_default())
 }
 
 /// Resolve comma-separated selectors to declared check names and validate the
