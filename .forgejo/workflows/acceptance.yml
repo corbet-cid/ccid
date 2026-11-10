@@ -7,13 +7,8 @@ on:
 concurrency:
   group: ccid-acceptance-${{ github.ref }}
   cancel-in-progress: true
-# The speed profile every CI compile shares: no incremental state, no debug information.
 env:
-  CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_TEST_DEBUG: "0"
-  CARGO_PROFILE_RELEASE_DEBUG: "0"
-  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "1"
 jobs:
   cache-acceptance:
     runs-on: heavy
@@ -21,8 +16,8 @@ jobs:
       - name: Fetch the exact commit and run the declared checks
         env:
           CCID_FORGE_TOKEN: ${{ github.token }}
-          CCID_REVISION: 10a28f64c3bb63dfade833dd219cba0f504c9345
-          CCID_TOOL_SHA256: fe74ddd559238d99c9fad0655468edebac57be6031156ccbc09e35fb88959243
+          CCID_REVISION: 3bd0c9a089abd341f65f7cabd44cf608e8400b03
+          CCID_TOOL_SHA256: c1467201662056492c89968ad2c38bcd6eef30e1359466a54bac978cacbca9b3
         run: |
           set -eu
           # A runner may name CCID_SOURCE_ROOT: the source then lives in a stable directory per repository, job and slot instead of the per-task directory, so absolute source
@@ -72,15 +67,18 @@ jobs:
           if [ -z "$fetched" ]; then
             echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2
             for attempt in 1 2 3; do
-              if GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
+              if GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
               [ "$attempt" -lt 3 ] && sleep 5
             done
           fi
           [ -n "$fetched" ] || { echo "cannot fetch ${{ github.sha }}" >&2; exit 2; }
-          # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the fetch above carries the token, so does the LFS transfer).
+          # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the LFS transfer authenticates with Basic).
           GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
           if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
-            git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" lfs pull origin
+            # The LFS endpoint wants HTTP Basic (the "token" scheme git itself accepts is refused with 401), and its batch answer carries a credential for the object downloads: a
+            # credential helper supplies Basic exactly once (a fixed extra header would be sent twice and the forge answers 400). `lfs install --local` makes `lfs pull` check the files out.
+            git lfs install --local --skip-smudge
+            git -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$CCID_FORGE_TOKEN"; }; f' lfs pull origin
           fi
           git clean --quiet -ffdx
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
@@ -119,8 +117,8 @@ jobs:
       - name: Fetch the exact commit and run the declared checks
         env:
           CCID_FORGE_TOKEN: ${{ github.token }}
-          CCID_REVISION: 10a28f64c3bb63dfade833dd219cba0f504c9345
-          CCID_TOOL_SHA256: fe74ddd559238d99c9fad0655468edebac57be6031156ccbc09e35fb88959243
+          CCID_REVISION: 3bd0c9a089abd341f65f7cabd44cf608e8400b03
+          CCID_TOOL_SHA256: c1467201662056492c89968ad2c38bcd6eef30e1359466a54bac978cacbca9b3
         run: |
           set -eu
           # A runner may name CCID_SOURCE_ROOT: the source then lives in a stable directory per repository, job and slot instead of the per-task directory, so absolute source
@@ -170,15 +168,18 @@ jobs:
           if [ -z "$fetched" ]; then
             echo "local copy lacks ${{ github.sha }}, fetching from the forge" >&2
             for attempt in 1 2 3; do
-              if GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
+              if GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 fetch; then fetched=1; break; fi
               [ "$attempt" -lt 3 ] && sleep 5
             done
           fi
           [ -n "$fetched" ] || { echo "cannot fetch ${{ github.sha }}" >&2; exit 2; }
-          # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the fetch above carries the token, so does the LFS transfer).
+          # Git LFS: a repository that tracks files with LFS gets the real content, not the pointer files (the LFS transfer authenticates with Basic).
           GIT_LFS_SKIP_SMUDGE=1 git checkout --quiet --force --detach FETCH_HEAD
           if git show FETCH_HEAD:.gitattributes 2>/dev/null | grep -q 'filter=lfs'; then
-            git -c "http.extraHeader=Authorization: token $CCID_FORGE_TOKEN" lfs pull origin
+            # The LFS endpoint wants HTTP Basic (the "token" scheme git itself accepts is refused with 401), and its batch answer carries a credential for the object downloads: a
+            # credential helper supplies Basic exactly once (a fixed extra header would be sent twice and the forge answers 400). `lfs install --local` makes `lfs pull` check the files out.
+            git lfs install --local --skip-smudge
+            git -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$CCID_FORGE_TOKEN"; }; f' lfs pull origin
           fi
           git clean --quiet -ffdx
           : "${CCID_TOOL_ROOT:?the runner must provide CCID_TOOL_ROOT}"
