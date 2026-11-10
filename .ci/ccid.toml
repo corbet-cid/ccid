@@ -61,6 +61,20 @@ checks = ["compile"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]
 
+# The rendered check-shell's runtime contract (src/render/check-shell.nix): a
+# C++ program and a Rust binary with a C++ dependency linked inside it have
+# only existing RUNPATH entries and start under `env -i`.
+[checks.check-shell-probe]
+kind = "commands"
+commands = [["bash", ".ci/check-shell-probe.sh"]]
+
+[jobs.check-shell-probe]
+scheduler = "forgejo"
+runs_on = "heavy"
+checks = ["check-shell-probe"]
+workflow = "ci"
+command = ["ccid:run-declared-checks"]
+
 [checks.native-compile-cache]
 kind = "commands"
 commands = [["cargo", "test", "--release", "--locked", "--test", "it", "--", "--ignored", "--nocapture", "native_compile_cache"]]

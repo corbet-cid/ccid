@@ -1,0 +1,10 @@
+# The Rust probe: a binary with a C++ dependency against libc++, the shape of a
+# crate that links a static C++ library plus `-lc++` itself.
+[package]
+name = "check-shell-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: the probe is never a member of the repository's.
+[workspace]

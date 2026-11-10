@@ -2,7 +2,7 @@
   "schema": 1,
   "generator": "ccid render v1",
   "tool_revision": "10a28f64c3bb63dfade833dd219cba0f504c9345",
-  "manifest_sha256": "074c859df8c21e185e67cc87b5746b1ca3c608a2dc1a8ddab11e2411da90a26d",
+  "manifest_sha256": "01ea3bb5890290877f02414b2c5993e7961f51e8c3a6e08a16d04020dddb849e",
   "jobs": {
     "build": {
       "job": "build",
@@ -31,6 +31,19 @@
       "events": [
         "manual"
       ],
+      "archive_inputs": true
+    },
+    "check-shell-probe": {
+      "job": "check-shell-probe",
+      "scheduler": "forgejo",
+      "checks": [
+        "check-shell-probe"
+      ],
+      "workflow": "ci",
+      "command": [
+        "ccid:run-declared-checks"
+      ],
+      "runs_on": "heavy",
       "archive_inputs": true
     },
     "compile": {

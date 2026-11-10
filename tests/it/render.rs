@@ -152,6 +152,12 @@ fn check_shell_table_renders_one_shared_shell_and_removing_it_cleans_up() {
     assert!(text.contains("llvmPackages.libclang.lib"));
     assert!(text.contains("wild"));
     assert!(text.contains("mold"));
+    // The RUNPATH contract: every runtime library directory as an rpath, and
+    // no self rpath into the shell's $out, which never exists.
+    assert!(text.contains(
+        "NIX_LDFLAGS = lib.concatMapStringsSep \" \" (dir: \"-rpath ${dir}\") rpathDirs;"
+    ));
+    assert!(text.contains("NIX_NO_SELF_RPATH = true;"));
     assert!(render(root.path(), true)
         .unwrap()
         .files
