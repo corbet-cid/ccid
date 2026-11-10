@@ -131,11 +131,18 @@ struct Transition {
     previous: &'static str,
 }
 
-const TRANSITIONS: &[Transition] = &[Transition {
-    template: Template::CheckShell,
-    since: "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
-    previous: include_str!("render/previous/check-shell.nix"),
-}];
+const TRANSITIONS: &[Transition] = &[
+    Transition {
+        template: Template::CheckShell,
+        since: "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
+        previous: include_str!("render/previous/check-shell.nix"),
+    },
+    Transition {
+        template: Template::ForgejoShim,
+        since: "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
+        previous: include_str!("render/previous/forgejo-shim.yml"),
+    },
+];
 
 /// Every combination of declared transitions is one render: the cap keeps
 /// `render --check` at most 2^4 renders.
