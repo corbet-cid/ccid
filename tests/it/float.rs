@@ -617,6 +617,15 @@ fn a_ci_spelling_of_the_forge_host_floats_and_keys_like_the_land() {
 fn cached_twice_hits_and_a_new_dependency_commit_misses() {
     let moon = PathBuf::from(std::env::var_os("CCID_TEST_MOON").expect("preinstalled moon"));
     let world = World::new(&["forge.example"]);
+    // `show.sh` also asks git for HEAD and the file list: the purity scan reads that as commit
+    // provenance, which never gets a content verdict. This test is about the caches, so its
+    // check only reports the dependency commit it builds.
+    fs::write(
+        world.consumer.join("show.sh"),
+        "set -eu\nawk '/^name = \"dep\"$/ {f=1} f && /^source = / {print \"dep-source=\" $3; exit}' Cargo.lock\n",
+    )
+    .unwrap();
+    commit_all(&world.consumer, "content only");
     let store = world.temp.path().join("results");
     fs::create_dir(&store).unwrap();
     let declared = world.declared();
@@ -641,8 +650,10 @@ fn cached_twice_hits_and_a_new_dependency_commit_misses() {
     };
     let digest_of = |output: &Output| events(output, "float-resolve")[0]["digest"].clone();
     let first = run();
+    println!("--- first ---\n{}", text(&first));
     assert!(first.status.success(), "{}", text(&first));
     let second = run();
+    println!("--- second ---\n{}", text(&second));
     assert!(second.status.success(), "{}", text(&second));
     assert_eq!(digest_of(&first), digest_of(&second));
     assert!(
