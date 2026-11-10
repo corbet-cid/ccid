@@ -411,9 +411,12 @@ fn a_child_verifies_the_hand_over_and_refuses_a_tampered_or_missing_one() {
     orphan.remove(OsStr::new(RESOLUTION_ENV));
     assert!(establish(repo.path(), &mut orphan, false).is_err());
     // A link in place of a lock is never followed.
-    fs::remove_file(&file).unwrap();
-    std::os::unix::fs::symlink(repo.path().join("Cargo.lock"), &file).unwrap();
-    assert!(establish(repo.path(), &mut env.clone(), true).is_err());
+    #[cfg(unix)]
+    {
+        fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(repo.path().join("Cargo.lock"), &file).unwrap();
+        assert!(establish(repo.path(), &mut env.clone(), true).is_err());
+    }
 }
 
 #[test]
@@ -550,12 +553,15 @@ fn lock_paths_must_stay_inside_the_directory_they_are_written_to() {
     fs::create_dir_all(temp.path().join("repo")).unwrap();
     let root = temp.path().join("repo").canonicalize().unwrap();
     assert!(resolved_destination(&inside).unwrap().starts_with(&root));
-    let link = temp.path().join("link");
-    std::os::unix::fs::symlink(&root, &link).unwrap();
-    assert!(
-        resolved_destination(&link.join("new/dir"))
-            .unwrap()
-            .starts_with(&root),
-        "a link into the repository is resolved before the comparison"
-    );
+    #[cfg(unix)]
+    {
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert!(
+            resolved_destination(&link.join("new/dir"))
+                .unwrap()
+                .starts_with(&root),
+            "a link into the repository is resolved before the comparison"
+        );
+    }
 }
