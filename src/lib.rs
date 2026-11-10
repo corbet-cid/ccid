@@ -33,6 +33,7 @@ pub mod compile_cache;
 pub mod content_pins;
 pub mod coverage;
 mod dependency;
+pub mod first_party;
 pub mod fleet;
 #[cfg(unix)]
 pub mod job_run;
@@ -157,6 +158,10 @@ struct Manifest {
     #[serde(default)]
     #[allow(dead_code)]
     content_pins: Vec<content_pins::Pin>,
+    /// First-party branch and revision rules checked by `ccid first-party`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    first_party: Option<first_party::Config>,
 }
 /// The jobs whose success is the commit's aggregated verdict; every other job
 /// (release, publish, scheduled gates) reports under its own non-gating context.

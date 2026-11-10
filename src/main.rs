@@ -204,6 +204,8 @@ enum Action {
     },
     /// Check locked content pins (fixture digests, native artifact versions).
     ContentPins(ccid::content_pins::Options),
+    /// Require main declarations and one resolved revision per first-party crate.
+    FirstParty(ccid::first_party::Options),
 }
 
 fn main() -> ExitCode {
@@ -646,6 +648,15 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid content-pins: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::FirstParty(options) => {
+            return match ccid::first_party::run(&options) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid first-party: {error}");
                     ExitCode::from(2)
                 }
             };

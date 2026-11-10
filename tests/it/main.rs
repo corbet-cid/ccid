@@ -20,6 +20,7 @@ mod channel;
 mod cli;
 mod content_pins;
 mod dependency_resolution;
+mod first_party;
 mod fleet;
 mod freshness;
 mod job_execution;
