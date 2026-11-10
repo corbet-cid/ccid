@@ -249,10 +249,213 @@ fn first_party_self_test_and_metadata() {
     assert_eq!(self_test.status.code(), Some(0), "{}", text(&self_test));
     assert!(String::from_utf8_lossy(&self_test.stdout)
         .contains("first-party: the self-test is ccid's own test suite"));
+}
 
-    let metadata = ccid_direct(root, Some(&fleet), &["--metadata", "x.json"]);
-    assert_eq!(metadata.status.code(), Some(2), "{}", text(&metadata));
-    assert!(String::from_utf8_lossy(&metadata.stderr).contains("--metadata is not supported yet"));
+/// The `cargo metadata` document of a workspace member `fixture` that depends on the
+/// first-party package `example` locked at `example_source`.
+fn graph(example_source: &str) -> String {
+    let declaration = "git+https://forge.example/org-a/example?branch=main";
+    serde_json::json!({
+        "version": 1,
+        "packages": [
+            {"id": "fixture", "name": "fixture", "version": "0.1.0", "source": null,
+             "targets": [{"kind": ["lib"], "name": "fixture"}],
+             "dependencies": [{"name": "example", "source": declaration, "kind": null,
+                               "target": null, "rename": null}]},
+            {"id": "example", "name": "example", "version": "0.1.0", "source": example_source,
+             "targets": [{"kind": ["lib"], "name": "example"}], "dependencies": []},
+        ],
+        "workspace_members": ["fixture"],
+        "resolve": {"root": "fixture", "nodes": [
+            {"id": "fixture", "dependencies": ["example"], "features": [],
+             "deps": [{"name": "example", "pkg": "example",
+                       "dep_kinds": [{"kind": null, "target": null}]}]},
+            {"id": "example", "dependencies": [], "deps": [], "features": []},
+        ]},
+    })
+    .to_string()
+}
+
+fn locked_example() -> String {
+    format!(
+        "git+https://forge.example/org-a/example?branch=main#{}",
+        "a".repeat(40)
+    )
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn first_party_metadata_passes_refuses_and_reports_operational_errors() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    repo_with_manifest(root, "", Some(&valid_lock()));
+    git_init(root);
+    let fleet = channel(root, "channel.json");
+    let outside = tempfile::TempDir::new().unwrap();
+    let write = |name: &str, content: &str| -> String {
+        let path = outside.path().join(name);
+        fs::write(&path, content).unwrap();
+        path.display().to_string()
+    };
+
+    let good = write("good.json", &graph(&locked_example()));
+    let pass = ccid_direct(root, Some(&fleet), &["--metadata", &good]);
+    assert_eq!(pass.status.code(), Some(0), "{}", text(&pass));
+    let stdout = String::from_utf8_lossy(&pass.stdout);
+    assert!(
+        stdout.contains("First-party declarations follow main; locked crate revisions are unique")
+    );
+    assert!(
+        stdout.contains("First-party dependencies resolve once each to a complete source revision")
+    );
+
+    // A graph refusal is exit 1 and names the graph file.
+    let floating = locked_example().replace("branch=main", "branch=develop");
+    let bad = write("bad.json", &graph(&floating));
+    let refused = ccid_direct(root, Some(&fleet), &["--metadata", &bad]);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused));
+    assert!(
+        stderr(&refused).contains(&format!(
+            "check-first-party: Mismatched selected dependency source ({bad})"
+        )),
+        "{}",
+        text(&refused)
+    );
+
+    // Unreadable or unparseable graph input is exit 2.
+    let missing = outside.path().join("absent.json").display().to_string();
+    let absent = ccid_direct(root, Some(&fleet), &["--metadata", &missing]);
+    assert_eq!(absent.status.code(), Some(2), "{}", text(&absent));
+    assert!(
+        stderr(&absent).contains("ccid first-party: cannot read"),
+        "{}",
+        text(&absent)
+    );
+    let garbage = write("garbage.json", "{not json");
+    let broken = ccid_direct(root, Some(&fleet), &["--metadata", &garbage]);
+    assert_eq!(broken.status.code(), Some(2), "{}", text(&broken));
+    assert!(
+        stderr(&broken).contains("ccid first-party: cannot parse"),
+        "{}",
+        text(&broken)
+    );
+    let array = write("array.json", "[]");
+    let wrong = ccid_direct(root, Some(&fleet), &["--metadata", &array]);
+    assert_eq!(wrong.status.code(), Some(2), "{}", text(&wrong));
+    assert!(
+        stderr(&wrong).contains("not a JSON object"),
+        "{}",
+        text(&wrong)
+    );
+
+    // A JSON object that is not a cargo metadata graph is a refusal, never a pass.
+    let empty = write("empty.json", "{}");
+    let foreign = ccid_direct(root, Some(&fleet), &["--metadata", &empty]);
+    assert_eq!(foreign.status.code(), Some(1), "{}", text(&foreign));
+    assert!(
+        stderr(&foreign).contains("check-first-party: Missing original Cargo metadata graph"),
+        "{}",
+        text(&foreign)
+    );
+
+    // The graph and the manifest scan are exclusive in one flag only.
+    let exclusive = ccid_direct(
+        root,
+        Some(&fleet),
+        &["--metadata", &good, "--manifest-only"],
+    );
+    assert_eq!(exclusive.status.code(), Some(2), "{}", text(&exclusive));
+    assert!(stderr(&exclusive).contains("--metadata and --manifest-only are exclusive"));
+
+    // Fleet data is required here too.
+    let no_fleet = ccid_direct(root, None, &["--metadata", &good]);
+    assert_eq!(no_fleet.status.code(), Some(2), "{}", text(&no_fleet));
+}
+
+/// The scan runs first, as in the scripts that took `--metadata` after their lock walk: its
+/// refusal is the one reported, while an unreadable graph file is read before the scan.
+#[test]
+fn first_party_metadata_follows_the_scan_and_reads_its_file_first() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    repo_with_manifest(
+        root,
+        "",
+        Some(&valid_lock().replace("branch=main", "branch=develop")),
+    );
+    git_init(root);
+    let fleet = channel(root, "channel.json");
+    let outside = tempfile::TempDir::new().unwrap();
+    let bad = outside.path().join("bad.json");
+    fs::write(
+        &bad,
+        graph(&locked_example().replace("branch=main", "branch=develop")),
+    )
+    .unwrap();
+    let bad = bad.display().to_string();
+
+    let refused = ccid_direct(root, Some(&fleet), &["--metadata", &bad]);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused));
+    assert!(
+        stderr(&refused).contains(
+            "check-first-party: Invalid first-party source selector for example (Cargo.lock)"
+        ),
+        "{}",
+        text(&refused)
+    );
+    let missing = outside.path().join("absent.json").display().to_string();
+    let absent = ccid_direct(root, Some(&fleet), &["--metadata", &missing]);
+    assert_eq!(absent.status.code(), Some(2), "{}", text(&absent));
+}
+
+/// `[first_party.graph] required` comes from the manifest: a graph without the package is
+/// refused, and an unknown graph field is a bad manifest.
+#[test]
+fn first_party_metadata_requires_the_manifest_declared_packages() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    repo_with_manifest(
+        root,
+        "[first_party.graph]\nrequired = [\"core\"]\n",
+        Some(&valid_lock()),
+    );
+    git_init(root);
+    let fleet = channel(root, "channel.json");
+    let outside = tempfile::TempDir::new().unwrap();
+    let good = outside.path().join("good.json");
+    fs::write(&good, graph(&locked_example())).unwrap();
+    let good = good.display().to_string();
+
+    let refused = ccid_direct(root, Some(&fleet), &["--metadata", &good]);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused));
+    assert!(
+        stderr(&refused).contains(&format!(
+            "check-first-party: Missing, invalid or duplicated first-party dependency: core ({good})"
+        )),
+        "{}",
+        text(&refused)
+    );
+    // Without --metadata the table is inert: the scan alone passes.
+    let scan = ccid_direct(root, Some(&fleet), &[]);
+    assert_eq!(scan.status.code(), Some(0), "{}", text(&scan));
+
+    fs::write(
+        root.join(".ci/ccid.toml"),
+        "schema = 1\nproject = 'fixture'\n[first_party.graph]\nunknown = true\n",
+    )
+    .unwrap();
+    let bad_table = ccid_direct(root, Some(&fleet), &["--metadata", &good]);
+    assert_eq!(bad_table.status.code(), Some(2), "{}", text(&bad_table));
+    fs::write(
+        root.join(".ci/ccid.toml"),
+        "schema = 1\nproject = 'fixture'\n[first_party.graph]\nrequired = ['']\n",
+    )
+    .unwrap();
+    let empty_name = ccid_direct(root, Some(&fleet), &["--metadata", &good]);
+    assert_eq!(empty_name.status.code(), Some(2), "{}", text(&empty_name));
 }
 
 #[test]

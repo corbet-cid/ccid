@@ -7,14 +7,19 @@
 //! revision. The fleet data (`src/fleet.rs`) decides what is first-party; no
 //! owner list lives here.
 //!
+//! `--metadata FILE` adds the same policy on the resolved `cargo metadata`
+//! graph (the port of `check-pins.mjs`, the `--metadata` modes of the
+//! `check-first-party.py` variants and their `--metadata-issuers` helper).
+//!
 //! Exit statuses: 0 passes, 1 refusal (`check-first-party: <message> (<path>)`),
 //! 2 operational error (`ccid first-party: <error>`).
 
 use crate::{failure, fleet::Fleet, fleet::Origin, Result};
 use clap::Args;
 use serde::Deserialize;
+use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -42,6 +47,17 @@ pub struct Retained {
     pub version: Option<String>,
 }
 
+/// The `[first_party.graph]` table: data for `--metadata` only.
+#[derive(Debug, Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Graph {
+    /// First-party packages that must appear exactly once, with a first-party
+    /// source, in every resolved graph (a shared library every repository of the
+    /// fleet depends on). A graph without one is refused.
+    #[serde(default)]
+    pub required: Vec<String>,
+}
+
 /// The `[first_party]` table of `.ci/ccid.toml`. Absent table means defaults.
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
@@ -64,10 +80,24 @@ pub struct Config {
     /// Retained original owners.
     #[serde(default)]
     pub retained: Vec<Retained>,
+    /// Data for `--metadata`.
+    #[serde(default)]
+    pub graph: Graph,
 }
 
 impl Config {
     fn validate(&self) -> Result<()> {
+        let mut required = BTreeSet::new();
+        for name in &self.graph.required {
+            if name.is_empty() {
+                return Err(failure("first_party graph required name must not be empty"));
+            }
+            if !required.insert(name.as_str()) {
+                return Err(failure(format!(
+                    "duplicate first_party graph required name {name}"
+                )));
+            }
+        }
         for name in &self.skip {
             if name.is_empty()
                 || name.contains('/')
@@ -125,7 +155,8 @@ pub struct Options {
     /// Print the self-test pointer and exit 0.
     #[arg(long)]
     pub self_test: bool,
-    /// Refused: the resolved-graph mode lives in a later lane.
+    /// Also check the resolved `cargo metadata --format-version 1` graph in FILE
+    /// (read relative to the working directory) after the manifest and lock scan.
     #[arg(long)]
     pub metadata: Option<PathBuf>,
 }
@@ -166,6 +197,35 @@ fn package_source(entry: &toml::Value) -> &str {
     entry.get("source").and_then(|v| v.as_str()).unwrap_or("")
 }
 
+/// The retained entry a locked package matches: its source equals
+/// `git+<repository>?branch=<branch>#<40-hex>` exactly and the version agrees when
+/// the entry names one.
+fn retained_match<'a>(
+    config: &'a Config,
+    name: &str,
+    version: Option<&str>,
+    raw: &str,
+) -> Option<&'a Retained> {
+    if !raw.starts_with("git+") {
+        return None;
+    }
+    let (repository, query, fragment) = split_source(raw);
+    config
+        .retained
+        .iter()
+        .filter(|entry| entry.package == name)
+        .find(|entry| {
+            if let Some(expected) = entry.version.as_deref() {
+                if version != Some(expected) {
+                    return false;
+                }
+            }
+            repository == entry.repository
+                && query == format!("branch={}", entry.branch)
+                && is_hex40(fragment)
+        })
+}
+
 /// Pure lock rule, testable without files. The `Err` message is the text after
 /// `check-first-party: `.
 pub fn check_lock(
@@ -203,27 +263,7 @@ pub fn check_lock(
                 "First-party source must use its canonical owner URL: {raw}"
             ));
         }
-        let version = package_version(package);
-        let mut retained_match = false;
-        for entry in config.retained.iter().filter(|e| e.package == name) {
-            if let Some(expected) = entry.version.as_deref() {
-                if version != Some(expected) {
-                    continue;
-                }
-            }
-            if !raw.starts_with("git+") {
-                continue;
-            }
-            let (repository, query, fragment) = split_source(raw);
-            if repository == entry.repository
-                && query == format!("branch={}", entry.branch)
-                && is_hex40(fragment)
-            {
-                retained_match = true;
-                break;
-            }
-        }
-        if retained_match {
+        if retained_match(config, name, package_version(package), raw).is_some() {
             continue;
         }
         let Some(_) = fleet.classify(raw) else {
@@ -314,6 +354,394 @@ pub fn check_manifest(
     check_manifest_inner(value, fleet, config, None)
 }
 
+/// A refusal message: the text after `check-first-party: `.
+type Refusal<T> = std::result::Result<T, String>;
+
+/// Target kinds whose target name is the name a dependent crate uses.
+const LIBRARY_KINDS: [&str; 6] = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
+
+/// One package of the resolved graph, with only the declarations its selected
+/// dependency edges expose (an unused dev, optional or target-specific
+/// declaration stays under its owner's policy).
+struct Selected<'a> {
+    name: &'a str,
+    version: Option<&'a str>,
+    source: Option<&'a str>,
+    declarations: Vec<&'a Value>,
+}
+
+/// The exact original source an issuer package resolved to and the declaration it
+/// must be reached through; both `None` when the package follows main.
+struct Issuer {
+    resolved: Option<String>,
+    declaration: Option<String>,
+}
+
+fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+fn array<'a>(value: &'a Value, key: &str) -> Option<&'a Vec<Value>> {
+    value.get(key).and_then(Value::as_array)
+}
+
+/// The resolved graph spells every git source `git+<url>`; a bare URL is not one.
+fn graph_first_party(fleet: &Fleet, source: Option<&str>) -> bool {
+    source.is_some_and(|source| source.starts_with("git+") && fleet.classify(source).is_some())
+}
+
+/// A package as the lock rule sees it: name, version and source.
+fn lock_entry(name: &str, version: Option<&str>, source: Option<&str>) -> toml::Value {
+    let mut table = toml::Table::new();
+    table.insert("name".to_owned(), toml::Value::String(name.to_owned()));
+    if let Some(version) = version {
+        table.insert(
+            "version".to_owned(),
+            toml::Value::String(version.to_owned()),
+        );
+    }
+    if let Some(source) = source {
+        table.insert("source".to_owned(), toml::Value::String(source.to_owned()));
+    }
+    toml::Value::Table(table)
+}
+
+/// Whether `declaration` (a package's dependency record) is the one the edge
+/// `edge_name` -> `selected` resolved through: same package, the same name in the
+/// dependent's code (the rename, else the library target name), the same kind and
+/// target.
+fn declares(
+    declaration: &Value,
+    selected: &Value,
+    edge_name: Option<&str>,
+    kind: Option<&Value>,
+    target: Option<&Value>,
+) -> bool {
+    if text(declaration, "name") != text(selected, "name") {
+        return false;
+    }
+    let named = match declaration.get("rename") {
+        None | Some(Value::Null) => array(selected, "targets").is_some_and(|targets| {
+            targets.iter().any(|candidate| {
+                array(candidate, "kind").is_some_and(|kinds| {
+                    kinds
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|kind| LIBRARY_KINDS.contains(&kind))
+                }) && text(candidate, "name")
+                    .is_some_and(|name| Some(name.replace('-', "_")).as_deref() == edge_name)
+            })
+        }),
+        Some(rename) => rename
+            .as_str()
+            .is_some_and(|rename| Some(rename.replace('-', "_")).as_deref() == edge_name),
+    };
+    named && declaration.get("kind") == kind && declaration.get("target") == target
+}
+
+/// The packages of the resolved graph with their selected declarations: package
+/// ids unique, nodes = packages, root and workspace members resolved, `deps` and
+/// `dependencies` consistent, every selected edge backed by a declaration of the
+/// same kind and target, and a first-party declaration whose source is the
+/// selected package's source without its fragment.
+fn resolved_packages<'a>(metadata: &'a Value, fleet: &Fleet) -> Refusal<Vec<Selected<'a>>> {
+    let resolve = metadata
+        .get("resolve")
+        .filter(|resolve| array(resolve, "nodes").is_some())
+        .ok_or("Missing resolved dependency graph")?;
+    let nodes = array(resolve, "nodes").ok_or("Missing resolved dependency graph")?;
+    let packages = array(metadata, "packages").ok_or("Missing original Cargo metadata graph")?;
+    let mut by_id: BTreeMap<&str, &Value> = BTreeMap::new();
+    for package in packages {
+        let Some(id) = text(package, "id") else {
+            return Err("Missing or duplicated package ID".to_owned());
+        };
+        if by_id.insert(id, package).is_some() {
+            return Err("Missing or duplicated package ID".to_owned());
+        }
+        if text(package, "name").is_none() {
+            return Err("Missing package name".to_owned());
+        }
+    }
+    let mut by_node: BTreeMap<&str, &Value> = BTreeMap::new();
+    for node in nodes {
+        let id = text(node, "id")
+            .filter(|id| by_id.contains_key(id) && !by_node.contains_key(id))
+            .ok_or("Unknown or duplicated resolved package ID")?;
+        by_node.insert(id, node);
+    }
+    if by_node.len() != by_id.len() {
+        return Err("Incomplete resolved package graph".to_owned());
+    }
+    match resolve.get("root") {
+        Some(Value::Null) => {}
+        Some(Value::String(root)) if by_node.contains_key(root.as_str()) => {}
+        _ => return Err("Unknown resolved root package".to_owned()),
+    }
+    let members = array(metadata, "workspace_members")
+        .filter(|members| {
+            members
+                .iter()
+                .all(|id| id.as_str().is_some_and(|id| by_node.contains_key(id)))
+        })
+        .ok_or("Unknown or missing resolved workspace members")?;
+    if members.is_empty() {
+        return Err("Missing actual workspace package".to_owned());
+    }
+    let mut selected = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let package = text(node, "id")
+            .and_then(|id| by_id.get(id))
+            .copied()
+            .ok_or("Unknown or duplicated resolved package ID")?;
+        let (Some(deps), Some(dependencies)) = (array(node, "deps"), array(node, "dependencies"))
+        else {
+            return Err("Missing resolved dependency edges".to_owned());
+        };
+        let edge_ids: BTreeSet<Option<&str>> = deps.iter().map(|edge| text(edge, "pkg")).collect();
+        let dependency_ids: BTreeSet<Option<&str>> =
+            dependencies.iter().map(Value::as_str).collect();
+        if edge_ids.len() != dependency_ids.len()
+            || dependency_ids.iter().any(|id| !edge_ids.contains(id))
+        {
+            return Err("Inconsistent resolved dependency edges".to_owned());
+        }
+        let declared =
+            array(package, "dependencies").ok_or("Missing package dependency declarations")?;
+        let mut declarations = Vec::new();
+        for edge in deps {
+            let chosen = text(edge, "pkg")
+                .filter(|id| by_node.contains_key(id))
+                .and_then(|id| by_id.get(id))
+                .copied();
+            let kinds = array(edge, "dep_kinds").filter(|kinds| !kinds.is_empty());
+            let (Some(chosen), Some(kinds)) = (chosen, kinds) else {
+                return Err("Unknown or incomplete resolved dependency edge".to_owned());
+            };
+            let edge_name = text(edge, "name");
+            let expected_source =
+                text(chosen, "source").map(|source| source.split('#').next().unwrap_or(source));
+            for kind in kinds {
+                let selected_kind = kind.get("kind");
+                let selected_target = kind.get("target");
+                let valid_kind = match selected_kind {
+                    Some(Value::Null) => true,
+                    Some(Value::String(kind)) => kind == "dev" || kind == "build",
+                    _ => false,
+                };
+                let valid_target = matches!(selected_target, Some(Value::Null | Value::String(_)));
+                if !valid_kind || !valid_target {
+                    return Err("Invalid resolved dependency kind".to_owned());
+                }
+                let matching: Vec<&Value> = declared
+                    .iter()
+                    .filter(|declaration| {
+                        declares(
+                            declaration,
+                            chosen,
+                            edge_name,
+                            selected_kind,
+                            selected_target,
+                        )
+                    })
+                    .collect();
+                if matching.is_empty() {
+                    return Err("Missing selected dependency declaration".to_owned());
+                }
+                let mismatched = matching.iter().any(|declaration| {
+                    let source = text(declaration, "source");
+                    (graph_first_party(fleet, source)
+                        || graph_first_party(fleet, text(chosen, "source")))
+                        && source != expected_source
+                });
+                if mismatched {
+                    return Err("Mismatched selected dependency source".to_owned());
+                }
+                declarations.extend(matching);
+            }
+        }
+        selected.push(Selected {
+            name: text(package, "name").unwrap_or_default(),
+            version: text(package, "version"),
+            source: text(package, "source"),
+            declarations,
+        });
+    }
+    Ok(selected)
+}
+
+/// The retained entries in play in this graph. A retained package named by a
+/// package or a selected declaration must exist once, pass the lock rule, and
+/// every selected declaration of it must be the exact retained declaration or
+/// follow main; a package that matched its retained entry exactly is an issuer.
+fn retained_issuers<'a>(
+    selected: &[Selected<'_>],
+    fleet: &Fleet,
+    config: &'a Config,
+) -> Refusal<BTreeMap<&'a str, Issuer>> {
+    let mut issuers = BTreeMap::new();
+    let names: BTreeSet<&'a str> = config
+        .retained
+        .iter()
+        .map(|entry| entry.package.as_str())
+        .collect();
+    for name in names {
+        let named = selected.iter().any(|package| {
+            package.name == name
+                || package
+                    .declarations
+                    .iter()
+                    .any(|declaration| text(declaration, "name") == Some(name))
+        });
+        if !named {
+            continue;
+        }
+        let packages: Vec<&Selected<'_>> = selected
+            .iter()
+            .filter(|package| package.name == name)
+            .collect();
+        let [package] = packages.as_slice() else {
+            return Err(format!(
+                "Missing, invalid or duplicated first-party dependency: {name}"
+            ));
+        };
+        check_lock(
+            &[lock_entry(name, package.version, package.source)],
+            fleet,
+            config,
+        )?;
+        let matched = package
+            .source
+            .filter(|source| retained_match(config, name, package.version, source).is_some());
+        let declaration = matched.map(|source| source.split('#').next().unwrap_or(source));
+        for owner in selected {
+            for dependency in &owner.declarations {
+                if text(dependency, "name") != Some(name) {
+                    continue;
+                }
+                let raw = text(dependency, "source").unwrap_or("");
+                if Some(raw) == declaration {
+                    continue;
+                }
+                if !graph_first_party(fleet, Some(raw)) || split_source(raw).1 != "branch=main" {
+                    return Err(format!("Invalid first-party source selector for {name}"));
+                }
+            }
+        }
+        issuers.insert(
+            name,
+            Issuer {
+                resolved: matched.map(str::to_owned),
+                declaration: declaration.map(str::to_owned),
+            },
+        );
+    }
+    Ok(issuers)
+}
+
+/// A first-party package source (`resolved`) or declaration source must follow
+/// main, a resolved one with a complete 40-hex revision; an issuer's exact
+/// retained source is accepted as is. `rev_selectors` also accepts a revision pin
+/// (`rev=<40-hex>`, its resolution the same revision).
+fn check_graph_source(
+    source: &str,
+    resolved: bool,
+    name: &str,
+    issuers: &BTreeMap<&str, Issuer>,
+    fleet: &Fleet,
+    config: &Config,
+) -> Refusal<()> {
+    if let Some(issuer) = issuers.get(name) {
+        let exact = if resolved {
+            issuer.resolved.as_deref()
+        } else {
+            issuer.declaration.as_deref()
+        };
+        if exact == Some(source) {
+            return Ok(());
+        }
+    }
+    if config.canonical_only && matches!(fleet.classify(source), Some(Origin::Alias { .. })) {
+        return Err(format!(
+            "First-party source must use its canonical owner URL: {source}"
+        ));
+    }
+    let (_, query, fragment) = split_source(source);
+    let pin = query
+        .strip_prefix("rev=")
+        .filter(|revision| config.rev_selectors && is_hex40(revision));
+    let accepted = query == "branch=main" || pin.is_some();
+    let complete =
+        !resolved || (is_hex40(fragment) && pin.is_none_or(|revision| revision == fragment));
+    if accepted && complete {
+        return Ok(());
+    }
+    Err(if config.rev_selectors {
+        format!("Expected main or a matching transitive revision pin: {source}")
+    } else {
+        format!("Expected main and a complete resolved revision: {source}")
+    })
+}
+
+/// Pure graph rule, testable without files: the resolved `cargo metadata` graph
+/// is consistent, every first-party package and selected declaration follows
+/// main (retained issuers excepted) with a complete revision, and every
+/// first-party name, with every `[first_party.graph] required` name, resolves
+/// exactly once. The `Err` message is the text after `check-first-party: `.
+pub fn check_metadata(
+    metadata: &Value,
+    fleet: &Fleet,
+    config: &Config,
+) -> std::result::Result<(), String> {
+    let present = metadata.get("version") == Some(&Value::from(1))
+        && array(metadata, "packages").is_some_and(|packages| !packages.is_empty());
+    if !present {
+        return Err("Missing original Cargo metadata graph".to_owned());
+    }
+    let selected = resolved_packages(metadata, fleet)?;
+    let issuers = retained_issuers(&selected, fleet, config)?;
+    let mut names: Vec<&str> = config.graph.required.iter().map(String::as_str).collect();
+    let mut seen: BTreeSet<&str> = names.iter().copied().collect();
+    for package in &selected {
+        if graph_first_party(fleet, package.source) || issuers.contains_key(package.name) {
+            if seen.insert(package.name) {
+                names.push(package.name);
+            }
+            let source = package
+                .source
+                .ok_or_else(|| format!("Missing resolved revision for {}", package.name))?;
+            check_graph_source(source, true, package.name, &issuers, fleet, config)?;
+        }
+        for declaration in &package.declarations {
+            let Some(source) = text(declaration, "source") else {
+                continue;
+            };
+            if graph_first_party(fleet, Some(source)) {
+                let name = text(declaration, "name").unwrap_or_default();
+                check_graph_source(source, false, name, &issuers, fleet, config)?;
+            }
+        }
+    }
+    for name in names {
+        let named: Vec<&Selected<'_>> = selected
+            .iter()
+            .filter(|package| package.name == name)
+            .collect();
+        let exact = issuers
+            .get(name)
+            .and_then(|issuer| issuer.resolved.as_deref());
+        let valid = matches!(named.as_slice(), [package]
+            if graph_first_party(fleet, package.source)
+                || (package.source.is_some() && package.source == exact));
+        if !valid {
+            return Err(format!(
+                "Missing, invalid or duplicated first-party dependency: {name}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn git_files(root: &Path) -> Result<Vec<PathBuf>> {
     let output = Command::new("git")
         .arg("ls-files")
@@ -394,10 +822,8 @@ pub fn run(options: &Options) -> Result<u8> {
         println!("first-party: the self-test is ccid's own test suite");
         return Ok(0);
     }
-    if options.metadata.is_some() {
-        return Err(failure(
-            "--metadata is not supported yet (first-party graph lane)",
-        ));
+    if options.metadata.is_some() && options.manifest_only {
+        return Err(failure("--metadata and --manifest-only are exclusive"));
     }
     let environment: crate::Environment = std::env::vars_os().collect();
     let (fleet, _) = crate::fleet::load(&environment)?;
@@ -421,6 +847,9 @@ pub fn run(options: &Options) -> Result<u8> {
         toml::from_str(text).map_err(|error| failure(format!("cannot parse manifest: {error}")))?;
     let config = parsed.first_party.unwrap_or_default();
     config.validate()?;
+    // Unreadable or unparseable graph input is an operational error whatever the
+    // scan finds, so it is read before the scan.
+    let graph = options.metadata.as_deref().map(read_metadata).transpose()?;
     let mut files = if !options.archive && root.join(".git").exists() {
         git_files(&root)?
     } else {
@@ -494,7 +923,29 @@ pub fn run(options: &Options) -> Result<u8> {
         }
     }
     println!("First-party declarations follow main; locked crate revisions are unique");
+    if let (Some(graph), Some(path)) = (&graph, &options.metadata) {
+        if let Err(message) = check_metadata(graph, &fleet, &config) {
+            eprintln!("check-first-party: {message} ({})", path.display());
+            return Ok(1);
+        }
+        println!("First-party dependencies resolve once each to a complete source revision");
+    }
     Ok(0)
+}
+
+/// The resolved graph: a JSON object, as `cargo metadata --format-version 1` prints it.
+fn read_metadata(path: &Path) -> Result<Value> {
+    let bytes = fs::read(path)
+        .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| failure(format!("cannot parse {}: {error}", path.display())))?;
+    if !value.is_object() {
+        return Err(failure(format!(
+            "cannot parse {}: not a JSON object",
+            path.display()
+        )));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
