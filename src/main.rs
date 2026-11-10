@@ -191,6 +191,12 @@ enum Action {
         #[command(subcommand)]
         action: ccid::fleet::Action,
     },
+    /// Shared Rust toolchain lock and the wasm-bindgen test runner (Unix only).
+    #[cfg(unix)]
+    Toolchain {
+        #[command(subcommand)]
+        action: ccid::toolchain::Action,
+    },
 }
 
 fn main() -> ExitCode {
@@ -605,6 +611,16 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid fleet: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        #[cfg(unix)]
+        Action::Toolchain { action } => {
+            return match ccid::toolchain::run(action) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid toolchain: {error}");
                     ExitCode::from(2)
                 }
             };

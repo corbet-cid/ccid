@@ -27,3 +27,5 @@ mod prose_cli;
 mod quality_cli;
 mod render;
 mod resolver_config;
+#[cfg(unix)]
+mod toolchain;

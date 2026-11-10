@@ -41,6 +41,8 @@ pub mod resolver;
 mod runner;
 pub mod rustc_diag;
 mod source;
+#[cfg(unix)]
+pub mod toolchain;
 pub mod tor;
 pub(crate) mod tor_inputs;
 pub mod typescript_cache;
