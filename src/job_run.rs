@@ -517,6 +517,27 @@ fn execute_job(
 mod tests {
     use super::*;
 
+    /// Write an executable stub through a child process. A stub this process wrote itself would be
+    /// held open for writing, for a moment, by any child a concurrent test forks then, and the
+    /// stub's own exec fails with ETXTBSY ("Text file busy") while that child has not exec'd yet.
+    #[cfg(unix)]
+    fn write_stub(path: &std::path::Path, script: &str) {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "stub {}", path.display());
+    }
+
     fn quick() -> Pace {
         Pace {
             git: "git".into(),
@@ -560,7 +581,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fetch_retries_the_copy_then_asks_the_forge_with_the_rules_switched_off() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
@@ -570,8 +590,7 @@ mod tests {
              case \"$*\" in *fetch*) [ \"$GIT_CONFIG_SYSTEM\" = /dev/null ] && exit 0 || exit 1;; esac\nexit 0\n",
             log.display()
         );
-        fs::write(bin.join("git"), script).unwrap();
-        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        write_stub(&bin.join("git"), &script);
         let work = dir.path().join("work");
         fs::create_dir_all(&work).unwrap();
         let mut pace = quick();
@@ -596,7 +615,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lfs_pull_uses_the_shared_store_when_the_runner_names_one() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("git");
         let log = dir.path().join("log");
@@ -604,8 +622,7 @@ mod tests {
             "#!/bin/sh\necho \"$*\" >> {}\ncase \"$*\" in *show*) echo '*.bin filter=lfs';; esac\nexit 0\n",
             log.display()
         );
-        fs::write(&bin, script).unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        write_stub(&bin, &script);
         let work = dir.path().join("work");
         fs::create_dir_all(&work).unwrap();
         let store = dir.path().join("lfs-store");
