@@ -90,6 +90,19 @@ loses only the renderer-owned file. The generated file's content is the
 release's template, so the pin and the library set cannot drift between
 repositories.
 
+Everything linked inside the shell carries a RUNPATH to each of the shell's
+runtime library directories, so it starts without `LD_LIBRARY_PATH`. The
+same directory list also reaches Cargo as host-target rustflags
+(`-C link-arg=-Wl,-rpath-link,<dir>`), because Cargo's freshness check never
+reads the linker environment: a changed shell therefore relinks an existing
+target directory instead of keeping binaries linked against the previous
+shell. Cargo puts rustflags into artifact file names, so the previous shell's
+artifacts stay in a persistent target until something prunes them, as after
+a toolchain change. A job that exports `RUSTFLAGS` replaces target rustflags
+(Cargo's precedence) and loses this; append to
+`CARGO_TARGET_<TRIPLE>_RUSTFLAGS` instead. `.ci/check-shell-probe.sh` holds
+the contract for a fresh and for a persistent target.
+
 `--check` fails on missing, changed or obsolete generated files without writing
 anything. Normal rendering updates only files marked as renderer-owned and
 removes obsolete generated Crow adapters after a workflow rename. Foreign

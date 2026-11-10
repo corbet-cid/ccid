@@ -158,6 +158,11 @@ fn check_shell_table_renders_one_shared_shell_and_removing_it_cleans_up() {
         "NIX_LDFLAGS = lib.concatMapStringsSep \" \" (dir: \"-rpath ${dir}\") rpathDirs;"
     ));
     assert!(text.contains("NIX_NO_SELF_RPATH = true;"));
+    // The same directories reach Cargo's fingerprint, so a changed shell
+    // relinks a persistent target (Cargo never reads NIX_LDFLAGS).
+    assert!(text.contains(
+        "\"CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_RUSTFLAGS\" =\n      lib.concatMapStringsSep \" \" (dir: \"-C link-arg=-Wl,-rpath-link,${dir}\") rpathDirs;"
+    ));
     assert!(render(root.path(), true)
         .unwrap()
         .files
