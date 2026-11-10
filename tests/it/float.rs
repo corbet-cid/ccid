@@ -573,7 +573,7 @@ fn into_inside_the_repository_is_refused() {
     assert!(!world.consumer.join("resolved").exists());
 }
 
-/// The csrn shape (cause A): locks name the canonical forge host, CI checks out through
+/// Locks name the canonical forge host while CI checks out through
 /// another spelling of it. The repository URL never decides the selection, so lane and CI
 /// key the same resolution.
 #[test]
