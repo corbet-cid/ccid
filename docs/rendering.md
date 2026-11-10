@@ -115,6 +115,25 @@ Commit the manifest, inventory and generated adapters together. Rendered files
 are deterministic for the manifest and renderer version; the tool pin should
 refer to a worker-validated build that supports this adapter contract.
 
+### Declared template transitions
+
+A changed template (`src/render/*`) changes the committed files of every
+repository that renders it, and `job-run` checks them byte for byte, so a
+channel bump would otherwise fail every such repository until each one is
+re-rendered. A template change therefore declares a transition in
+`render.rs` (`TRANSITIONS`): the template, the release whose renders carry the
+previous body, and that body, kept under `src/render/previous/`. `--check`
+accepts a file this release renders with a declared previous body, lists it
+under `transitional` in its report and says so on stderr; `render` writes
+the current body, so a repository moves at its next normal render and a bump
+re-stales nothing. Any other difference still fails.
+
+The window is bounded by generation, not by date: one previous body per
+template (the one the channel's release renders) and at most four
+transitions. A later change of the same template replaces the previous body
+with the then-released one, so a render two changes behind drifts. Remove a
+transition once the fleet has re-rendered.
+
 ## Forgejo Actions
 
 A job with `scheduler = "forgejo"` renders to a native Forgejo Actions workflow,

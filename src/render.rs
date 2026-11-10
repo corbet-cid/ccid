@@ -17,6 +17,131 @@ const FORGEJO_DIRECTORY: &str = ".forgejo/workflows";
 /// native libraries, for CI and for a lane that sources the same file.
 const CHECK_SHELL: &str = ".ci/check-shell.nix";
 
+/// A template whose body is rendered into repositories. Every one may be
+/// named by a declared transition; only the declared ones are constructed
+/// outside the tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum Template {
+    Crow,
+    Push,
+    Consumer,
+    ForgejoSteps,
+    ForgejoShim,
+    ForgejoArchive,
+    CheckShell,
+}
+
+impl Template {
+    #[cfg(test)]
+    const ALL: [Template; 7] = [
+        Template::Crow,
+        Template::Push,
+        Template::Consumer,
+        Template::ForgejoSteps,
+        Template::ForgejoShim,
+        Template::ForgejoArchive,
+        Template::CheckShell,
+    ];
+
+    /// The template's file under `src/render/`.
+    fn file(self) -> &'static str {
+        match self {
+            Template::Crow => "crow.yaml",
+            Template::Push => "push.yaml",
+            Template::Consumer => "consumer.yaml",
+            Template::ForgejoSteps => "forgejo-steps.yml",
+            Template::ForgejoShim => "forgejo-shim.yml",
+            Template::ForgejoArchive => "forgejo-archive.yml",
+            Template::CheckShell => "check-shell.nix",
+        }
+    }
+}
+
+/// The template bodies one render uses: this release's own
+/// ([`Templates::CURRENT`]), or with declared previous bodies in place.
+#[derive(Debug, Clone, Copy)]
+struct Templates {
+    crow: &'static str,
+    push: &'static str,
+    consumer: &'static str,
+    forgejo_steps: &'static str,
+    forgejo_shim: &'static str,
+    forgejo_archive: &'static str,
+    check_shell: &'static str,
+}
+
+impl Templates {
+    const CURRENT: Templates = Templates {
+        crow: include_str!("render/crow.yaml"),
+        push: include_str!("render/push.yaml"),
+        consumer: include_str!("render/consumer.yaml"),
+        forgejo_steps: include_str!("render/forgejo-steps.yml"),
+        forgejo_shim: include_str!("render/forgejo-shim.yml"),
+        forgejo_archive: include_str!("render/forgejo-archive.yml"),
+        check_shell: include_str!("render/check-shell.nix"),
+    };
+
+    #[cfg(test)]
+    fn body(&self, template: Template) -> &'static str {
+        match template {
+            Template::Crow => self.crow,
+            Template::Push => self.push,
+            Template::Consumer => self.consumer,
+            Template::ForgejoSteps => self.forgejo_steps,
+            Template::ForgejoShim => self.forgejo_shim,
+            Template::ForgejoArchive => self.forgejo_archive,
+            Template::CheckShell => self.check_shell,
+        }
+    }
+
+    fn with(mut self, template: Template, body: &'static str) -> Templates {
+        let slot = match template {
+            Template::Crow => &mut self.crow,
+            Template::Push => &mut self.push,
+            Template::Consumer => &mut self.consumer,
+            Template::ForgejoSteps => &mut self.forgejo_steps,
+            Template::ForgejoShim => &mut self.forgejo_shim,
+            Template::ForgejoArchive => &mut self.forgejo_archive,
+            Template::CheckShell => &mut self.check_shell,
+        };
+        *slot = body;
+        self
+    }
+}
+
+/// A declared template transition. A template change alters the committed
+/// adapters of every repository that renders it, and `render --check` (also
+/// inside `job-run`) compares them byte for byte, so a release with a changed
+/// template would fail every such repository until each is re-rendered. A
+/// declared transition keeps the body the last released template rendered:
+/// `render --check` accepts a file that this release renders from `previous`
+/// and reports it as transitional, and `render` writes the current body, so a
+/// repository moves at its next normal render.
+///
+/// The window is bounded by generation, not by date: at most one previous
+/// body per template (the one the channel's release renders), and at most
+/// [`MAX_TRANSITIONS`] in all. A later change of the same template replaces
+/// `previous` with the then-released body, so a render two changes behind
+/// drifts. Remove a transition once the fleet has re-rendered.
+struct Transition {
+    template: Template,
+    /// The release whose renders carry `previous`.
+    since: &'static str,
+    previous: &'static str,
+}
+
+const TRANSITIONS: &[Transition] = &[Transition {
+    template: Template::CheckShell,
+    since: "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
+    previous: include_str!("render/previous/check-shell.nix"),
+}];
+
+/// Every combination of declared transitions is one render: the cap keeps
+/// `render --check` at most 2^4 renders.
+const MAX_TRANSITIONS: usize = 4;
+const _: () = assert!(TRANSITIONS.len() <= MAX_TRANSITIONS);
+
 /// `[check_shell]` opts a repository in. The table is intentionally empty:
 /// the shell's content is the release's template, so the pin cannot drift
 /// between repositories.
@@ -269,11 +394,12 @@ const GATING_PLACEHOLDER: &str = "CCID_GATING_JOBS";
 /// Render one workflow adapter, appending declared auxiliary variables that
 /// apply to it. Output is byte-identical to the plain template when none apply.
 fn workflow_adapter(
+    crow: &str,
     tool_revision: &str,
     workflow: &str,
     sources: &BTreeMap<String, PinnedSource>,
 ) -> Result<String> {
-    let template = include_str!("render/crow.yaml").replace("CCID_TOOL_REVISION", tool_revision);
+    let template = crow.replace("CCID_TOOL_REVISION", tool_revision);
     let mut extra = Vec::new();
     for source in sources.values() {
         if let Some(workflows) = &source.workflows {
@@ -396,6 +522,10 @@ pub struct Report {
     pub checked: bool,
     pub files: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
+    /// `--check` only: files accepted as the previous body of a declared
+    /// template transition; the next render updates them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transitional: Vec<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -422,67 +552,22 @@ fn remote_workflow_path(provider: jobs::Provider, workflow: &str) -> String {
     }
 }
 
-/// Render repository jobs, or check byte-for-byte drift without modifying files.
-/// Manual Crow execution adapters come from job workflows; push execution
-/// adapters come from job push opt-ins and consumer fan-out declarations.
-pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
-    // execute-job reads this exact path from its verified source archive.
-    if manifest != Path::new(".ci/ccid.toml") {
-        return Err(failure("Job adapters require .ci/ccid.toml"));
-    }
-    let (parsed, bytes) = load_manifest(repo, manifest)?;
-    let config = parsed
-        .render
-        .as_ref()
-        .ok_or_else(|| failure("Manifest requires [render].tool_revision"))?;
-    let central = match config.render_schema {
-        None => false,
-        Some(2) => true,
-        Some(other) => {
-            return Err(failure(format!(
-                "[render].render_schema {other} is not supported by this ccid (supported: 2)"
-            )))
-        }
-    };
-    if central {
-        if !config.tool_revision.is_empty() || config.tool_sha256.is_some() {
-            return Err(failure(
-                "A repository on render_schema = 2 pins no release: remove [render].tool_revision and tool_sha256 (the central channel chooses)",
-            ));
-        }
-    } else if config.tool_revision.len() != 40
-        || !config
-            .tool_revision
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err(failure(
-            "Rendered tool revision must be a full lowercase Git SHA",
-        ));
-    }
-    if let Some(secret) = config.resolver_token_secret.as_deref() {
-        validate_resolver_token_secret(secret)?;
-    }
-    validate_secret_environment(&config.secret_environment)?;
-    if let Some(digest) = &config.tool_sha256 {
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(failure(
-                "[render].tool_sha256 must be 64 lowercase hex digits",
-            ));
-        }
-    }
-    if parsed.jobs.is_empty() {
-        return Err(failure("Rendering requires at least one declared job"));
-    }
+/// The files one render writes, from `templates`. Pure apart from reading the
+/// repository's declared inputs; `render` validates `config` before.
+fn render_outputs(
+    repo: &Path,
+    manifest: &Path,
+    parsed: &crate::Manifest,
+    bytes: &[u8],
+    config: &Config,
+    central: bool,
+    templates: &Templates,
+) -> Result<BTreeMap<PathBuf, String>> {
     let mut inventory = Inventory {
         schema: 1,
         generator: GENERATOR,
         tool_revision: &config.tool_revision,
-        manifest_sha256: format!("{:x}", Sha256::digest(&bytes)),
+        manifest_sha256: format!("{:x}", Sha256::digest(bytes)),
         jobs: BTreeMap::new(),
         push_consumers: BTreeMap::new(),
     };
@@ -495,7 +580,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         }
     }
     let mut outputs = BTreeMap::new();
-    let gating = gating_jobs(&parsed)?;
+    let gating = gating_jobs(parsed)?;
     for name in parsed.jobs.keys() {
         let plan = jobs::plan(repo, manifest, name, None)?;
         if plan.scheduler == jobs::Scheduler::Remote {
@@ -524,7 +609,12 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             inject_gating(
                 inject_secret_environment(
                     inject_resolver_token(
-                        workflow_adapter(&config.tool_revision, &plan.workflow, &sources)?,
+                        workflow_adapter(
+                            templates.crow,
+                            &config.tool_revision,
+                            &plan.workflow,
+                            &sources,
+                        )?,
                         &config.tool_revision,
                         config.resolver_token_secret.as_deref(),
                     )?,
@@ -594,7 +684,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             outputs.insert(
                 PathBuf::from(filename),
                 substitute(
-                    include_str!("render/push.yaml"),
+                    templates.push,
                     config,
                     &[
                         ("CCID_PUSH_BRANCH", branch.as_str()),
@@ -622,7 +712,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         outputs.insert(
             PathBuf::from(filename),
             substitute(
-                include_str!("render/consumer.yaml"),
+                templates.consumer,
                 config,
                 &[
                     ("CCID_DEP_BRANCH", entry.branch.as_str()),
@@ -663,9 +753,10 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         outputs.insert(
             PathBuf::from(format!("{FORGEJO_DIRECTORY}/{workflow}.yml")),
             if central {
-                forgejo_workflow_central(workflow, plans)
+                forgejo_workflow_central(templates, workflow, plans)
             } else {
                 forgejo_workflow(
+                    templates,
                     &config.tool_revision,
                     config.tool_sha256.as_deref(),
                     workflow,
@@ -679,11 +770,76 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         serde_json::to_string_pretty(&inventory)? + "\n",
     );
     if parsed.check_shell.is_some() {
-        outputs.insert(
-            PathBuf::from(CHECK_SHELL),
-            include_str!("render/check-shell.nix").to_owned(),
-        );
+        outputs.insert(PathBuf::from(CHECK_SHELL), templates.check_shell.to_owned());
     }
+    Ok(outputs)
+}
+
+/// Render repository jobs, or check byte-for-byte drift without modifying files.
+/// Manual Crow execution adapters come from job workflows; push execution
+/// adapters come from job push opt-ins and consumer fan-out declarations.
+pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
+    // execute-job reads this exact path from its verified source archive.
+    if manifest != Path::new(".ci/ccid.toml") {
+        return Err(failure("Job adapters require .ci/ccid.toml"));
+    }
+    let (parsed, bytes) = load_manifest(repo, manifest)?;
+    let config = parsed
+        .render
+        .as_ref()
+        .ok_or_else(|| failure("Manifest requires [render].tool_revision"))?;
+    let central = match config.render_schema {
+        None => false,
+        Some(2) => true,
+        Some(other) => {
+            return Err(failure(format!(
+                "[render].render_schema {other} is not supported by this ccid (supported: 2)"
+            )))
+        }
+    };
+    if central {
+        if !config.tool_revision.is_empty() || config.tool_sha256.is_some() {
+            return Err(failure(
+                "A repository on render_schema = 2 pins no release: remove [render].tool_revision and tool_sha256 (the central channel chooses)",
+            ));
+        }
+    } else if config.tool_revision.len() != 40
+        || !config
+            .tool_revision
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(failure(
+            "Rendered tool revision must be a full lowercase Git SHA",
+        ));
+    }
+    if let Some(secret) = config.resolver_token_secret.as_deref() {
+        validate_resolver_token_secret(secret)?;
+    }
+    validate_secret_environment(&config.secret_environment)?;
+    if let Some(digest) = &config.tool_sha256 {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(failure(
+                "[render].tool_sha256 must be 64 lowercase hex digits",
+            ));
+        }
+    }
+    if parsed.jobs.is_empty() {
+        return Err(failure("Rendering requires at least one declared job"));
+    }
+    let outputs = render_outputs(
+        repo,
+        manifest,
+        &parsed,
+        &bytes,
+        config,
+        central,
+        &Templates::CURRENT,
+    )?;
 
     // Validate the whole destination set before any writes or directory creation.
     for directory in [".ci", ".crow", ".forgejo"] {
@@ -694,6 +850,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         }
     }
     let mut drift = Vec::new();
+    let mut committed = BTreeMap::new();
     for (relative, expected) in &outputs {
         let path = repo.join(relative);
         if let Some(metadata) = metadata(&path)? {
@@ -712,12 +869,39 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             }
             if actual != *expected {
                 drift.push(relative.clone());
+                committed.insert(relative.clone(), actual);
             }
         } else {
             drift.push(relative.clone());
         }
     }
     let obsolete = obsolete(repo, &outputs)?;
+    // A check accepts a file this release renders from a declared transition's previous body.
+    let mut transitional = Vec::new();
+    if check && !committed.is_empty() {
+        let accepted = transitions(&committed, |templates| {
+            render_outputs(repo, manifest, &parsed, &bytes, config, central, templates)
+        })?;
+        for (relative, declared) in &accepted {
+            let from: Vec<String> = declared
+                .iter()
+                .map(|transition| {
+                    format!(
+                        "{} of {}",
+                        transition.template.file(),
+                        &transition.since[..transition.since.len().min(10)]
+                    )
+                })
+                .collect();
+            eprintln!(
+                "ccid render: {} is rendered from the previous {} (a declared transition); the next render updates it",
+                relative.display(),
+                from.join(" and ")
+            );
+        }
+        drift.retain(|relative| !accepted.contains_key(relative));
+        transitional = accepted.into_keys().collect();
+    }
     if fs::read(repo.join(manifest))? != bytes {
         return Err(failure("Manifest changed during job rendering"));
     }
@@ -751,7 +935,40 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         checked: check,
         files: outputs.into_keys().collect(),
         removed: obsolete,
+        transitional,
     })
+}
+
+/// The committed files that equal a render with some combination of declared
+/// transitions in place, each with the transitions of its first match.
+fn transitions(
+    committed: &BTreeMap<PathBuf, String>,
+    render: impl Fn(&Templates) -> Result<BTreeMap<PathBuf, String>>,
+) -> Result<BTreeMap<PathBuf, Vec<&'static Transition>>> {
+    let mut accepted: BTreeMap<PathBuf, Vec<&'static Transition>> = BTreeMap::new();
+    for mask in 1u32..(1 << TRANSITIONS.len()) {
+        if accepted.len() == committed.len() {
+            break;
+        }
+        let declared: Vec<&'static Transition> = TRANSITIONS
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| mask & (1 << index) != 0)
+            .map(|(_, transition)| transition)
+            .collect();
+        let templates = declared
+            .iter()
+            .fold(Templates::CURRENT, |templates, transition| {
+                templates.with(transition.template, transition.previous)
+            });
+        let rendered = render(&templates)?;
+        for (relative, actual) in committed {
+            if !accepted.contains_key(relative) && rendered.get(relative) == Some(actual) {
+                accepted.insert(relative.clone(), declared.clone());
+            }
+        }
+    }
+    Ok(accepted)
 }
 
 /// Shell that stages a job's declared sibling repositories, read-only, as
@@ -823,6 +1040,7 @@ fn forgejo_siblings_step(siblings: &BTreeMap<String, String>) -> String {
 /// cache endpoint through its own environment. A missing tool fails the job; a
 /// check never installs a tool and never skips.
 fn forgejo_workflow(
+    templates: &Templates,
     tool_revision: &str,
     tool_sha256: Option<&str>,
     workflow: &str,
@@ -927,17 +1145,19 @@ fn forgejo_workflow(
         out.push_str("    steps:\n");
         if central {
             out.push_str(
-                &FORGEJO_SHIM
+                &templates
+                    .forgejo_shim
                     .replace("CCID_JOB", &plan.job)
                     .replace("CCID_CLASS", plan.runs_on.as_deref().unwrap_or("light")),
             );
             if plan.archive_inputs {
-                out.push_str(FORGEJO_ARCHIVE_STEP);
+                out.push_str(templates.forgejo_archive);
             }
             continue;
         }
         out.push_str(
-            &FORGEJO_STEPS
+            &templates
+                .forgejo_steps
                 .replace("CCID_TOOL_REVISION", tool_revision)
                 .replace(
                     "CCID_TOOL_SHA_LINE",
@@ -948,23 +1168,22 @@ fn forgejo_workflow(
                 .replace("CCID_RUN", &format!("{declared}{run}")),
         );
         if plan.archive_inputs {
-            out.push_str(FORGEJO_ARCHIVE_STEP);
+            out.push_str(templates.forgejo_archive);
         }
     }
     out
 }
 
-const FORGEJO_STEPS: &str = include_str!("render/forgejo-steps.yml");
-
-/// render_schema 2: the stable shim that finds the centrally chosen ccid and hands over to `ccid job-run`.
-const FORGEJO_SHIM: &str = include_str!("render/forgejo-shim.yml");
-
-fn forgejo_workflow_central(workflow: &str, plans: &[&jobs::Plan]) -> String {
-    forgejo_workflow("", None, workflow, plans)
+/// render_schema 2: the stable shim (`forgejo-shim.yml`) finds the centrally chosen ccid and hands over to `ccid job-run`.
+/// After the checks passed, `forgejo-archive.yml` sends the locked flake inputs to the target the runner names, so other
+/// runners substitute them; a runner without a target says so and moves on.
+fn forgejo_workflow_central(
+    templates: &Templates,
+    workflow: &str,
+    plans: &[&jobs::Plan],
+) -> String {
+    forgejo_workflow(templates, "", None, workflow, plans)
 }
-
-/// After the checks passed: the locked flake inputs go to the target the runner names, so other runners substitute them. A runner without a target says so and moves on.
-const FORGEJO_ARCHIVE_STEP: &str = include_str!("render/forgejo-archive.yml");
 
 /// Single-pass template substitution: tool revision, secret names, then
 /// caller pairs. Values are pre-validated (no CCID_, no shell metachars),
@@ -1246,6 +1465,202 @@ fn obsolete(repo: &Path, outputs: &BTreeMap<PathBuf, String>) -> Result<Vec<Path
 mod tests {
     use super::*;
 
+    // Declared template transitions: a render from a declared previous body
+    // passes `--check` and moves at the next render; nothing else does.
+
+    const TRANSITION_PIN: &str = "1234567890abcdef1234567890abcdef12345678";
+
+    /// One repository per render form, together exercising every template a
+    /// declared transition may name today.
+    fn transition_fixtures() -> Vec<(&'static str, tempfile::TempDir)> {
+        let central = "schema=1\nproject='fixture'\n[render]\nrender_schema=2\n\
+            [checks.test]\nkind='commands'\ncommands=[['true']]\n\
+            [jobs.verify]\nscheduler='forgejo'\nruns_on='heavy'\narchive_inputs=true\nchecks=['test']\nworkflow='ci'\ncommand=['ccid:run-declared-checks']\n\
+            [check_shell]\n"
+            .to_owned();
+        let pinned = format!(
+            "schema=1\nproject='fixture'\n[render]\ntool_revision='{TRANSITION_PIN}'\nallow_crow=true\n\
+            [checks.test]\nkind='commands'\ncommands=[['true']]\n\
+            [jobs.verify]\nscheduler='forgejo'\narchive_inputs=true\nchecks=['test']\nworkflow='ci'\ncommand=['ccid:run-declared-checks']\n\
+            [jobs.legacy]\nchecks=['test']\nworkflow='legacy'\ncommand=['sh','.ci/run.sh']\n\
+            [check_shell]\n"
+        );
+        [("central", central), ("pinned", pinned)]
+            .into_iter()
+            .map(|(name, manifest)| {
+                let root = tempfile::tempdir().unwrap();
+                fs::create_dir(root.path().join(".ci")).unwrap();
+                fs::write(root.path().join(".ci/ccid.toml"), manifest).unwrap();
+                (name, root)
+            })
+            .collect()
+    }
+
+    fn check(root: &Path) -> Result<Report> {
+        render(root, Path::new(".ci/ccid.toml"), true)
+    }
+
+    /// The files of `root` rendered from `templates`.
+    fn rendered(root: &Path, templates: &Templates) -> BTreeMap<PathBuf, String> {
+        let manifest = Path::new(".ci/ccid.toml");
+        let (parsed, bytes) = load_manifest(root, manifest).unwrap();
+        let config = parsed.render.as_ref().unwrap();
+        let central = config.render_schema == Some(2);
+        render_outputs(root, manifest, &parsed, &bytes, config, central, templates).unwrap()
+    }
+
+    fn write_all(root: &Path, files: &BTreeMap<PathBuf, String>) {
+        for (relative, content) in files {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+    }
+
+    /// The files a set of transitions changes in `root`'s render.
+    fn changed_by(root: &Path, templates: &Templates) -> Vec<PathBuf> {
+        let current = rendered(root, &Templates::CURRENT);
+        let old = rendered(root, templates);
+        assert_eq!(
+            current.keys().collect::<Vec<_>>(),
+            old.keys().collect::<Vec<_>>()
+        );
+        current
+            .iter()
+            .filter(|(relative, body)| old[*relative] != **body)
+            .map(|(relative, _)| relative.clone())
+            .collect()
+    }
+
+    #[test]
+    fn declared_transitions_are_bounded_to_one_previous_body_per_template() {
+        assert!(TRANSITIONS.len() <= MAX_TRANSITIONS);
+        for (index, transition) in TRANSITIONS.iter().enumerate() {
+            assert!(
+                TRANSITIONS[..index]
+                    .iter()
+                    .all(|earlier| earlier.template != transition.template),
+                "{} declares two previous bodies",
+                transition.template.file()
+            );
+            assert_ne!(
+                transition.previous,
+                Templates::CURRENT.body(transition.template),
+                "{}: a transition to the same body is no transition",
+                transition.template.file()
+            );
+            assert!(
+                transition.since.len() == 40
+                    && transition
+                        .since
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "since names a full release revision"
+            );
+        }
+        for template in Template::ALL {
+            assert_eq!(
+                Templates::CURRENT.with(template, "x").body(template),
+                "x",
+                "{} has its own slot",
+                template.file()
+            );
+        }
+    }
+
+    #[test]
+    fn a_render_from_a_declared_previous_body_passes_check_and_moves_on_render() {
+        for transition in TRANSITIONS {
+            let previous = Templates::CURRENT.with(transition.template, transition.previous);
+            let mut exercised = false;
+            for (name, root) in transition_fixtures() {
+                let changed = changed_by(root.path(), &previous);
+                if changed.is_empty() {
+                    continue;
+                }
+                exercised = true;
+                // The repository as the channel's release rendered it.
+                write_all(root.path(), &rendered(root.path(), &previous));
+                let report = check(root.path()).unwrap_or_else(|error| panic!("{name}: {error}"));
+                assert_eq!(report.transitional, changed, "{name}");
+                // Only the declared body is accepted: one byte more drifts.
+                for relative in &changed {
+                    let path = root.path().join(relative);
+                    let old = fs::read_to_string(&path).unwrap();
+                    fs::write(&path, format!("{old}# drift\n")).unwrap();
+                    let error = check(root.path()).unwrap_err().to_string();
+                    assert!(error.contains("drifted"), "{name}: {error}");
+                    fs::write(&path, old).unwrap();
+                }
+                // The next render writes the current body; then nothing is transitional.
+                render(root.path(), Path::new(".ci/ccid.toml"), false).unwrap();
+                for relative in &changed {
+                    assert_eq!(
+                        fs::read_to_string(root.path().join(relative)).unwrap(),
+                        rendered(root.path(), &Templates::CURRENT)[relative]
+                    );
+                }
+                assert!(check(root.path()).unwrap().transitional.is_empty());
+            }
+            assert!(
+                exercised,
+                "no transition fixture renders {}: extend transition_fixtures",
+                transition.template.file()
+            );
+        }
+    }
+
+    #[test]
+    fn every_declared_previous_body_at_once_passes_check() {
+        let all = TRANSITIONS
+            .iter()
+            .fold(Templates::CURRENT, |templates, transition| {
+                templates.with(transition.template, transition.previous)
+            });
+        for (name, root) in transition_fixtures() {
+            let changed = changed_by(root.path(), &all);
+            write_all(root.path(), &rendered(root.path(), &all));
+            assert_eq!(check(root.path()).unwrap().transitional, changed, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_undeclared_template_change_still_drifts() {
+        for template in Template::ALL {
+            // A body this release never declared: a change without a
+            // transition, or a render two changes behind a declared one.
+            let body: &'static str = Box::leak(
+                format!("{}# undeclared\n", Templates::CURRENT.body(template)).into_boxed_str(),
+            );
+            let undeclared = Templates::CURRENT.with(template, body);
+            for (name, root) in transition_fixtures() {
+                let changed = changed_by(root.path(), &undeclared);
+                if changed.is_empty() {
+                    continue;
+                }
+                write_all(root.path(), &rendered(root.path(), &undeclared));
+                let error = check(root.path()).unwrap_err().to_string();
+                assert!(
+                    error.contains("drifted"),
+                    "{name} {}: {error}",
+                    template.file()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_current_render_reports_no_transition() {
+        for (name, root) in transition_fixtures() {
+            render(root.path(), Path::new(".ci/ccid.toml"), false).unwrap();
+            let report = check(root.path()).unwrap();
+            assert!(report.transitional.is_empty(), "{name}");
+            assert!(!serde_json::to_string(&report)
+                .unwrap()
+                .contains("transitional"));
+        }
+    }
+
     fn sources(text: &str) -> Result<BTreeMap<String, PinnedSource>> {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join(".ci")).unwrap();
@@ -1276,17 +1691,20 @@ digest_variable = "SHARED_SOURCE_SHA256"
     fn auxiliary_variables_scope_to_declared_workflows() {
         let parsed = sources(FIXTURE).unwrap();
         assert_eq!(parsed.len(), 3);
-        let snowflake = workflow_adapter("abc", "tor-snowflake", &parsed).unwrap();
+        let snowflake =
+            workflow_adapter(Templates::CURRENT.crow, "abc", "tor-snowflake", &parsed).unwrap();
         assert!(snowflake.contains("STOPGAP_PRODUCT_SOURCE_ARCHIVE: {default: \"\"}"));
         assert!(snowflake.contains("STOPGAP_PRODUCT_SOURCE_SHA256: {default: \"\"}"));
         assert!(snowflake.contains("CFRY_SOURCE_BUNDLE: {default: \"\"}"));
         assert!(snowflake.contains("CFRY_SOURCE_SHA256: {default: \"\"}"));
         assert!(snowflake.contains("SHARED_SOURCE_ARCHIVE: {default: \"\"}"));
-        let other = workflow_adapter("abc", "tor-private", &parsed).unwrap();
+        let other =
+            workflow_adapter(Templates::CURRENT.crow, "abc", "tor-private", &parsed).unwrap();
         assert!(!other.contains("STOPGAP_PRODUCT_SOURCE_ARCHIVE"));
         assert!(!other.contains("CFRY_SOURCE_BUNDLE"));
         assert!(other.contains("SHARED_SOURCE_ARCHIVE: {default: \"\"}"));
-        let verify = workflow_adapter("abc", "repository-jobs", &parsed).unwrap();
+        let verify =
+            workflow_adapter(Templates::CURRENT.crow, "abc", "repository-jobs", &parsed).unwrap();
         assert!(!verify.contains("STOPGAP_PRODUCT_SOURCE_ARCHIVE"));
         assert!(verify.contains("SHARED_SOURCE_ARCHIVE: {default: \"\"}"));
     }
@@ -1306,14 +1724,20 @@ workflows = ["tor-snowflake"]
         let parsed = sources(text).unwrap();
         let expected = include_str!("render/crow.yaml").replace("CCID_TOOL_REVISION", "abc");
         assert_eq!(
-            workflow_adapter("abc", "unrelated-workflow", &parsed).unwrap(),
+            workflow_adapter(
+                Templates::CURRENT.crow,
+                "abc",
+                "unrelated-workflow",
+                &parsed
+            )
+            .unwrap(),
             expected
         );
         let root = tempfile::tempdir().unwrap();
         let empty = pinned_sources(root.path()).unwrap();
         assert!(empty.is_empty());
         assert_eq!(
-            workflow_adapter("abc", "tor-snowflake", &empty).unwrap(),
+            workflow_adapter(Templates::CURRENT.crow, "abc", "tor-snowflake", &empty).unwrap(),
             expected
         );
     }
@@ -1357,12 +1781,14 @@ sha256 = "20314ee07fc2adaae05c4018268abec49865c2a78e0710519fa55de0b1c5cc5b"
         let root = live_manifest(LIVE_FIXTURE);
         let parsed = live_inputs(root.path()).unwrap();
         assert_eq!(parsed.len(), 2);
-        let rendered = workflow_adapter("abc", "v01-tor-live", &parsed).unwrap();
+        let rendered =
+            workflow_adapter(Templates::CURRENT.crow, "abc", "v01-tor-live", &parsed).unwrap();
         assert!(rendered.contains("V01_SOURCE_BUNDLE: {default: \"\"}"));
         assert!(rendered.contains("V01_SOURCE_BUNDLE_SHA256: {default: \"\"}"));
         assert!(rendered.contains("V01_ROOT_SOURCE_ARCHIVE: {default: \"\"}"));
         assert!(rendered.contains("V01_ROOT_SOURCE_SHA256: {default: \"\"}"));
-        let other = workflow_adapter("abc", "tor-records", &parsed).unwrap();
+        let other =
+            workflow_adapter(Templates::CURRENT.crow, "abc", "tor-records", &parsed).unwrap();
         assert!(!other.contains("V01_SOURCE_BUNDLE"));
         let absent = tempfile::tempdir().unwrap();
         assert!(live_inputs(absent.path()).unwrap().is_empty());
