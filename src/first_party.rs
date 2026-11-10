@@ -14,7 +14,7 @@ use crate::{failure, fleet::Fleet, fleet::Origin, Result};
 use clap::Args;
 use serde::Deserialize;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -378,6 +378,15 @@ fn walk_files(root: &Path, skip: &[String]) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+fn read_toml(root: &Path, path: &Path) -> Result<toml::Value> {
+    let bytes = fs::read(root.join(path))
+        .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| failure(format!("cannot parse {}: {error}", path.display())))?;
+    toml::from_str(text)
+        .map_err(|error| failure(format!("cannot parse {}: {error}", path.display())))
+}
+
 /// Run the first-party check. `Ok(code)` is the process exit code; refusals
 /// print `check-first-party: <message> (<path>)` and return `Ok(1)`.
 pub fn run(options: &Options) -> Result<u8> {
@@ -455,39 +464,18 @@ pub fn run(options: &Options) -> Result<u8> {
         files.extend(extra);
         files.sort();
     }
-    let mut manifests = BTreeMap::new();
-    let mut locks = BTreeMap::new();
+    // One pass in sorted path order, manifests and locks interleaved as the
+    // scripts walked them, so the first refusal is the same one.
+    files.dedup();
     for path in &files {
-        if path.file_name().is_some_and(|n| n == "Cargo.toml") {
-            manifests.insert(
-                path.clone(),
-                fs::read(root.join(path))
-                    .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?,
-            );
-        } else if !options.manifest_only {
-            locks.insert(
-                path.clone(),
-                fs::read(root.join(path))
-                    .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?,
-            );
+        let manifest = path.file_name().is_some_and(|n| n == "Cargo.toml");
+        if !manifest && options.manifest_only {
+            continue;
         }
-    }
-    for (path, bytes) in &manifests {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|error| failure(format!("cannot parse {}: {error}", path.display())))?;
-        let value: toml::Value = toml::from_str(text)
-            .map_err(|error| failure(format!("cannot parse {}: {error}", path.display())))?;
-        if let Err(message) = check_manifest(&value, &fleet, &config) {
-            eprintln!("check-first-party: {message} ({})", path.display());
-            return Ok(1);
-        }
-    }
-    if !options.manifest_only {
-        for (path, bytes) in &locks {
-            let text = std::str::from_utf8(bytes)
-                .map_err(|error| failure(format!("cannot parse {}: {error}", path.display())))?;
-            let value: toml::Value = toml::from_str(text)
-                .map_err(|error| failure(format!("cannot parse {}: {error}", path.display())))?;
+        let value = read_toml(&root, path)?;
+        let verdict = if manifest {
+            check_manifest(&value, &fleet, &config)
+        } else {
             let packages = match value.get("package") {
                 None => Vec::new(),
                 Some(toml::Value::Array(items)) => items.clone(),
@@ -498,10 +486,11 @@ pub fn run(options: &Options) -> Result<u8> {
                     )));
                 }
             };
-            if let Err(message) = check_lock(&packages, &fleet, &config) {
-                eprintln!("check-first-party: {message} ({})", path.display());
-                return Ok(1);
-            }
+            check_lock(&packages, &fleet, &config)
+        };
+        if let Err(message) = verdict {
+            eprintln!("check-first-party: {message} ({})", path.display());
+            return Ok(1);
         }
     }
     println!("First-party declarations follow main; locked crate revisions are unique");

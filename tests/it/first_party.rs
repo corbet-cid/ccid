@@ -182,6 +182,57 @@ fn first_party_passes_refuses_and_reports_operational_errors() {
     assert_eq!(no_fleet.status.code(), Some(2), "{}", text(&no_fleet));
 }
 
+/// Manifests and locks are checked in one sorted path order, as the scripts
+/// walked `git ls-files`: the first refusal names the first bad path, and a
+/// later unreadable file does not hide it.
+#[test]
+fn first_party_reports_the_first_refusal_in_path_order() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    repo_with_manifest(root, "", None);
+    fs::create_dir_all(root.join("a")).unwrap();
+    fs::create_dir_all(root.join("b")).unwrap();
+    fs::write(
+        root.join("a/Cargo.lock"),
+        valid_lock().replace("branch=main", "branch=develop"),
+    )
+    .unwrap();
+    fs::write(
+        root.join("b/Cargo.toml"),
+        "[package]\nname = \"b\"\nversion = \"0.1.0\"\n[dependencies.example]\ngit = \"https://forge.example/org-a/example\"\nbranch = \"develop\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("c")).unwrap();
+    fs::write(root.join("c/Cargo.toml"), "not toml [").unwrap();
+    git_init(root);
+    let fleet = channel(root, "channel.json");
+
+    let refused = ccid_direct(root, Some(&fleet), &[]);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains(
+            "check-first-party: Invalid first-party source selector for example (a/Cargo.lock)"
+        ),
+        "{}",
+        text(&refused)
+    );
+
+    let only_manifests = ccid_direct(root, Some(&fleet), &["--manifest-only"]);
+    assert_eq!(
+        only_manifests.status.code(),
+        Some(1),
+        "{}",
+        text(&only_manifests)
+    );
+    assert!(
+        String::from_utf8_lossy(&only_manifests.stderr).contains(
+            "check-first-party: First-party dependency must declare branch = \"main\" (b/Cargo.toml)"
+        ),
+        "{}",
+        text(&only_manifests)
+    );
+}
+
 #[test]
 fn first_party_self_test_and_metadata() {
     let temp = tempfile::TempDir::new().unwrap();
