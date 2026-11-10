@@ -462,6 +462,14 @@ fn resolved_packages<'a>(metadata: &'a Value, fleet: &Fleet) -> Refusal<Vec<Sele
         if text(package, "name").is_none() {
             return Err("Missing package name".to_owned());
         }
+        // A source of another JSON type would read as "no source" and leave the package
+        // unpoliced: refuse it instead.
+        if !matches!(
+            package.get("source"),
+            None | Some(Value::Null | Value::String(_))
+        ) {
+            return Err("Invalid package source".to_owned());
+        }
     }
     let mut by_node: BTreeMap<&str, &Value> = BTreeMap::new();
     for node in nodes {

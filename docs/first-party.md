@@ -70,6 +70,11 @@ reported first; an unreadable `FILE` is exit 2 whatever the scan finds). `--meta
 `--manifest-only` are exclusive (exit 2). One strictness level serves every repository: the
 full validator.
 
+The command only reads. Write `FILE` outside the checkout, or declare it as a check output
+(`cache_outputs`): an undeclared untracked file in the tree is a source input the verdict
+layer refuses to key ([verdicts](verdicts.md)). `--locked` keeps `cargo metadata` from
+rewriting `Cargo.lock`.
+
 The rules run in this order, the first refusal ends the check. A message is the text after
 `check-first-party: `; the path in parentheses is `FILE`.
 
@@ -77,7 +82,7 @@ The rules run in this order, the first refusal ends the check. A message is the 
 |---|---|
 | `version` is 1 and `packages` is not empty | `Missing original Cargo metadata graph` |
 | `resolve.nodes` is an array | `Missing resolved dependency graph` |
-| every package has a string `id` (unique) and a string `name` | `Missing or duplicated package ID`, `Missing package name` |
+| every package has a string `id` (unique), a string `name` and a `source` that is absent, `null` or a string | `Missing or duplicated package ID`, `Missing package name`, `Invalid package source` |
 | every node `id` names one package, once | `Unknown or duplicated resolved package ID` |
 | nodes and packages are the same set | `Incomplete resolved package graph` |
 | `resolve.root` is `null` or a node (an absent root is refused) | `Unknown resolved root package` |
@@ -95,9 +100,9 @@ A source is first-party in the graph when it is `git+` followed by a fleet prefi
 alias, refused with `canonical_only` as `First-party source must use its canonical owner URL:
 <source>`). Retained issuers are judged first (below); then, in the order of `resolve.nodes`, each
 package source before its declarations; the names come last. Only the declarations of **selected** edges are
-judged: an unused dev, optional or target-specific declaration stays under its owner's policy,
-and cargo prints a `#<revision>` fragment on a declaration of an unselected edge, so a
-declaration's fragment is never judged.
+judged: an unused dev, optional or target-specific declaration stays under its owner's policy
+(cargo may print a `#<revision>` fragment on such a declaration). A selected first-party
+declaration has no fragment: it must equal the selected source without one.
 
 - `rev_selectors = true` also accepts `rev=<40-hex>` as a package or declaration query, a
   package's fragment being that same revision; the refusal then reads `Expected main or a

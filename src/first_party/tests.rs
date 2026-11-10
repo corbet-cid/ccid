@@ -1410,6 +1410,20 @@ fn graph_only_git_sources_are_first_party() {
 }
 
 #[test]
+fn graph_refuses_a_package_source_that_is_not_a_string() {
+    // Read as "no source", a first-party package on another branch would pass unpoliced.
+    let floating = main_source("csgn").replace("branch=main", "branch=develop");
+    for source in [json!([floating]), json!({"url": floating}), json!(7)] {
+        let mut package = gpkg("csgn", None, &[]);
+        package["source"] = source;
+        assert_eq!(
+            graph_refusal(&ggraph(vec![package])),
+            "Invalid package source"
+        );
+    }
+}
+
+#[test]
 fn graph_required_names_are_validated() {
     let empty = Config {
         graph: Graph {
