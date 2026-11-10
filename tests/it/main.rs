@@ -20,6 +20,8 @@ mod cargo_target;
 mod channel;
 mod cli;
 mod content_pins;
+#[cfg(unix)]
+mod coverage_run;
 mod dependency_resolution;
 mod first_party;
 mod fleet;

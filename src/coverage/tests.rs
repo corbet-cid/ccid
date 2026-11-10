@@ -1678,3 +1678,370 @@ fn command_totals_and_convert() {
         0
     );
 }
+
+// `ccid coverage run`: configuration, commands and the private target.
+
+fn parse_config(text: &str) -> Config {
+    toml::from_str::<ManifestFile>(text)
+        .expect("coverage table")
+        .coverage
+        .unwrap_or_default()
+}
+
+#[test]
+fn run_config_defaults_are_the_clbs_arguments() {
+    // clbs:.ci/verify.sh lines 32-34.
+    let llvm_cov = "--workspace --all-features --branch --no-cfg-coverage \
+                    --no-cfg-coverage-nightly --ignore-filename-regex /tests/";
+    for config in [Config::default(), parse_config("[coverage]\n")] {
+        assert_eq!(config.llvm_cov_arguments().join(" "), llvm_cov);
+        assert_eq!(
+            config.report_arguments().join(" "),
+            "--branch --ignore-filename-regex /tests/"
+        );
+        assert!(config.text.is_empty());
+        assert!(config.require_sources.is_none());
+        assert!(!config.artifacts);
+        assert_eq!(config.validate_run(), Ok(vec![Gate::Source]));
+    }
+}
+
+#[test]
+fn run_commands_are_the_clbs_invocations() {
+    let shown: Vec<String> = report_commands(Path::new("/nightly/cargo"), &Config::default())
+        .iter()
+        .map(|command| {
+            command
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            "/nightly/cargo llvm-cov --locked --workspace --all-features --branch --no-cfg-coverage \
+             --no-cfg-coverage-nightly --ignore-filename-regex /tests/ --json --output-path coverage.json",
+            "/nightly/cargo llvm-cov report --locked --branch --ignore-filename-regex /tests/ \
+             --lcov --output-path coverage.lcov",
+            "/nightly/cargo llvm-cov report --locked --branch --ignore-filename-regex /tests/ \
+             --text --output-path coverage.txt",
+        ]
+    );
+}
+
+#[test]
+fn run_gates_are_an_ordered_nonempty_set_of_known_gates() {
+    let gates = |list: &str| parse_config(&format!("[coverage]\ngates = {list}\n")).validate_run();
+    assert_eq!(
+        gates(r#"["totals", "source"]"#),
+        Ok(vec![Gate::Totals, Gate::Source])
+    );
+    assert_eq!(
+        gates(r#"["source", "totals"]"#),
+        Ok(vec![Gate::Source, Gate::Totals])
+    );
+    assert!(gates("[]")
+        .expect_err("empty")
+        .contains("at least one gate"));
+    assert!(gates(r#"["source", "source"]"#)
+        .expect_err("duplicate")
+        .contains("listed twice"));
+    assert!(gates(r#"["lines"]"#)
+        .expect_err("unknown")
+        .contains("unknown gate"));
+}
+
+#[test]
+fn run_require_sources_needs_the_totals_gate_and_a_relative_path() {
+    let config = |text: &str| parse_config(&format!("[coverage]\n{text}\n")).validate_run();
+    assert_eq!(
+        config("gates = [\"totals\"]\nrequire_sources = \"src\""),
+        Ok(vec![Gate::Totals])
+    );
+    assert!(config("require_sources = \"src\"")
+        .expect_err("no totals gate")
+        .contains("needs the totals gate"));
+    for path in ["/src", "../src", ""] {
+        assert!(
+            config(&format!(
+                "gates = [\"totals\"]\nrequire_sources = \"{path}\""
+            ))
+            .is_err(),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn run_refuses_arguments_it_sets_itself() {
+    for (key, value) in [
+        ("llvm_cov", r#"["--output-path", "elsewhere.json"]"#),
+        ("llvm_cov", r#"["--locked"]"#),
+        ("llvm_cov", r#"["--target-dir=inside"]"#),
+        ("report", r#"["--json"]"#),
+        ("text", r#"["--output-dir", "html"]"#),
+    ] {
+        let error = parse_config(&format!("[coverage]\n{key} = {value}\n"))
+            .validate_run()
+            .expect_err("owned argument");
+        assert!(error.contains("set by ccid coverage run itself"), "{error}");
+    }
+}
+
+#[test]
+fn run_config_still_denies_unknown_keys() {
+    assert!(toml::from_str::<ManifestFile>("[coverage]\nllvm-cov = []\n").is_err());
+}
+
+#[test]
+fn run_private_target_parent_must_be_outside_the_repository() {
+    let repo = tempfile::tempdir().expect("repository");
+    let repo = repo.path().canonicalize().expect("canonical repository");
+    fs::create_dir_all(repo.join("scratch")).expect("scratch");
+    for inside in [repo.join("scratch"), repo.clone()] {
+        let error = private_target_parent(&inside, &repo).expect_err("inside");
+        assert!(
+            error.to_string().contains("unsafe coverage target"),
+            "{error}"
+        );
+    }
+    assert!(private_target_parent(&repo.join("missing"), &repo).is_err());
+    let outside = tempfile::tempdir().expect("outside");
+    assert_eq!(
+        private_target_parent(outside.path(), &repo).expect("outside passes"),
+        outside.path().canonicalize().expect("canonical outside")
+    );
+    #[cfg(unix)]
+    {
+        let link = outside.path().join("link");
+        std::os::unix::fs::symlink(repo.join("scratch"), &link).expect("link");
+        assert!(private_target_parent(&link, &repo).is_err());
+    }
+}
+
+// cplc (acceptance case 2): LLVM's per-file JSON branch list keeps branch
+// regions whose counters are both folded to zero (here: an uninstantiated
+// generic, recorded once per compilation of the crate, `functions[].branches`
+// empty), while the per-function lists and LCOV drop them. Minimized from
+// cplc src/policy.rs:263 (`while pending.len() < limit {`).
+
+const CPLC_SOURCE: &str = "pub fn covered(flag: bool) -> u8 { if flag { 1 } else { 2 } }\n\
+    pub fn other() -> u8 { 3 }\n\
+    pub async fn upcoming(&self, limit: usize) -> Vec<u8> { while pending.len() < limit {} }\n";
+
+struct CplcCase {
+    _directory: tempfile::TempDir,
+    root: PathBuf,
+    raw: serde_json::Value,
+    lcov: String,
+    annotated: String,
+}
+
+fn cplc_case() -> CplcCase {
+    let directory = tempfile::tempdir().expect("cplc fixture");
+    let root = directory.path().canonicalize().expect("canonical root");
+    fs::create_dir_all(root.join("src")).expect("src");
+    fs::write(root.join("src/lib.rs"), CPLC_SOURCE).expect("source");
+    let source = format!("{}/src/lib.rs", root.display());
+    let executed = serde_json::json!([1, 38, 1, 42, 2, 1, 0, 0, 4]);
+    let folded = serde_json::json!([3, 64, 3, 85, 0, 0, 0, 0, 4]);
+    let uninstantiated = |crate_hash: &str| {
+        serde_json::json!({
+            "name": format!("_RNCNvMNtCs{crate_hash}_4cplc6policyINtB4_6PolicypppE8upcoming0B6_"),
+            "count": 0,
+            "filenames": [source],
+            "regions": [[3, 64, 3, 85, 0, 0, 0, 0]],
+            "branches": [],
+            "mcdc_records": [],
+        })
+    };
+    let raw = serde_json::json!({
+        "type": "llvm.coverage.json.export",
+        "data": [{
+            "files": [{
+                "filename": source,
+                "branches": [executed, folded, folded],
+                "summary": {
+                    "lines": {"count": 3, "covered": 2},
+                    "branches": {"count": 2, "covered": 2},
+                },
+            }],
+            "functions": [
+                {
+                    "name": "covered",
+                    "count": 3,
+                    "filenames": [source],
+                    "regions": [[1, 1, 1, 60, 3, 0, 0, 0]],
+                    "branches": [executed],
+                    "mcdc_records": [],
+                },
+                {
+                    "name": "other",
+                    "count": 1,
+                    "filenames": [source],
+                    "regions": [[2, 1, 2, 27, 1, 0, 0, 0]],
+                    "branches": [],
+                    "mcdc_records": [],
+                },
+                uninstantiated("bFxj2X9Ip2E"),
+                uninstantiated("0a66LQETvWy"),
+            ],
+        }],
+    });
+    let lcov = format!(
+        "SF:{source}\nDA:1,3\nDA:2,1\nDA:3,0\nLF:3\nLH:2\n\
+         BRDA:1,0,0,2\nBRDA:1,0,1,1\nBRF:2\nBRH:2\nend_of_record\n"
+    );
+    let rows: Vec<&str> = CPLC_SOURCE.lines().collect();
+    let annotated = format!(
+        "{source}:\n    1| 3|{}\n    2| 1|{}\n    3| 0|{}\n",
+        rows[0], rows[1], rows[2]
+    );
+    CplcCase {
+        _directory: directory,
+        root,
+        raw,
+        lcov,
+        annotated,
+    }
+}
+
+fn cplc_exclusion() -> Exclusion {
+    Exclusion {
+        file: "src/lib.rs".to_owned(),
+        line: 3,
+        source: Some(
+            CPLC_SOURCE
+                .lines()
+                .nth(2)
+                .expect("line 3")
+                .trim()
+                .to_owned(),
+        ),
+        context: None,
+        reason: "uninstantiated generic".to_owned(),
+        evidence: None,
+        targets: vec!["native".to_owned()],
+        branch: None,
+        evidence_sources: None,
+        evidence_packages: None,
+    }
+}
+
+#[test]
+fn cplc_folded_branch_of_an_uninstantiated_generic_is_no_emitted_location() {
+    let case = cplc_case();
+    let report = gate(
+        &case.lcov,
+        &case.raw,
+        &case.annotated,
+        &case.root,
+        &[cplc_exclusion()],
+        Target::Native,
+    )
+    .expect("the folded region is not an emitted branch");
+    assert_eq!(
+        report.output,
+        [
+            "Excluded line: src/lib.rs:3 uninstantiated generic",
+            "lines: 2/2; exclusions: 1",
+            "branches: 2/2",
+        ]
+    );
+    // Without the exclusion the uninstantiated lines are a real gap, never a pass.
+    let refusal = gate(
+        &case.lcov,
+        &case.raw,
+        &case.annotated,
+        &case.root,
+        &[],
+        Target::Native,
+    );
+    assert_eq!(
+        refused(&refusal),
+        "Uncovered source lines: [('src/lib.rs', 3)]; branches: []"
+    );
+}
+
+#[test]
+fn cplc_export_without_function_records_keeps_the_per_file_inventory() {
+    let mut case = cplc_case();
+    case.raw["data"][0]
+        .as_object_mut()
+        .expect("unit")
+        .remove("functions");
+    let refusal = gate(
+        &case.lcov,
+        &case.raw,
+        &case.annotated,
+        &case.root,
+        &[cplc_exclusion()],
+        Target::Native,
+    );
+    assert_eq!(refused(&refusal), "Missing emitted branch locations");
+}
+
+#[test]
+fn missing_emitted_branch_location_still_refuses() {
+    let case = cplc_case();
+    let check = |lcov: &str, raw: &serde_json::Value| {
+        refused(&gate(
+            lcov,
+            raw,
+            &case.annotated,
+            &case.root,
+            &[cplc_exclusion()],
+            Target::Native,
+        ))
+    };
+    // LCOV lost the arms of a branch the function records emit.
+    let without_arms = case.lcov.replace("BRDA:1,0,0,2\nBRDA:1,0,1,1\n", "");
+    assert_eq!(
+        check(&without_arms, &case.raw),
+        "Missing emitted branch locations"
+    );
+    // LCOV carries arms for the folded region the function records omit.
+    let folded_arms = case
+        .lcov
+        .replace("BRF:2", "BRDA:3,0,0,-\nBRDA:3,0,1,-\nBRF:2");
+    assert_eq!(
+        check(&folded_arms, &case.raw),
+        "Missing emitted branch locations"
+    );
+    // A per-file location the function records omit was executed: not folded.
+    let mut executed = case.raw.clone();
+    executed["data"][0]["files"][0]["branches"][1] =
+        serde_json::json!([3, 64, 3, 85, 1, 0, 0, 0, 4]);
+    assert_eq!(
+        check(&case.lcov, &executed),
+        "Missing emitted branch locations"
+    );
+    // A per-function location absent from the per-file list.
+    let mut unlisted = case.raw.clone();
+    unlisted["data"][0]["functions"][1]["branches"] =
+        serde_json::json!([[2, 1, 2, 5, 1, 0, 0, 0, 4]]);
+    assert_eq!(
+        check(&case.lcov, &unlisted),
+        "Missing emitted branch locations"
+    );
+    // A per-function branch naming no file of its record.
+    let mut nameless = case.raw.clone();
+    nameless["data"][0]["functions"][0]["branches"] =
+        serde_json::json!([[1, 38, 1, 42, 2, 1, 5, 5, 4]]);
+    assert_eq!(
+        check(&case.lcov, &nameless),
+        "Missing emitted branch locations"
+    );
+    // A function record without its branch list.
+    let mut listless = case.raw.clone();
+    listless["data"][0]["functions"][0]
+        .as_object_mut()
+        .expect("function")
+        .remove("branches");
+    assert_eq!(
+        check(&case.lcov, &listless),
+        "Missing emitted branch locations"
+    );
+}

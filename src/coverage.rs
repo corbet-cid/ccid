@@ -5,19 +5,24 @@
 //! requires every emitted production line and branch to be covered, except
 //! for manifest-declared exclusions. The totals gate checks exact LLVM line
 //! and branch counts per unit, optionally requiring every `src/**/*.rs` file
-//! to appear in the report. Running `cargo llvm-cov` stays in the calling
-//! repository; this module only evaluates the reports it produced.
+//! to appear in the report. `ccid coverage run` produces the three reports
+//! from one `cargo llvm-cov` execution with the nightly toolchain and a
+//! private target directory, then runs the declared gates on them; `gate`
+//! and `totals` evaluate reports a repository produced itself.
 
-use crate::Result;
+use crate::{Environment, Result};
 use clap::Subcommand;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::{OsStr, OsString},
     fs,
     path::{Component, Path, PathBuf},
+    process::Command,
     str::FromStr,
+    sync::atomic::Ordering,
 };
 
 fn failure(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
@@ -94,11 +99,161 @@ pub struct Exclusion {
 }
 
 /// The `[coverage]` table of `.ci/ccid.toml`.
+///
+/// Every key but `exclusions` configures `ccid coverage run`; absent keys take
+/// the defaults below, which are exactly the arguments of the shared verify
+/// scripts.
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub exclusions: Vec<Exclusion>,
+    /// Arguments of the one `cargo llvm-cov` execution (default [`DEFAULT_LLVM_COV`]).
+    #[serde(default)]
+    pub llvm_cov: Option<Vec<String>>,
+    /// Arguments of both `cargo llvm-cov report` invocations (default [`DEFAULT_REPORT`]).
+    #[serde(default)]
+    pub report: Option<Vec<String>>,
+    /// Extra arguments of the annotated text report only.
+    #[serde(default)]
+    pub text: Vec<String>,
+    /// The gates, in order, that read the run's reports (default `["source"]`).
+    #[serde(default)]
+    pub gates: Option<Vec<String>>,
+    /// The totals gate's `--require-sources`, relative to the repository.
+    #[serde(default)]
+    pub require_sources: Option<String>,
+    /// Copy the reports to `$ARTIFACT_ROOT` after the run, also on failure.
+    #[serde(default)]
+    pub artifacts: bool,
+}
+
+/// Default `[coverage] llvm_cov`.
+pub const DEFAULT_LLVM_COV: &[&str] = &[
+    "--workspace",
+    "--all-features",
+    "--branch",
+    "--no-cfg-coverage",
+    "--no-cfg-coverage-nightly",
+    "--ignore-filename-regex",
+    "/tests/",
+];
+
+/// Default `[coverage] report`.
+pub const DEFAULT_REPORT: &[&str] = &["--branch", "--ignore-filename-regex", "/tests/"];
+
+/// The three reports of one run, written into the repository (the check's `cache_outputs`).
+pub const REPORTS: [&str; 3] = ["coverage.json", "coverage.lcov", "coverage.txt"];
+
+/// Arguments `ccid coverage run` sets itself: a configured copy would move a
+/// report, the build or the lock policy away from the one checked execution.
+const OWNED_ARGUMENTS: &[&str] = &[
+    "--json",
+    "--lcov",
+    "--text",
+    "--html",
+    "--cobertura",
+    "--codecov",
+    "--output-path",
+    "--output-dir",
+    "--no-report",
+    "--locked",
+    "--target-dir",
+];
+
+/// One gate of `ccid coverage run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    Totals,
+    Source,
+}
+
+impl Config {
+    /// `llvm_cov`, or its default.
+    pub fn llvm_cov_arguments(&self) -> Vec<String> {
+        self.llvm_cov.clone().unwrap_or_else(|| {
+            DEFAULT_LLVM_COV
+                .iter()
+                .map(|arg| (*arg).to_owned())
+                .collect()
+        })
+    }
+
+    /// `report`, or its default.
+    pub fn report_arguments(&self) -> Vec<String> {
+        self.report
+            .clone()
+            .unwrap_or_else(|| DEFAULT_REPORT.iter().map(|arg| (*arg).to_owned()).collect())
+    }
+
+    /// The declared gates in order; refuses an empty list, an unknown name and a repetition.
+    pub fn gate_order(&self) -> std::result::Result<Vec<Gate>, String> {
+        let Some(names) = &self.gates else {
+            return Ok(vec![Gate::Source]);
+        };
+        if names.is_empty() {
+            return Err("[coverage] gates must name at least one gate".to_owned());
+        }
+        let mut order = Vec::new();
+        for name in names {
+            let gate = match name.as_str() {
+                "totals" => Gate::Totals,
+                "source" => Gate::Source,
+                _ => {
+                    return Err(format!(
+                        "[coverage] gates: unknown gate {name:?} (known: totals, source)"
+                    ))
+                }
+            };
+            if order.contains(&gate) {
+                return Err(format!("[coverage] gates: {name:?} is listed twice"));
+            }
+            order.push(gate);
+        }
+        Ok(order)
+    }
+
+    /// Everything `ccid coverage run` needs from the table, checked before anything runs.
+    pub fn validate_run(&self) -> std::result::Result<Vec<Gate>, String> {
+        for (key, arguments) in [
+            ("llvm_cov", self.llvm_cov_arguments()),
+            ("report", self.report_arguments()),
+            ("text", self.text.clone()),
+        ] {
+            for argument in &arguments {
+                let name = argument
+                    .split_once('=')
+                    .map_or(argument.as_str(), |(name, _)| name);
+                if OWNED_ARGUMENTS.contains(&name) {
+                    return Err(format!(
+                        "[coverage] {key}: {argument} is set by ccid coverage run itself"
+                    ));
+                }
+                if argument.contains('\0') {
+                    return Err(format!("[coverage] {key}: arguments cannot contain NUL"));
+                }
+            }
+        }
+        if let Some(directory) = &self.require_sources {
+            let path = Path::new(directory);
+            if directory.is_empty()
+                || path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+            {
+                return Err(
+                    "[coverage] require_sources must be a relative path inside the repository"
+                        .to_owned(),
+                );
+            }
+        }
+        let gates = self.gate_order()?;
+        if self.require_sources.is_some() && !gates.contains(&Gate::Totals) {
+            return Err("[coverage] require_sources needs the totals gate in gates".to_owned());
+        }
+        Ok(gates)
+    }
 }
 
 /// Stdout lines of a passing gate, in order.
@@ -322,11 +477,29 @@ fn validate_exclusion(entry: &Exclusion, root: &Path) -> std::result::Result<(),
 }
 
 struct RawFile {
+    /// The branch locations LCOV must carry two arms for (see [`emitted_branches`]).
     branches: Vec<[i64; 4]>,
+    /// File-level locations with a nonzero or unreadable execution count.
+    counted: BTreeSet<[i64; 4]>,
     lines_count: Option<i64>,
     lines_covered: Option<i64>,
     branches_count: Option<i64>,
     branches_covered: Option<i64>,
+}
+
+/// `[line, col, end_line, end_col]` of one raw JSON branch record.
+fn branch_location(branch: &serde_json::Value) -> std::result::Result<[i64; 4], String> {
+    let slots = branch
+        .as_array()
+        .ok_or("Missing emitted branch locations")?;
+    if slots.len() < 4 {
+        return Err("Missing emitted branch locations".to_owned());
+    }
+    let mut location = [0i64; 4];
+    for (index, slot) in slots.iter().take(4).enumerate() {
+        location[index] = slot.as_i64().ok_or("Missing emitted branch locations")?;
+    }
+    Ok(location)
 }
 
 fn raw_file(item: &serde_json::Value) -> std::result::Result<RawFile, String> {
@@ -335,16 +508,18 @@ fn raw_file(item: &serde_json::Value) -> std::result::Result<RawFile, String> {
         .and_then(|branches| branches.as_array())
         .ok_or("Missing emitted branch locations")?;
     let mut locations = Vec::new();
+    let mut counted = BTreeSet::new();
     for branch in branches {
-        let slots = branch
-            .as_array()
-            .ok_or("Missing emitted branch locations")?;
-        if slots.len() < 4 {
-            return Err("Missing emitted branch locations".to_owned());
-        }
-        let mut location = [0i64; 4];
-        for (index, slot) in slots.iter().take(4).enumerate() {
-            location[index] = slot.as_i64().ok_or("Missing emitted branch locations")?;
+        let location = branch_location(branch)?;
+        let unexecuted = [4, 5].iter().all(|index| {
+            branch
+                .as_array()
+                .and_then(|slots| slots.get(*index))
+                .and_then(|count| count.as_i64())
+                == Some(0)
+        });
+        if !unexecuted {
+            counted.insert(location);
         }
         locations.push(location);
     }
@@ -353,11 +528,77 @@ fn raw_file(item: &serde_json::Value) -> std::result::Result<RawFile, String> {
         |metric: &str, field: &str| json_count(summary.get(metric).and_then(|m| m.get(field)));
     Ok(RawFile {
         branches: locations,
+        counted,
         lines_count: pick("lines", "count"),
         lines_covered: pick("lines", "covered"),
         branches_count: pick("branches", "count"),
         branches_covered: pick("branches", "covered"),
     })
+}
+
+/// The branch inventory LCOV is held to, from a unit's function records.
+///
+/// LLVM's JSON exporter lists a file's branch regions twice: once per file
+/// (`files[].branches`, every region of every function record) and once per
+/// function (`functions[].branches`). The per-function lists and the LCOV
+/// exporter drop the same regions, those whose two counters are both folded to
+/// the constant zero; the per-file list keeps them. Folded regions are no real
+/// branch; rustc emits them, for example, for every branch of a function it
+/// instrumented but never generated code for (an uninstantiated generic).
+/// When a unit carries function records, each production file's inventory is
+/// therefore the per-function one, on two conditions that keep a dropped
+/// branch from passing: every per-function location is also a per-file
+/// location, and every per-file location the function records omit was never
+/// executed (both counts zero, as a folded region's are). A unit without
+/// function records keeps the per-file inventory.
+fn emitted_branches(
+    functions: &serde_json::Value,
+    files: &BTreeMap<PathBuf, String>,
+    root: &Path,
+    expected: &mut BTreeMap<String, RawFile>,
+) -> std::result::Result<(), String> {
+    let functions = functions
+        .as_array()
+        .ok_or("Missing emitted branch locations")?;
+    let mut emitted: BTreeMap<String, BTreeSet<[i64; 4]>> = BTreeMap::new();
+    for function in functions {
+        let filenames = function
+            .get("filenames")
+            .and_then(|names| names.as_array())
+            .ok_or("Missing emitted branch locations")?;
+        let branches = function
+            .get("branches")
+            .and_then(|branches| branches.as_array())
+            .ok_or("Missing emitted branch locations")?;
+        for branch in branches {
+            let location = branch_location(branch)?;
+            let name = branch
+                .as_array()
+                .and_then(|slots| slots.get(6))
+                .and_then(|file| file.as_u64())
+                .and_then(|file| filenames.get(usize::try_from(file).ok()?))
+                .and_then(|name| name.as_str())
+                .ok_or("Missing emitted branch locations")?;
+            // Function records also name files the export filtered out (tests, dependencies).
+            if let Some(file) = files.get(&absolutize(Path::new(name), root)) {
+                emitted.entry(file.clone()).or_default().insert(location);
+            }
+        }
+    }
+    for file in files.values() {
+        let raw = expected.get_mut(file).expect("unit file inventory");
+        let inventory = emitted.remove(file).unwrap_or_default();
+        let listed: BTreeSet<[i64; 4]> = raw.branches.iter().copied().collect();
+        if !inventory.is_subset(&listed)
+            || listed
+                .difference(&inventory)
+                .any(|location| raw.counted.contains(location))
+        {
+            return Err("Missing emitted branch locations".to_owned());
+        }
+        raw.branches = inventory.into_iter().collect();
+    }
+    Ok(())
 }
 
 /// Gate emitted production lines and branches from one LLVM execution.
@@ -387,6 +628,7 @@ pub fn gate(
         let Some(items) = items else {
             return Err("Missing companion raw LLVM JSON".to_owned());
         };
+        let mut unit_files: BTreeMap<PathBuf, String> = BTreeMap::new();
         for item in items {
             let filename = item.get("filename").and_then(|name| name.as_str());
             let Some(filename) = filename else {
@@ -396,7 +638,11 @@ pub fn gate(
             if expected.contains_key(&path) {
                 return Err("Duplicate raw source".to_owned());
             }
+            unit_files.insert(absolutize(Path::new(filename), &root), path.clone());
             expected.insert(path, raw_file(item)?);
+        }
+        if let Some(functions) = unit.get("functions") {
+            emitted_branches(functions, &unit_files, &root, &mut expected)?;
         }
     }
     if expected.is_empty() {
@@ -1048,6 +1294,20 @@ pub enum Action {
         #[arg(long, default_value = "native")]
         default_targets: String,
     },
+    /// Run `cargo llvm-cov` once (nightly, private target directory outside the
+    /// repository), write coverage.json, coverage.lcov and coverage.txt into the
+    /// repository, then run the `[coverage] gates` on those three reports.
+    Run {
+        /// Coverage target the exclusions apply to.
+        #[arg(long, default_value = "native")]
+        target: String,
+        /// Repository the reports are written into; the run's working directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Manifest carrying `[coverage]`.
+        #[arg(long, default_value = ".ci/ccid.toml")]
+        manifest: PathBuf,
+    },
 }
 
 /// The manifest subset the coverage commands read; every other table is ignored.
@@ -1108,17 +1368,7 @@ pub fn run(action: Action) -> Result<u8> {
                     return Ok(1);
                 }
             };
-            let manifest_path = absolutize(&manifest, &root);
-            let exclusions = match fs::read_to_string(&manifest_path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                Err(error) => return Err(failure(format!("{}: {error}", manifest_path.display()))),
-                Ok(text) => {
-                    let parsed: ManifestFile = toml::from_str(&text).map_err(|error| {
-                        failure(format!("{}: {error}", manifest_path.display()))
-                    })?;
-                    parsed.coverage.unwrap_or_default().exclusions
-                }
-            };
+            let exclusions = load_config(&absolutize(&manifest, &root))?.exclusions;
             match gate(
                 &lcov_text,
                 &raw,
@@ -1191,7 +1441,365 @@ pub fn run(action: Action) -> Result<u8> {
             print!("{document}");
             Ok(0)
         }
+        Action::Run {
+            target,
+            repo,
+            manifest,
+        } => {
+            let environment: Environment = std::env::vars_os().collect();
+            run_coverage(&target, &repo, &manifest, &environment)
+        }
     }
+}
+
+/// The `[coverage]` table of a manifest; a missing manifest is all defaults.
+fn load_config(path: &Path) -> Result<Config> {
+    match fs::read_to_string(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(error) => Err(failure(format!("{}: {error}", path.display()))),
+        Ok(text) => {
+            let parsed: ManifestFile = toml::from_str(&text)
+                .map_err(|error| failure(format!("{}: {error}", path.display())))?;
+            Ok(parsed.coverage.unwrap_or_default())
+        }
+    }
+}
+
+fn variable(environment: &Environment, name: &str) -> Option<OsString> {
+    environment
+        .get(OsStr::new(name))
+        .filter(|value| !value.is_empty())
+        .cloned()
+}
+
+/// The directory the private target is created in: `TMPDIR`, else the platform
+/// default. Refused when it lies inside the repository (the staged copy when
+/// the run floated): the build would write into the checked tree.
+pub fn private_target_parent(temporary: &Path, repo: &Path) -> Result<PathBuf> {
+    let parent = temporary.canonicalize().map_err(|error| {
+        failure(format!(
+            "coverage target parent {}: {error}",
+            temporary.display()
+        ))
+    })?;
+    if parent.starts_with(repo) {
+        return Err(failure(format!(
+            "unsafe coverage target: {} is inside {}",
+            parent.display(),
+            repo.display()
+        )));
+    }
+    Ok(parent)
+}
+
+/// `$ARTIFACT_ROOT` for `artifacts = true`: set, absolute and outside the repository.
+fn artifact_root(environment: &Environment, repo: &Path) -> Result<PathBuf> {
+    let directory = variable(environment, "ARTIFACT_ROOT")
+        .map(PathBuf::from)
+        .ok_or_else(|| failure("[coverage] artifacts = true requires ARTIFACT_ROOT"))?;
+    if !directory.is_absolute() {
+        return Err(failure("ARTIFACT_ROOT must be absolute"));
+    }
+    let resolved = directory
+        .canonicalize()
+        .unwrap_or_else(|_| absolutize(&directory, Path::new("/")));
+    if resolved.starts_with(repo) {
+        return Err(failure(format!(
+            "ARTIFACT_ROOT {} is inside {}",
+            directory.display(),
+            repo.display()
+        )));
+    }
+    Ok(directory)
+}
+
+/// The three `cargo llvm-cov` invocations of one run, in order: the
+/// instrumented execution with its JSON export, then the LCOV and annotated
+/// text reports of that same execution.
+pub fn report_commands(cargo: &Path, config: &Config) -> [Vec<OsString>; 3] {
+    let command = |head: &[&str], configured: &[&[String]], tail: [&str; 3]| {
+        let mut argv = vec![cargo.as_os_str().to_owned()];
+        argv.extend(head.iter().map(OsString::from));
+        for arguments in configured {
+            argv.extend(arguments.iter().map(OsString::from));
+        }
+        argv.extend(tail.iter().map(OsString::from));
+        argv
+    };
+    let report = config.report_arguments();
+    [
+        command(
+            &["llvm-cov", "--locked"],
+            &[&config.llvm_cov_arguments()],
+            ["--json", "--output-path", REPORTS[0]],
+        ),
+        command(
+            &["llvm-cov", "report", "--locked"],
+            &[&report],
+            ["--lcov", "--output-path", REPORTS[1]],
+        ),
+        command(
+            &["llvm-cov", "report", "--locked"],
+            &[&report, &config.text],
+            ["--text", "--output-path", REPORTS[2]],
+        ),
+    ]
+}
+
+fn display(command: &[OsString]) -> String {
+    command
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `rustup which --toolchain nightly <tool>`: an existing file, else an error.
+fn nightly_tool(environment: &Environment, tool: &str) -> Result<PathBuf> {
+    let output = Command::new("rustup")
+        .args(["which", "--toolchain", "nightly", tool])
+        .env_clear()
+        .envs(environment)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| {
+            failure(format!(
+                "the nightly toolchain is unavailable: cannot run rustup: {error}"
+            ))
+        })?;
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if !output.status.success() || !path.is_file() {
+        return Err(failure(format!(
+            "the nightly toolchain is unavailable: rustup which --toolchain nightly {tool}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(path)
+}
+
+/// Run one tool command in `root`; `Ok(false)` after printing its failure.
+fn execute(command: &[OsString], environment: &Environment, root: &Path) -> Result<bool> {
+    if crate::INTERRUPTED.load(Ordering::SeqCst) {
+        return Err(failure("ccid coverage run: interrupted"));
+    }
+    let status = Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(root)
+        .env_clear()
+        .envs(environment)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|error| failure(format!("cannot start {}: {error}", display(command))))?;
+    if status.success() {
+        return Ok(true);
+    }
+    let code = status
+        .code()
+        .map_or_else(|| "signal".to_owned(), |code| code.to_string());
+    eprintln!(
+        "ccid coverage run: {} failed (exit {code})",
+        display(command)
+    );
+    Ok(false)
+}
+
+/// The gates of one run over its three reports; prints like `gate` and `totals`.
+fn run_gates(root: &Path, config: &Config, gates: &[Gate], target: Target) -> u8 {
+    let mut texts = Vec::new();
+    for name in REPORTS {
+        let path = root.join(name);
+        match fs::read_to_string(&path) {
+            Ok(text) => texts.push(text),
+            Err(error) => {
+                eprintln!("Coverage gate: {}: {error}", path.display());
+                return 1;
+            }
+        }
+    }
+    let raw: serde_json::Value = match serde_json::from_str(&texts[0]) {
+        Ok(raw) => raw,
+        Err(error) => {
+            eprintln!("Coverage gate: {error}");
+            return 1;
+        }
+    };
+    for selected in gates {
+        let outcome = match selected {
+            Gate::Totals => {
+                let required = config
+                    .require_sources
+                    .as_ref()
+                    .map(|directory| root.join(directory));
+                totals(&raw, required.as_deref())
+            }
+            Gate::Source => gate(&texts[1], &raw, &texts[2], root, &config.exclusions, target)
+                .map(|report| report.output),
+        };
+        match outcome {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            Err(message) => {
+                eprintln!("Coverage gate: {message}");
+                return 1;
+            }
+        }
+    }
+    0
+}
+
+/// Produce the reports with a private target directory, removed in every case, and gate them.
+fn produce(
+    root: &Path,
+    config: &Config,
+    gates: &[Gate],
+    target: Target,
+    environment: &Environment,
+) -> Result<u8> {
+    let temporary = variable(environment, "TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    let parent = private_target_parent(&temporary, root)?;
+    for name in REPORTS {
+        let path = root.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_dir() => fs::remove_file(&path)?,
+            Ok(_) => {
+                return Err(failure(format!(
+                    "{} is a directory, not a coverage report",
+                    path.display()
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let rustc = nightly_tool(environment, "rustc")?;
+    let cargo = nightly_tool(environment, "cargo")?;
+    let bin = rustc
+        .parent()
+        .ok_or_else(|| failure("the nightly rustc has no directory"))?;
+    let mut child = environment.clone();
+    let path = std::env::join_paths(
+        std::iter::once(bin.to_path_buf()).chain(
+            variable(environment, "PATH")
+                .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .map_err(|error| failure(format!("cannot extend PATH: {error}")))?;
+    child.insert("PATH".into(), path);
+    child.insert("RUSTC".into(), rustc.clone().into_os_string());
+    child.insert("CARGO".into(), cargo.clone().into_os_string());
+    child.insert("RUSTUP_TOOLCHAIN".into(), "nightly".into());
+    for name in ["CARGO_BUILD_TARGET_DIR", "CARGO_LLVM_COV_TARGET_DIR"] {
+        child.remove(OsStr::new(name));
+    }
+    let probe = [
+        cargo.clone().into_os_string(),
+        "llvm-cov".into(),
+        "--version".into(),
+    ];
+    let available = Command::new(&probe[0])
+        .args(&probe[1..])
+        .current_dir(root)
+        .env_clear()
+        .envs(&child)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !available {
+        return Err(failure(format!(
+            "cargo-llvm-cov is unavailable for the nightly toolchain: {} failed",
+            display(&probe)
+        )));
+    }
+    let directory = tempfile::Builder::new()
+        .prefix("ccid-coverage-")
+        .tempdir_in(&parent)?;
+    child.insert(
+        "CARGO_TARGET_DIR".into(),
+        directory.path().as_os_str().to_owned(),
+    );
+    eprintln!(
+        "ccid coverage run: nightly {} with target directory {}",
+        rustc.display(),
+        directory.path().display()
+    );
+    let mut outcome = Ok(0);
+    for command in report_commands(&cargo, config) {
+        match execute(&command, &child, root) {
+            Ok(true) => {}
+            Ok(false) => {
+                outcome = Ok(1);
+                break;
+            }
+            Err(error) => {
+                outcome = Err(error);
+                break;
+            }
+        }
+    }
+    if matches!(outcome, Ok(0)) {
+        outcome = Ok(run_gates(root, config, gates, target));
+    }
+    let kept = directory.path().to_path_buf();
+    if let Err(error) = directory.close() {
+        eprintln!(
+            "ccid coverage run: cannot remove the coverage target {}: {error}",
+            kept.display()
+        );
+        if matches!(outcome, Ok(0)) {
+            outcome = Err(failure("the coverage target directory was not removed"));
+        }
+    }
+    outcome
+}
+
+/// `ccid coverage run`. `Ok(code)`: 0 pass, 1 tool failure or gate refusal;
+/// `Err` (exit 2): invalid configuration, missing nightly or cargo-llvm-cov, an
+/// unsafe target directory or artifact root.
+pub fn run_coverage(
+    target: &str,
+    repo: &Path,
+    manifest: &Path,
+    environment: &Environment,
+) -> Result<u8> {
+    let target = Target::from_str(target)
+        .map_err(|_| failure(format!("Unknown coverage target {target:?}")))?;
+    let root = resolve_root(repo)
+        .canonicalize()
+        .map_err(|error| failure(format!("{}: {error}", repo.display())))?;
+    let config = load_config(&absolutize(manifest, &root))?;
+    let gates = config.validate_run().map_err(failure)?;
+    let artifacts = if config.artifacts {
+        Some(artifact_root(environment, &root)?)
+    } else {
+        None
+    };
+    let mut outcome = produce(&root, &config, &gates, target, environment);
+    if let Some(directory) = artifacts {
+        // Like the scripts' exit trap: whatever exists, also after a failure.
+        let copied = fs::create_dir_all(&directory).and_then(|()| {
+            for name in REPORTS {
+                let report = root.join(name);
+                if report.is_file() {
+                    fs::copy(&report, directory.join(name))?;
+                }
+            }
+            Ok(())
+        });
+        if let Err(error) = copied {
+            eprintln!(
+                "ccid coverage run: cannot copy the reports to {}: {error}",
+                directory.display()
+            );
+            if matches!(outcome, Ok(0)) {
+                outcome = Ok(1);
+            }
+        }
+    }
+    outcome
 }
 
 #[cfg(test)]

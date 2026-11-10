@@ -665,6 +665,16 @@ fn main() -> ExitCode {
             };
         }
         Action::Coverage { action } => {
+            // `coverage run` outlives its cargo children on a signal, so it still
+            // removes its private target directory.
+            if matches!(action, ccid::coverage::Action::Run { .. }) {
+                if let Err(error) =
+                    ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
+                {
+                    eprintln!("ccid: cannot install cancellation handler: {error}");
+                    return ExitCode::from(2);
+                }
+            }
             return match ccid::coverage::run(action) {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
