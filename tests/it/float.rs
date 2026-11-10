@@ -610,11 +610,10 @@ fn a_ci_spelling_of_the_forge_host_floats_and_keys_like_the_land() {
 }
 
 /// `ccid cached` with moon and the verdict store: a hit without a dependency change, a miss
-/// with another resolution after one, the checkout unchanged and nothing skipped. Needs a
-/// preinstalled moon AND a cmnp that forwards `CCID_RESOLVED_LOCKS` to moon tasks as plumbing
-/// (cmnp e4bfd9c does not: the moon task then refuses with exit 2).
+/// with another resolution after one, the checkout unchanged and nothing skipped. The moon task
+/// receives the resolved locks because cmnp forwards `CCID_RESOLVED_LOCKS` as plumbing.
 #[test]
-#[ignore = "Run explicitly with CCID_TEST_MOON (a preinstalled moon) and a cmnp that forwards CCID_RESOLVED_LOCKS"]
+#[ignore = "Run explicitly with CCID_TEST_MOON naming a preinstalled moon"]
 fn cached_twice_hits_and_a_new_dependency_commit_misses() {
     let moon = PathBuf::from(std::env::var_os("CCID_TEST_MOON").expect("preinstalled moon"));
     let world = World::new(&["forge.example"]);

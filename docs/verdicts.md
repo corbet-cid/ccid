@@ -164,8 +164,8 @@ more: a check that rewrites its own lock is exactly what makes both caches skip.
   run (a moon task, the uncached route, a nested selection) overlays exactly those files after
   recomputing their digest; a mismatch, or a digest without its locks, is refused (exit 2). A
   child never resolves again, and a moon task keyed without a float floats nothing. Checked
-  programs never inherit the two variables. A moon task only receives `CCID_RESOLVED_LOCKS` when
-  cmnp forwards it as plumbing.
+  programs never inherit the two variables. cmnp forwards `CCID_RESOLVED_LOCKS` to moon tasks as
+  plumbing, like `CCID_FLEET_FILE`; the digest reaches them as declared environment.
 - **The uncached path** (`ccid check` without `CCID_RESULT_CACHE`) floats and stages the same
   way, so every CI job builds against the newest owned mains.
 - **Lanes and fixture builders** call `ccid float [--repo .] --into DIR`: the resolution only. It
