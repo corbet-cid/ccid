@@ -46,8 +46,8 @@ tool's.
 | `set -euo pipefail`, `exec 2>&1`, `CARGO_BUILD_JOBS` / `CARGO_TERM_COLOR` / `RUST_TEST_THREADS` exports, `rustc --version` and nightly version echoes | dropped: ccid sets jobs and test threads from its budget, the colour is in the shared profile, and `cache_tools` records the tool versions |
 | `python3 .github/check-first-party.py [args]` | `["ccid", "first-party", args...]` and `fleet = true` on the check; the script's exception maps become `[first_party]` data, keeping only entries that match the current lock ([first-party.md](first-party.md)) |
 | `bash .ci/update-our-crates.sh` | dropped, with no replacement inside the check |
-| `cargo fmt`, `clippy`, `test`, `check`, `build` | the script's exact cargo argv, one entry each |
-| `git diff --exit-code -- '*.rs' > format.patch` | `["bash", "-c", "<the line>"]`; `format.patch` into `cache_outputs` |
+| `cargo fmt --check`, `clippy`, `test`, `check`, `build` | the script's exact cargo argv, one entry each |
+| `cargo fmt --all` followed by `git diff --exit-code -- '*.rs' > format.patch` | `["cargo", "fmt", "--all", "--check"]`; no `format.patch` (rustfmt prints the diff into the check's log). A writing `cargo fmt` rewrites tracked sources on an unformatted tree, which the first hard rule forbids also on a failing run |
 | `cargo check --target wasm32-unknown-unknown ...` | the exact argv |
 | `cargo metadata ... > dependency-metadata.json` | `["bash", "-c", "<the line>"]`; `dependency-metadata.json` into `cache_outputs`. A tracked `dependency-metadata.json` stops the conversion |
 | `bash scripts/wasm-runner.sh` and the `GITHUB_PATH` reload | merged into the wasm test entry: `["bash", "-c", "PATH=\"$(ccid toolchain wasm-bindgen):$PATH\" <the test line>"]` |
@@ -163,8 +163,10 @@ python3 .github/check-coverage.py coverage.lcov coverage.json
 ```
 
 Converted: the import and every stage that reads its exports form one block,
-in the script's order; the llvm-cov arguments are the defaults, so no
-`[coverage]` table is needed, and the run writes and gates all three reports:
+in the script's order; the writing `cargo fmt --all` and its `git diff`
+become `cargo fmt --all --check`; the llvm-cov arguments are the defaults, so
+no `[coverage]` table is needed, and the run writes and gates all three
+reports:
 
 ```toml
 [checks.verify]
@@ -172,10 +174,10 @@ kind = "commands"
 fleet = true
 commands = [
   ["ccid", "first-party"],
-  ["bash", "-c", "set -euo pipefail\n<record-fixture import, unchanged>\ncargo fmt --all\ngit diff --exit-code -- '*.rs' > format.patch\ncargo clippy --locked --all-targets -- -D warnings\ncargo test --locked --all-targets\nexport CARGO_PROFILE_TEST_OPT_LEVEL='0'\nccid coverage run"],
+  ["bash", "-c", "set -euo pipefail\n<record-fixture import, unchanged>\ncargo fmt --all --check\ncargo clippy --locked --all-targets -- -D warnings\ncargo test --locked --all-targets\nexport CARGO_PROFILE_TEST_OPT_LEVEL='0'\nccid coverage run"],
 ]
 cache_tools = [...]
-cache_outputs = ["coverage.json", "coverage.lcov", "coverage.txt", "format.patch"]
+cache_outputs = ["coverage.json", "coverage.lcov", "coverage.txt"]
 ```
 
 When the record-fixture family moves into ccid, the block splits into one
