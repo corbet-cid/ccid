@@ -41,6 +41,7 @@ pub mod job_run;
 pub mod jobs;
 pub mod push;
 pub mod render;
+pub mod resolve_lock;
 pub mod resolver;
 mod runner;
 pub mod rustc_diag;
@@ -163,6 +164,9 @@ struct Manifest {
     #[serde(default)]
     #[allow(dead_code)]
     first_party: Option<first_party::Config>,
+    /// Data for `ccid resolve-lock` (npm lock retention). Absent: defaults.
+    #[serde(default)]
+    resolve: Option<resolve_lock::Config>,
 }
 /// The jobs whose success is the commit's aggregated verdict; every other job
 /// (release, publish, scheduled gates) reports under its own non-gating context.

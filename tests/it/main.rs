@@ -29,6 +29,7 @@ mod native_compile_cache;
 mod prose_cli;
 mod quality_cli;
 mod render;
+mod resolve_lock;
 mod resolver_config;
 #[cfg(unix)]
 mod toolchain;
