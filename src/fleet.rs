@@ -442,6 +442,151 @@ pub(crate) fn bind_selection(
     }
 }
 
+/// The release channel copy the rendered Forgejo shim keeps:
+/// `${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ccid-channel/last-good.json`.
+pub(crate) fn shim_channel_copy(environment: &Environment) -> PathBuf {
+    channel_state(environment).join("last-good.json")
+}
+
+/// The shim's channel state directory; job runners keep their fleet snapshots beside its copy.
+fn channel_state(environment: &Environment) -> PathBuf {
+    let base = match value(environment, "XDG_CACHE_HOME") {
+        Some(cache) => PathBuf::from(cache),
+        None => PathBuf::from(value(environment, "HOME").unwrap_or_else(|| "/tmp".into()))
+            .join(".cache"),
+    };
+    base.join("ccid-channel")
+}
+
+/// What a job runner (`job-run`, `execute-job`) hands its job about fleet data.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum JobFleet {
+    /// The runner or the job already names `CCID_FLEET_FILE`: nothing is added.
+    Provided,
+    /// No channel copy exists: `fleet = true` checks fail closed.
+    Absent,
+    /// A channel copy (`source`) carries valid fleet data; the job gets `CCID_FLEET_FILE=<path>`,
+    /// the immutable snapshot of that data (or the copy itself when no snapshot can be written).
+    Found {
+        path: String,
+        digest: String,
+        source: String,
+    },
+    /// A channel copy exists but carries no valid fleet data.
+    Invalid { error: String },
+}
+
+/// Reads of a channel copy that does not parse as JSON yet: another job's shim may be rewriting it.
+const TORN_READ_ATTEMPTS: u32 = 5;
+const TORN_READ_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The fleet data a job runner hands its job: from the runner's `CCID_CHANNEL_FILE`, else the
+/// shim's last fetched channel. `CCID_CHANNEL_FILE` itself is never set here. `declared` is the
+/// job's own environment, which wins.
+pub(crate) fn job_fleet(
+    environment: &Environment,
+    declared: &BTreeMap<String, String>,
+) -> JobFleet {
+    if value(environment, FLEET_FILE_ENV).is_some()
+        || declared.get(FLEET_FILE_ENV).is_some_and(|v| !v.is_empty())
+    {
+        return JobFleet::Provided;
+    }
+    let source = value(environment, "CCID_CHANNEL_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| shim_channel_copy(environment));
+    if fs::symlink_metadata(&source).is_err() {
+        return JobFleet::Absent;
+    }
+    let Some(text) = source.to_str().map(str::to_owned) else {
+        return JobFleet::Invalid {
+            error: format!("{} is not a UTF-8 path", source.display()),
+        };
+    };
+    let mut attempt = 1;
+    let bytes = loop {
+        match read_regular(&source) {
+            Ok(bytes)
+                if serde_json::from_slice::<serde_json::Value>(&bytes).is_err()
+                    && attempt < TORN_READ_ATTEMPTS => {}
+            other => break other,
+        }
+        attempt += 1;
+        std::thread::sleep(TORN_READ_PAUSE);
+    };
+    let fleet = match bytes.and_then(|bytes| from_channel(&bytes)) {
+        Ok(fleet) => fleet,
+        Err(error) => {
+            return JobFleet::Invalid {
+                error: format!("{text}: {error}"),
+            }
+        }
+    };
+    let digest = match fleet.digest() {
+        Ok(digest) => digest,
+        Err(error) => {
+            return JobFleet::Invalid {
+                error: format!("{text}: {error}"),
+            }
+        }
+    };
+    let path = write_snapshot(&channel_state(environment), &fleet, &digest)
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .unwrap_or_else(|| text.clone());
+    JobFleet::Found {
+        path,
+        digest,
+        source: text,
+    }
+}
+
+/// One immutable file per distinct fleet, `fleet-<digest>.json` holding `{"fleet": <canonical
+/// bytes>}`: written once through a temporary file renamed in the same directory, so a reader
+/// never sees it partial and a later channel fetch (another job's shim rewriting its copy) never
+/// changes the data a running job was keyed with.
+fn write_snapshot(directory: &Path, fleet: &Fleet, digest: &str) -> Result<PathBuf> {
+    use std::io::Write;
+    let path = directory.join(format!("fleet-{digest}.json"));
+    let mut bytes = b"{\"fleet\":".to_vec();
+    bytes.extend(fleet.canonical_bytes()?);
+    bytes.extend(b"}\n");
+    if read_regular(&path).is_ok_and(|existing| existing == bytes) {
+        return Ok(path);
+    }
+    fs::create_dir_all(directory)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    temporary.write_all(&bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(&path)?;
+    Ok(path)
+}
+
+/// `job_fleet` with its report on stderr: the `CCID_FLEET_FILE` value to add to the job, if any.
+/// Only `fleet = true` checks need fleet data and they fail closed without it, so a missing or
+/// invalid channel copy never stops the job here.
+pub(crate) fn provide_for_job(
+    runner: &str,
+    environment: &Environment,
+    declared: &BTreeMap<String, String>,
+) -> Option<String> {
+    match job_fleet(environment, declared) {
+        JobFleet::Found {
+            path,
+            digest,
+            source,
+        } => {
+            eprintln!("ccid {runner}: fleet data {digest} from {source} ({FLEET_FILE_ENV}={path})");
+            Some(path)
+        }
+        JobFleet::Invalid { error } => {
+            eprintln!("ccid {runner}: the release channel carries no fleet data ({error})");
+            None
+        }
+        JobFleet::Provided | JobFleet::Absent => None,
+    }
+}
+
 /// `ccid fleet` subcommands.
 #[derive(Debug, clap::Subcommand)]
 pub enum Action {

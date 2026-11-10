@@ -232,6 +232,12 @@ pub fn execute(request: &Request) -> Result<()> {
     // (e.g. CI_JOBS) are bound/validated exactly like scheduler-provided ones.
     withhold_secrets(&mut environment, &planned.withheld);
     crate::jobs::apply_job_environment(&mut environment, &planned.environment);
+    // Fleet data for `fleet = true` checks, exactly as `job-run` provides it: the runner's
+    // channel copy, pinned for this job as an immutable snapshot. The job's own value wins.
+    if let Some(path) = crate::fleet::provide_for_job("execute-job", &environment, &BTreeMap::new())
+    {
+        environment.insert(crate::fleet::FLEET_FILE_ENV.into(), path.into());
+    }
     crate::admission::admit(&mut environment)?;
     environment.insert("CHECKS".into(), planned.checks.join(",").into());
     environment.insert("GIT_TERMINAL_PROMPT".into(), "0".into());

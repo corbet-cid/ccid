@@ -765,3 +765,209 @@ fn retiring_owners_and_all_aliases_is_a_pure_data_change() {
     .unwrap();
     assert!(retired.insteadof_pairs().is_empty());
 }
+
+fn paths(items: &[(&str, &Path)]) -> Environment {
+    items
+        .iter()
+        .map(|(key, value)| (OsString::from(key), value.as_os_str().to_owned()))
+        .collect()
+}
+
+const JOB_CHANNEL: &str = r#"{"default":{"revision":"r","sha256":"s"},"fleet":{"schema":1,"first_party":["https://forge.example/org/"]}}"#;
+
+fn job_digest() -> String {
+    from_channel(JOB_CHANNEL.as_bytes())
+        .unwrap()
+        .digest()
+        .unwrap()
+}
+
+/// The snapshot `job_fleet` pins for a job in `state` (the shim's channel directory).
+fn snapshot(state: &Path) -> PathBuf {
+    state.join(format!("fleet-{}.json", job_digest()))
+}
+
+#[test]
+fn a_job_gets_an_immutable_snapshot_of_the_shims_channel_copy() {
+    let home = tempfile::tempdir().unwrap();
+    let state = home.path().join(".cache/ccid-channel");
+    fs::create_dir_all(&state).unwrap();
+    let copy = state.join("last-good.json");
+    fs::write(&copy, JOB_CHANNEL).unwrap();
+    let none = BTreeMap::new();
+    let found = job_fleet(&paths(&[("HOME", home.path())]), &none);
+    assert_eq!(
+        found,
+        JobFleet::Found {
+            path: snapshot(&state).to_str().unwrap().to_owned(),
+            digest: job_digest(),
+            source: copy.to_str().unwrap().to_owned(),
+        }
+    );
+    // The snapshot is channel data with exactly the same fleet and digest.
+    let pinned = fs::read(snapshot(&state)).unwrap();
+    assert_eq!(
+        from_channel(&pinned).unwrap().digest().unwrap(),
+        job_digest()
+    );
+    // Another job's shim rewriting its copy never changes what this job reads.
+    fs::write(&copy, r#"{"default":{"revision":"r","sha256":"s"}}"#).unwrap();
+    assert_eq!(fs::read(snapshot(&state)).unwrap(), pinned);
+    // A second job with the same data reuses the snapshot byte for byte.
+    fs::write(&copy, JOB_CHANNEL).unwrap();
+    assert_eq!(job_fleet(&paths(&[("HOME", home.path())]), &none), found);
+    assert_eq!(fs::read(snapshot(&state)).unwrap(), pinned);
+    // Nothing but the copy and the snapshot is left in the state directory.
+    let mut names: Vec<_> = fs::read_dir(&state)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            OsString::from(format!("fleet-{}.json", job_digest())),
+            OsString::from("last-good.json")
+        ]
+    );
+}
+
+#[test]
+fn the_channel_copy_follows_the_shims_location_rules() {
+    let none = BTreeMap::new();
+    // XDG_CACHE_HOME wins over HOME, exactly like the shim's ${XDG_CACHE_HOME:-...}.
+    let home = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let state = xdg.path().join("ccid-channel");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("last-good.json"), JOB_CHANNEL).unwrap();
+    let JobFleet::Found { path, source, .. } = job_fleet(
+        &paths(&[("HOME", home.path()), ("XDG_CACHE_HOME", xdg.path())]),
+        &none,
+    ) else {
+        panic!("the XDG copy is used");
+    };
+    assert_eq!(source, state.join("last-good.json").to_str().unwrap());
+    assert_eq!(path, snapshot(&state).to_str().unwrap());
+    // A runner's CCID_CHANNEL_FILE is the source when it names one; the snapshot still lives
+    // in the shim's state directory.
+    let runner = home.path().join("runner-channel.json");
+    fs::write(&runner, JOB_CHANNEL).unwrap();
+    let JobFleet::Found { path, source, .. } = job_fleet(
+        &paths(&[("HOME", home.path()), ("CCID_CHANNEL_FILE", &runner)]),
+        &none,
+    ) else {
+        panic!("the runner's channel file is used");
+    };
+    assert_eq!(source, runner.to_str().unwrap());
+    assert_eq!(
+        path,
+        snapshot(&home.path().join(".cache/ccid-channel"))
+            .to_str()
+            .unwrap()
+    );
+    // Without HOME the shim keeps its copy below /tmp.
+    assert_eq!(
+        shim_channel_copy(&Environment::new()),
+        Path::new("/tmp/.cache/ccid-channel/last-good.json")
+    );
+    assert_eq!(
+        shim_channel_copy(&environment(&[("HOME", ""), ("XDG_CACHE_HOME", "")])),
+        Path::new("/tmp/.cache/ccid-channel/last-good.json")
+    );
+}
+
+#[test]
+fn an_explicit_fleet_file_is_never_replaced() {
+    let home = tempfile::tempdir().unwrap();
+    let runner = home.path().join("runner-channel.json");
+    fs::write(&runner, JOB_CHANNEL).unwrap();
+    assert_eq!(
+        job_fleet(
+            &paths(&[("HOME", home.path()), (FLEET_FILE_ENV, &runner)]),
+            &BTreeMap::new()
+        ),
+        JobFleet::Provided
+    );
+    let declared = BTreeMap::from([(FLEET_FILE_ENV.to_owned(), "/declared".to_owned())]);
+    assert_eq!(
+        job_fleet(&paths(&[("HOME", home.path())]), &declared),
+        JobFleet::Provided
+    );
+    assert_eq!(
+        provide_for_job(
+            "test",
+            &paths(&[("HOME", home.path()), (FLEET_FILE_ENV, &runner)]),
+            &BTreeMap::new()
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_missing_torn_or_fleetless_channel_copy_adds_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let none = BTreeMap::new();
+    assert_eq!(
+        job_fleet(&paths(&[("HOME", home.path())]), &none),
+        JobFleet::Absent
+    );
+    let state = home.path().join(".cache/ccid-channel");
+    fs::create_dir_all(&state).unwrap();
+    let copy = state.join("last-good.json");
+    fs::write(&copy, r#"{"default":{"revision":"r","sha256":"s"}}"#).unwrap();
+    let JobFleet::Invalid { error } = job_fleet(&paths(&[("HOME", home.path())]), &none) else {
+        panic!("a channel without fleet data is reported");
+    };
+    assert!(
+        error.contains("the release channel carries no fleet data"),
+        "{error}"
+    );
+    // A copy that stays torn (half written) is reported after the bounded retries.
+    fs::write(&copy, &JOB_CHANNEL[..40]).unwrap();
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        job_fleet(&paths(&[("HOME", home.path())]), &none),
+        JobFleet::Invalid { .. }
+    ));
+    assert!(started.elapsed() >= TORN_READ_PAUSE * (TORN_READ_ATTEMPTS - 1));
+    assert_eq!(
+        provide_for_job("test", &paths(&[("HOME", home.path())]), &none),
+        None
+    );
+    #[cfg(unix)]
+    {
+        // A symbolic link is refused, like the runner's channel file.
+        fs::remove_file(&copy).unwrap();
+        let target = home.path().join("target.json");
+        fs::write(&target, JOB_CHANNEL).unwrap();
+        std::os::unix::fs::symlink(&target, &copy).unwrap();
+        assert!(matches!(
+            job_fleet(&paths(&[("HOME", home.path())]), &none),
+            JobFleet::Invalid { .. }
+        ));
+    }
+}
+
+#[test]
+fn without_a_writable_state_directory_the_job_reads_the_copy_itself() {
+    let directory = tempfile::tempdir().unwrap();
+    let runner = directory.path().join("runner-channel.json");
+    fs::write(&runner, JOB_CHANNEL).unwrap();
+    // XDG_CACHE_HOME names a regular file: no snapshot directory can exist below it.
+    let blocked = directory.path().join("not-a-directory");
+    fs::write(&blocked, "").unwrap();
+    let environment = paths(&[("XDG_CACHE_HOME", &blocked), ("CCID_CHANNEL_FILE", &runner)]);
+    assert_eq!(
+        job_fleet(&environment, &BTreeMap::new()),
+        JobFleet::Found {
+            path: runner.to_str().unwrap().to_owned(),
+            digest: job_digest(),
+            source: runner.to_str().unwrap().to_owned(),
+        }
+    );
+    assert_eq!(
+        provide_for_job("test", &environment, &BTreeMap::new()),
+        Some(runner.to_str().unwrap().to_owned())
+    );
+}
