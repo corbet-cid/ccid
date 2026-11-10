@@ -228,6 +228,14 @@ enum Action {
         #[arg(long)]
         npm: bool,
     },
+    /// Check reviewed advisory exceptions and transport version floors
+    /// offline against deny.toml and dependency-metadata.json.
+    Advisories {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = ".ci/ccid.toml")]
+        manifest: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -713,6 +721,15 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid resolve-lock: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::Advisories { repo, manifest } => {
+            return match ccid::advisories::run(&repo, &manifest) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid advisories: {error}");
                     ExitCode::from(2)
                 }
             };

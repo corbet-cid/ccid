@@ -14,6 +14,7 @@
 
 #![forbid(unsafe_code)]
 
+mod advisories;
 mod cache_acceptance;
 mod cargo_target;
 mod channel;
