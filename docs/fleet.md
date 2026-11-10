@@ -67,9 +67,20 @@ refused). Its location is never part of a key; its content is, through the diges
 
 | Context | `CCID_FLEET_FILE` |
 |---|---|
-| Forgejo job (`ccid job-run`), Crow/Argo job (`ccid execute-job`) | Set by the job runner when neither the runner nor the job names it. The source is the runner's `CCID_CHANNEL_FILE` when set, else the shim's copy `${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ccid-channel/last-good.json` (a regular file with valid fleet data; a copy that does not parse yet is re-read a few times, since another job's shim may be rewriting it). The job then reads an immutable snapshot of that data, `ccid-channel/fleet-<digest>.json` beside the shim's copy (`{"fleet": <canonical bytes>}`, written once through a temporary file and a rename), so a later channel fetch never changes what a running job was keyed with; without a writable state directory it reads the source itself. The runner prints `fleet data <digest> from <source> (CCID_FLEET_FILE=<path>)`, or that the channel carries no fleet data, and continues. It never sets `CCID_CHANNEL_FILE`. A Crow/Argo host with neither file gets no fleet data: its `fleet = true` checks fail closed until the host provides `CCID_CHANNEL_FILE` or `CCID_FLEET_FILE`. |
+| Forgejo job (`ccid job-run`), Crow/Argo job (`ccid execute-job`) | Set by the job runner when neither the runner nor the job names it. The source is the runner's `CCID_CHANNEL_FILE` when set, else the shim's copy `${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/ccid-channel/last-good.json` (a regular file with valid fleet data; a copy that does not parse yet is re-read a few times, since another job's shim may be rewriting it). The job then reads an immutable snapshot of that data, `ccid-channel/fleet-<digest>.json` beside the shim's copy (`{"fleet": <canonical bytes>}`, written once through a temporary file and a rename), so a later channel fetch never changes what a running job was keyed with; without a writable state directory it reads the source itself. The runner prints `fleet data <digest> from <source> (CCID_FLEET_FILE=<path>)`, or that the channel carries no fleet data, and continues. It never sets `CCID_CHANNEL_FILE`. A Crow/Argo host with neither file gets no fleet data: its `fleet = true` checks fail closed (see the requirement below). |
 | Land gate and other lanes | The caller exports a fetched copy of `channel.json`. |
 | Anything else | Whatever the caller names. Without it, `fleet = true` checks fail closed. |
+
+### Requirement for any Crow or Argo job with fleet checks
+
+Crow and Argo jobs run `ccid execute-job` with a pinned tool and no shim, so nothing writes a
+channel copy on their hosts. Before a job on such an engine runs a `fleet = true` check, the
+engine must give it `CCID_FLEET_FILE`: the absolute path of a regular file outside the source
+tree holding a copy of the release channel, fetched at job start from the same document
+`CCID_CHANNEL_URL` names (never a timer or a second, hand-maintained copy, so an org move stays
+one edit of `channel.json`). A runner's `CCID_CHANNEL_FILE` also works as the source, but it
+governs which verdict records the runner accepts as well, so set it only when that is intended.
+Without either, those checks fail closed. Today no Crow or Argo job runs fleet checks.
 
 ## The `fleet = true` contract
 
