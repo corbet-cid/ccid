@@ -374,12 +374,18 @@ mod tests {
             table["profile"]["dev"]["package"]["*"]["opt-level"].as_integer(),
             Some(1)
         );
-        // No incremental compilation: PATH crates are the only incremental units and they are uncacheable. A job that
-        // deliberately wants incremental builds sets CARGO_INCREMENTAL=1, which Cargo applies over the profile.
-        assert_eq!(
-            table["profile"]["dev"]["incremental"].as_bool(),
-            Some(false)
-        );
+        // Incremental compilation stays ON (Julian 2026-11-09): the shared profile never sets `incremental = false` for
+        // dev or test. Lanes and CI key PATH crates alike only while both build them incrementally (cache.rs
+        // incremental_default; infra checks the fleet's copy, catalog/ccid-dev-profile.toml, the same way).
+        for profile in ["dev", "test"] {
+            assert_ne!(
+                table["profile"][profile]
+                    .get("incremental")
+                    .and_then(toml::Value::as_bool),
+                Some(false),
+                "{profile}: incremental stays on"
+            );
+        }
         let mut commands = vec![
             strings(&["rustup", "run", "1.94.0", "cargo", "clippy", "--locked"]),
             strings(&["rustup", "run", "1.94.0", "cargo"]),

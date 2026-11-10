@@ -230,17 +230,22 @@ pub(crate) fn apply_canonical_rust_homes(env: &mut Environment) {
 /// Cap of the incremental-compilation state of one target (MiB), unless `CCID_INCREMENTAL_CAP_MB` names another.
 const INCREMENTAL_CAP_MB: u64 = 2048;
 
-/// Whether rustc may keep incremental state in this target: only a persistent target at a stable source path
-/// (`persistent`) keeps it between runs, and only there does it pay (a fresh or seeded directory gets nothing from it).
-/// A job that sets `CARGO_INCREMENTAL` itself keeps its value (`None`); otherwise 1 for a persistent target and no
-/// opinion for any other (the shared profile then applies its `incremental = false`, because PATH crates are uncacheable
-/// incrementally). Dependencies from registries and git stay non-incremental (Cargo applies it to workspace members only), so
-/// their compile-cache hits are unaffected.
-pub(crate) fn incremental_default(env: &Environment, persistent: bool) -> Option<&'static str> {
+/// `CARGO_INCREMENTAL` for a cargo check: 1 for every target, unless the job sets `CARGO_INCREMENTAL` itself (`None`).
+///
+/// Incremental compilation stays on everywhere, CI included. A forge job runs with `CI=true`, and Cargo then
+/// builds the workspace members (PATH crates) non-incrementally even when the profile says `incremental = true`. The
+/// setting is part of the unit's `-C metadata`, so a CI build of a PATH crate never had the key of the same
+/// crate built in a lane. `CARGO_INCREMENTAL=1` in the environment wins over both the CI default and the profile, so
+/// lanes and CI key PATH crates alike. Measured with a test binary: lane `-C metadata` 32f89583; CI=true alone 97031b36;
+/// CI=true with CARGO_INCREMENTAL=1 32f89583. A compile cache that strips `-C incremental` from its key (kache) still
+/// caches these units. `persistent` (a target that survives between runs at the stable source path) no longer changes
+/// the value; in a fresh or seeded directory the incremental state just goes unused. Dependencies from registries and
+/// git stay non-incremental either way (Cargo applies it to workspace members only).
+pub(crate) fn incremental_default(env: &Environment, _persistent: bool) -> Option<&'static str> {
     if value(env, "CARGO_INCREMENTAL").is_some() {
         return None;
     }
-    persistent.then_some("1")
+    Some("1")
 }
 
 /// The `incremental` directories below a target (`<target>/<profile>/incremental`, plus the per-triple variants).
@@ -1157,10 +1162,10 @@ mod tests {
     }
 
     #[test]
-    fn incremental_is_on_only_for_a_persistent_target_and_never_overrides_the_job() {
+    fn incremental_is_on_for_every_target_and_never_overrides_the_job() {
         let none = Environment::new();
         assert_eq!(incremental_default(&none, true), Some("1"));
-        assert_eq!(incremental_default(&none, false), None);
+        assert_eq!(incremental_default(&none, false), Some("1"));
         let declared = Environment::from([("CARGO_INCREMENTAL".into(), "0".into())]);
         assert_eq!(incremental_default(&declared, true), None);
         let declared = Environment::from([("CARGO_INCREMENTAL".into(), "1".into())]);

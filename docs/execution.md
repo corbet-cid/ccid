@@ -197,12 +197,11 @@ check's verdict and bypass reason without running, and `ccid job-run --local --s
 
 ## Incremental compilation
 
-A cargo check whose target is persistent and runs at the stable source path (a cached, cargo-only selection without a
-caller-declared target) gets `CARGO_INCREMENTAL=1` unless the job sets `CARGO_INCREMENTAL` itself; any other check keeps the
-shared profile's `incremental = false`. Cargo applies incremental compilation to workspace members only, so registry and git
-dependencies stay non-incremental and keep their compile-cache hits; the profile disables it for the PATH crates too, because
-an incremental compile is not cacheable (the cmtymeet lane measurement: 642 uncacheable units with it on, 6 with it off).
-`CARGO_INCREMENTAL` in the job environment wins over the profile, which is what gives the heavy runner's persistent slot
-targets their incremental builds. The incremental state of a target is capped (2048 MiB, `CCID_INCREMENTAL_CAP_MB`): above the cap ccid
+Every cargo check gets `CARGO_INCREMENTAL=1` unless the job sets `CARGO_INCREMENTAL` itself. Incremental compilation stays
+on everywhere, CI included: under `CI=true` Cargo builds workspace members non-incrementally even when the profile asks for
+incremental builds. That setting is part of a unit's `-C metadata`, so without the variable a CI build of a PATH crate never
+had the key of the same crate built in a lane. The environment wins over both the CI default and the profile, and the shared
+profile (`profiles/dev.toml`) never sets `incremental = false` (a test asserts it). Cargo applies incremental compilation to
+workspace members only, so registry and git dependencies stay non-incremental and keep their compile-cache hits. The incremental state of a target is capped (2048 MiB, `CCID_INCREMENTAL_CAP_MB`): above the cap ccid
 removes only the `incremental` directories before the run, never build outputs or other caches, and logs an
 `incremental-trimmed` event. Debug information stays off (`CARGO_PROFILE_*_DEBUG` is the job's declaration).
