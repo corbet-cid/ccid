@@ -271,6 +271,10 @@ pub struct Prepared {
     /// The exact tree list the key was built from, so the post-run check re-reads the same
     /// paths and ignores outputs the check wrote beside them.
     tree_entries: Vec<TreeEntry>,
+    /// The git dependency commits of the checkout's own locks when the key was built. A floated
+    /// key names the resolution's commits instead; the checkout's locks must still read the same
+    /// after the run, because ccid never writes them.
+    checkout_dependencies: BTreeMap<String, String>,
     /// `CCID_RESULT_CACHE`; the verdict store is its `verdicts/` child.
     cache: Option<PathBuf>,
     store: Option<PathBuf>,
@@ -322,7 +326,7 @@ fn git_raw(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
-fn is_repository(root: &Path) -> bool {
+pub(crate) fn is_repository(root: &Path) -> bool {
     root.join(".git").exists()
 }
 
@@ -515,7 +519,7 @@ fn tree_digest(root: &Path, commit: &str) -> Result<String> {
 /// installed packages). The same exclusion the land's nested-lock scan uses.
 const LOCK_SKIP: &[&str] = &["fuzz", "target", "node_modules", "vendor"];
 
-fn lock_paths(root: &Path, commit: &str) -> Result<Vec<String>> {
+pub(crate) fn lock_paths(root: &Path, commit: &str) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     if is_repository(root) {
         let listing = git(root, &["ls-tree", "-r", "--name-only", commit])?;
@@ -529,6 +533,15 @@ fn lock_paths(root: &Path, commit: &str) -> Result<Vec<String>> {
             }
         }
     } else {
+        paths = walked_lock_paths(root)?;
+    }
+    Ok(paths)
+}
+
+/// The locks of an exported tree (no repository to ask), with the same exclusions.
+pub(crate) fn walked_lock_paths(root: &Path) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    {
         fn walk(root: &Path, path: &Path, out: &mut Vec<String>) -> Result<()> {
             let mut entries: Vec<PathBuf> = fs::read_dir(path)?
                 .collect::<std::io::Result<Vec<_>>>()?
@@ -560,13 +573,31 @@ fn lock_paths(root: &Path, commit: &str) -> Result<Vec<String>> {
 }
 
 /// Every git dependency commit of every lock **as it stands in the working tree**, keyed
-/// `<lock path>:<package>:<url>`. Call after [`resolve_git_dependencies`].
+/// `<lock path>:<package>:<url>`. ccid never rewrites these locks: a floated run keys the
+/// resolution's commits instead (`float::Resolution::commits`, the same map over the resolved
+/// locks).
 fn git_dependencies(root: &Path, commit: &str) -> Result<BTreeMap<String, String>> {
-    let mut resolved = BTreeMap::new();
+    let mut locks = Vec::new();
     for path in lock_paths(root, commit)? {
         let text = fs::read_to_string(root.join(&path))
             .map_err(|error| failure(format!("Committed lock {path} is unreadable: {error}")))?;
-        let value: toml::Value = toml::from_str(&text)
+        locks.push((path, text));
+    }
+    lock_dependencies(
+        locks
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str())),
+    )
+}
+
+/// The git dependency commits of the given locks (`(lock path, lock text)`), keyed
+/// `<lock path>:<package>:<url>`.
+pub(crate) fn lock_dependencies<'a>(
+    locks: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<BTreeMap<String, String>> {
+    let mut resolved = BTreeMap::new();
+    for (path, text) in locks {
+        let value: toml::Value = toml::from_str(text)
             .map_err(|error| failure(format!("Committed lock {path} is not TOML: {error}")))?;
         for package in value
             .get("package")
@@ -602,105 +633,8 @@ fn git_dependencies(root: &Path, commit: &str) -> Result<BTreeMap<String, String
 
 /// Cargo's package-id specification for one git package: the lock's source without its
 /// `#<commit>` fragment, keeping the `git+` scheme and the `?branch=` query.
-fn git_spec(url: &str, name: &str, version: &str) -> String {
+pub(crate) fn git_spec(url: &str, name: &str, version: &str) -> String {
     format!("git+{url}#{name}@{version}")
-}
-
-/// The forge host of this repository (`CI_REPOSITORY_URL`, else the checkout's origin).
-fn repository_host(root: &Path, environment: &Environment) -> Option<String> {
-    let url = value(environment, "CI_REPOSITORY_URL").or_else(|| {
-        if is_repository(root) {
-            git(root, &["config", "--get", "remote.origin.url"]).ok()
-        } else {
-            None
-        }
-    })?;
-    url::Url::parse(&url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-}
-
-/// Resolve every branch-tracking git dependency of this repository's own forge in place.
-///
-/// CI's job floats its owned crates to the newest main inside `verify.sh`, so the committed lock
-/// is read before the resolution and is not what gets built (P2). Doing the same resolution here,
-/// before the key, makes the locks (and therefore both the verdict key and the ordinary cached
-/// key) name the exact commits the check will build. The land gate serves those commits from
-/// mirrors through `GIT_CONFIG_*` `url.*.insteadOf`, which Cargo honours and which cmnp forwards
-/// to cached work as plumbing (P3).
-///
-/// Fails closed: when resolution is impossible the caller disables verdict reading and writing
-/// for this run and CI behaves exactly as before.
-pub fn resolve_git_dependencies(root: &Path, environment: &Environment) -> Result<usize> {
-    let Some(host) = repository_host(root, environment) else {
-        return Err(failure(
-            "Verdict key cannot identify this repository's forge",
-        ));
-    };
-    let mut targets: BTreeSet<(PathBuf, String)> = BTreeSet::new();
-    for path in lock_paths(root, &commit(root, None, environment)?)? {
-        let full = root.join(&path);
-        let text = fs::read_to_string(&full)?;
-        let value: toml::Value = toml::from_str(&text)
-            .map_err(|error| failure(format!("Lock {path} is not TOML: {error}")))?;
-        let directory = full.parent().unwrap_or(root).to_path_buf();
-        for package in value
-            .get("package")
-            .and_then(|packages| packages.as_array())
-            .into_iter()
-            .flatten()
-        {
-            let (Some(name), Some(version), Some(source)) = (
-                package.get("name").and_then(|name| name.as_str()),
-                package.get("version").and_then(|version| version.as_str()),
-                package.get("source").and_then(|source| source.as_str()),
-            ) else {
-                continue;
-            };
-            let Some(rest) = source.strip_prefix("git+") else {
-                continue;
-            };
-            let Some((url, _)) = rest.split_once('#') else {
-                continue;
-            };
-            // Only branch-tracking packages move; a pinned `rev` is the committed content.
-            if !url.contains("branch=") {
-                continue;
-            }
-            let base = url.split('?').next().unwrap_or(url);
-            if url::Url::parse(base)
-                .ok()
-                .and_then(|parsed| parsed.host_str().map(str::to_owned))
-                .as_deref()
-                != Some(host.as_str())
-            {
-                continue;
-            }
-            targets.insert((directory.clone(), git_spec(url, name, version)));
-        }
-    }
-    if targets.is_empty() {
-        return Ok(0);
-    }
-    let cargo = crate::compile_cache::executable(environment, "cargo")
-        .ok_or_else(|| failure("Verdict key cannot resolve Cargo for dependency resolution"))?;
-    for (directory, spec) in &targets {
-        let output = Command::new(&cargo)
-            .args(["update", "-p", spec])
-            .current_dir(directory)
-            .env_clear()
-            .envs(environment.iter())
-            .output()
-            .map_err(|error| failure(format!("Verdict key cannot run cargo update: {error}")))?;
-        if !output.status.success() {
-            return Err(failure(format!(
-                "Verdict key cannot resolve {spec}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-    }
-    event(json!({"event":"verdict-resolve","packages":targets.len()}));
-    Ok(targets.len())
 }
 
 /// The executable of a declared compiler/linker value: `CC` may be a whole command line
@@ -1269,8 +1203,9 @@ fn repository_identity(root: &Path, environment: &Environment) -> String {
 
 /// The verdict layer only speaks for content a producer actually committed or exported. A
 /// checkout with unrelated local modifications has no exact tree to name, so it gets no verdict
-/// (the ordinary cache still works). Dependency resolution may rewrite `Cargo.lock`; that is the
-/// one tracked modification the key is meant to capture.
+/// (the ordinary cache still works). A locally rewritten `Cargo.lock` is the one tracked
+/// modification that is keyed (by its content, through the tree digest): ccid itself never
+/// writes it, it resolves in a copy (`float`), but a producer may have.
 fn applicable(root: &Path, outputs: &[String]) -> Result<()> {
     if !is_repository(root) {
         return Ok(());
@@ -1337,6 +1272,7 @@ fn check_outputs(root: &Path, check: &crate::Check) -> Result<Vec<String>> {
     Ok(outputs)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare(
     root: &Path,
     check_name: &str,
@@ -1345,6 +1281,42 @@ pub(crate) fn prepare(
     commit_id: &str,
     ignore_untracked: &[String],
 ) -> Result<Prepared> {
+    prepare_resolved(
+        root,
+        check_name,
+        check,
+        environment,
+        commit_id,
+        ignore_untracked,
+        None,
+    )
+}
+
+/// [`prepare`] for a floated run: `resolved` is the resolution's commit map
+/// (`float::Resolution::commits`), keyed as `git_dependencies` in place of the checkout's own.
+/// The check must declare the resolution digest (`float::bind`) and the environment must carry
+/// it: the digest names the resolved locks, which the tree digest of the checkout does not.
+pub(crate) fn prepare_resolved(
+    root: &Path,
+    check_name: &str,
+    check: &crate::Check,
+    environment: &Environment,
+    commit_id: &str,
+    ignore_untracked: &[String],
+    resolved: Option<&BTreeMap<String, String>>,
+) -> Result<Prepared> {
+    if resolved.is_some()
+        && (value(environment, crate::float::RESOLUTION_ENV).is_none()
+            || !check
+                .cache_env
+                .iter()
+                .any(|name| name == crate::float::RESOLUTION_ENV))
+    {
+        return Err(failure(format!(
+            "A floated check is never keyed without {} in its declared environment",
+            crate::float::RESOLUTION_ENV
+        )));
+    }
     // The digest is what makes a `fleet = true` verdict specific to its fleet data: never key
     // such a check without it (an absent value would name every fleet at once).
     if check.fleet && value(environment, crate::fleet::FLEET_DIGEST_ENV).is_none() {
@@ -1362,10 +1334,13 @@ pub(crate) fn prepare(
     let entries = tree_entries(root, commit_id)?;
     let identity = check_identity_payload(check, environment, root)?;
     let check_identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&identity)?));
+    let checkout_dependencies = git_dependencies(root, commit_id)?;
     let components = KeyComponents {
         schema: SCHEMA,
         tree: entries_digest(root, &entries)?,
-        git_dependencies: git_dependencies(root, commit_id)?,
+        git_dependencies: resolved
+            .cloned()
+            .unwrap_or_else(|| checkout_dependencies.clone()),
         toolchain: toolchain(check, environment)?,
         profile: format!("{:x}", Sha256::digest(DEV_PROFILE.as_bytes())),
         epoch: crate::cached::VERDICT_EPOCH,
@@ -1396,6 +1371,7 @@ pub(crate) fn prepare(
         branch: crate::cached_outputs::branch(root, environment),
         root: root.to_path_buf(),
         tree_entries: entries,
+        checkout_dependencies,
         cache,
         store,
         outputs,
@@ -1438,13 +1414,15 @@ pub fn outputs_ready(prepared: &Prepared, _environment: &Environment) -> Result<
 }
 
 /// Prepare every selected check. A check whose key cannot be computed is simply absent: the
-/// ordinary cached run still executes it, and no verdict is written for it.
+/// ordinary cached run still executes it, and no verdict is written for it. `resolved` is the
+/// commit map of this run's float, if it floated anything.
 pub fn prepare_selection(
     root: &Path,
     checks: &BTreeMap<String, crate::Check>,
     selected: &[String],
     environment: &Environment,
     commit_id: &str,
+    resolved: Option<&BTreeMap<String, String>>,
 ) -> Vec<Prepared> {
     // A selection may contain more than one output-producing check; every declared output of
     // the selection is evidence a previous run may have left in this checkout, never input.
@@ -1456,7 +1434,15 @@ pub fn prepare_selection(
         .collect();
     let mut prepared = Vec::new();
     for name in selected {
-        match prepare(root, name, &checks[name], environment, commit_id, &ignored) {
+        match prepare_resolved(
+            root,
+            name,
+            &checks[name],
+            environment,
+            commit_id,
+            &ignored,
+            resolved,
+        ) {
             Ok(entry) => prepared.push(entry),
             Err(error) => event(json!({
                 "event": "verdict-unavailable",
@@ -1786,8 +1772,10 @@ pub fn lookup_ready(prepared: &Prepared, environment: &Environment) -> Lookup {
 
 /// Record a successful run of every prepared check that actually went through the result cache.
 /// `bypassed` names checks that ran uncached for a semantic reason; their result is not reused.
-/// The record is written only when the working tree still names the inputs the key was built
-/// from: a dependency that moved while the check ran never leaves a pass under the old key.
+/// The record is written only when the checkout still holds the inputs the key was built from:
+/// a check that wrote the checkout (its tree or its locks) never leaves a pass under the old key.
+/// A floated check ran in a staged copy; its run reports locks it moved there
+/// (`float-locks-moved` in its receipt), which refuses the record too.
 pub fn record_success(
     prepared: &[Prepared],
     bypassed: &BTreeSet<String>,
@@ -1823,8 +1811,8 @@ pub fn record_success(
         })();
         match current {
             Ok((tree, dependencies))
-                if tree == entry.components.tree
-                    && dependencies == entry.components.git_dependencies => {}
+                if tree == entry.components.tree && dependencies == entry.checkout_dependencies => {
+            }
             Ok(_) => {
                 event(json!({
                     "event": "verdict-skipped",
@@ -1839,6 +1827,14 @@ pub fn record_success(
                 );
                 continue;
             }
+        }
+        if crate::float::receipt_reports_moved_locks(&entry.root, &entry.check) {
+            event(json!({
+                "event": "verdict-skipped",
+                "check": entry.check,
+                "reason": "the check moved its staged locks while it ran",
+            }));
+            continue;
         }
         let record = Record {
             schema: SCHEMA,

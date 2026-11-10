@@ -22,6 +22,7 @@ mod content_pins;
 mod dependency_resolution;
 mod first_party;
 mod fleet;
+mod float;
 mod freshness;
 mod job_execution;
 mod native_compile_cache;

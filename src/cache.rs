@@ -268,22 +268,31 @@ pub(crate) fn incremental_default(env: &Environment) -> Option<&'static str> {
 /// fails. The decision and every rejection are logged as a `scratch-root`
 /// event.
 pub(crate) fn scratch(env: &mut Environment) -> Result<tempfile::TempDir> {
-    scratch_with_short_base(env, Path::new("/tmp"))
+    scratch_with_short_base(env, Path::new("/tmp"), true)
+}
+
+/// [`scratch`] without the `scratch-root` event, for a command whose standard output is one
+/// machine-readable line (`ccid float`).
+pub(crate) fn quiet_scratch(env: &mut Environment) -> Result<tempfile::TempDir> {
+    scratch_with_short_base(env, Path::new("/tmp"), false)
 }
 
 fn scratch_with_short_base(
     env: &mut Environment,
     short_parent: &Path,
+    log: bool,
 ) -> Result<tempfile::TempDir> {
     #[cfg(unix)]
     {
         let (scratch, choice) = choose_scratch(env, short_parent, Path::new("/"))?;
-        log_scratch_choice(scratch.path(), &choice);
+        if log {
+            log_scratch_choice(scratch.path(), &choice);
+        }
         Ok(scratch)
     }
     #[cfg(not(unix))]
     {
-        let _ = short_parent;
+        let _ = (short_parent, log);
         let parent = scratch_parent(env)?;
         scratch_in(env, parent)
     }
@@ -684,7 +693,7 @@ impl Drop for StableSource {
     }
 }
 
-fn copy_source(source: &Path, destination: &Path, cached: bool) -> Result<()> {
+pub(crate) fn copy_source(source: &Path, destination: &Path, cached: bool) -> Result<()> {
     for child in fs::read_dir(source)? {
         let child = child?;
         if cached
@@ -1149,7 +1158,7 @@ mod tests {
         let absent = outer.path().join("absent");
         for short_parent in [&linked, &open, &absent] {
             let mut environment = tmpdir_environment(&nested);
-            let scratch = scratch_with_short_base(&mut environment, short_parent).unwrap();
+            let scratch = scratch_with_short_base(&mut environment, short_parent, true).unwrap();
             assert_eq!(scratch.path().parent(), Some(nested.as_path()));
             assert_eq!(
                 value(&environment, "TMPDIR").as_deref(),

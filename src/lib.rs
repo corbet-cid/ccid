@@ -35,6 +35,7 @@ pub mod coverage;
 mod dependency;
 pub mod first_party;
 pub mod fleet;
+pub mod float;
 #[cfg(unix)]
 pub mod job_run;
 pub mod jobs;
@@ -258,6 +259,25 @@ pub fn run_checks(repo: &Path, manifest: &Path, selectors: &[String], plan: bool
     run_checks_inner(repo, manifest, selectors, plan, CheckContext::default())
 }
 
+/// [`run_checks`] in a caller's environment (for example one that carries a float hand-over).
+pub(crate) fn run_checks_in(
+    repo: &Path,
+    manifest: &Path,
+    selectors: &[String],
+    environment: &Environment,
+) -> Result<()> {
+    run_checks_inner(
+        repo,
+        manifest,
+        selectors,
+        false,
+        CheckContext {
+            base_environment: Some(environment.clone()),
+            ..CheckContext::default()
+        },
+    )
+}
+
 pub(crate) fn run_checks_with_environment(
     repo: &Path,
     manifest: &Path,
@@ -363,6 +383,14 @@ fn run_checks_inner(
     // Before any key is computed or any check runs: a `fleet = true` check fails closed without
     // fleet data, and every key of this selection sees the digest of the data it will read.
     fleet::bind_selection(&manifest.checks, &selected, &mut environment, cache_child)?;
+    // Before any key is computed or any check runs: float the first-party branch-tracking git
+    // dependencies in a copy (never in this checkout), or verify the float an enclosing run
+    // handed over. Cached checks key it; every check runs in a staged copy that builds it.
+    let float = if plan {
+        None
+    } else {
+        float::establish(&root, &mut environment, cache_child)?
+    };
     if !cache_child && value(&environment, "CCID_RESULT_CACHE").is_some() {
         let requested = Instant::now()
             .checked_add(Duration::from_secs(budget(&environment)?.timeout))
@@ -517,13 +545,21 @@ fn run_checks_inner(
         && selected
             .iter()
             .all(|name| manifest.checks[name].kind == "cargo");
+    // A floated run builds the resolved locks in the stable staged copy, never in the checkout.
+    let floated = float.as_ref().map(|handover| &handover.resolution);
     let stable_source = if stable_cargo {
         Some(cache::StableSource::prepare_cached(&root, &target)?)
     } else if stable_archive {
         Some(cache::StableSource::prepare(&root, &target)?)
+    } else if floated.is_some() {
+        Some(cache::StableSource::prepare_cached(&root, &target)?)
     } else {
         None
     };
+    if let (Some(source), Some(resolution)) = (&stable_source, floated) {
+        float::stage(&output_root, source.path(), resolution)?;
+    }
+    float::withhold(&mut environment);
     let root = stable_source
         .as_ref()
         .map_or(root, |source| source.path().to_owned());
@@ -537,7 +573,7 @@ fn run_checks_inner(
     } else {
         Some(cache::scratch(&mut environment)?)
     };
-    let freshness = if archive || stable_cargo {
+    let freshness = if archive || stable_cargo || floated.is_some() {
         Some(cache::Freshness::prepare(&root, &target, &identity)?)
     } else {
         // A local check may compile uncommitted inputs into this same target.
@@ -673,21 +709,50 @@ fn run_checks_inner(
     if let Some(freshness) = freshness {
         freshness.complete()?;
     }
-    if stable_cargo {
+    if let Some(resolution) = floated {
+        float::report_moved_locks(&runner.root, resolution)?;
+    }
+    // A staged run's declared outputs are the evidence later steps read in the checkout.
+    if stable_cargo || (floated.is_some() && !stable_archive) {
         for name in &selected {
             for output in &manifest.checks[name].cache_outputs {
                 safe_relative(Path::new(output))?;
                 let source = runner.root.join(output);
                 let destination = output_root.join(output);
-                if let Some(parent) = destination.parent() {
-                    fs::create_dir_all(parent)?;
+                if stable_cargo {
+                    if !source.is_file() {
+                        return Err(failure("Stable Cargo cache outputs must be explicit files"));
+                    }
+                } else if fs::symlink_metadata(&source).is_err() {
+                    // Not produced in the stage: whatever the checkout holds stays as it was.
+                    continue;
                 }
-                if !source.is_file() {
-                    return Err(failure("Stable Cargo cache outputs must be explicit files"));
-                }
-                fs::copy(source, destination)?;
+                copy_output(&source, &destination)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Copy one declared output (a file or a directory tree) from a staged run to the checkout.
+fn copy_output(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let meta = fs::symlink_metadata(source)?;
+    if meta.is_dir() {
+        fs::create_dir_all(destination)?;
+        for child in fs::read_dir(source)? {
+            let child = child?;
+            copy_output(&child.path(), &destination.join(child.file_name()))?;
+        }
+    } else if meta.is_file() {
+        fs::copy(source, destination)?;
+    } else {
+        return Err(failure(format!(
+            "Declared output {} is neither a file nor a directory",
+            source.display()
+        )));
     }
     Ok(())
 }

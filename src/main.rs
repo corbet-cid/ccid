@@ -206,6 +206,18 @@ enum Action {
     ContentPins(ccid::content_pins::Options),
     /// Require main declarations and one resolved revision per first-party crate.
     FirstParty(ccid::first_party::Options),
+    /// Float the first-party branch-tracking git dependencies outside the repository: resolve
+    /// them in a copy (`cargo update -p <spec>` of exactly those packages, selected by the fleet
+    /// data CCID_FLEET_FILE names) and write the resolved locks under DIR at their relative paths.
+    /// Prints one JSON line {"packages","digest","commits","third_party"}; never writes the
+    /// repository and refuses a DIR inside it.
+    Float {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Directory for the resolved locks; must be outside the repository.
+        #[arg(long)]
+        into: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -657,6 +669,21 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid first-party: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::Float { repo, into } => {
+            if let Err(error) =
+                ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
+            {
+                eprintln!("ccid: cannot install cancellation handler: {error}");
+                return ExitCode::from(2);
+            }
+            return match ccid::float::run(&repo, &into) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid float: {error}");
                     ExitCode::from(2)
                 }
             };

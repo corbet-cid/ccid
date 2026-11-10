@@ -85,6 +85,7 @@ fn plan(
     executor_checks: &BTreeMap<String, cmnp::executor::Check>,
     selected: &[String],
     environment: &Environment,
+    resolved: Option<&BTreeMap<String, String>>,
 ) -> Result<()> {
     let keyable: Vec<String> = selected
         .iter()
@@ -94,12 +95,18 @@ fn plan(
         })
         .cloned()
         .collect();
-    // The key names the resolved dependency commits, so a plan resolves exactly like a run
-    // (Cargo only, no check) before it can answer hit or miss.
-    let prepared = cached_verdict::resolve_git_dependencies(root, environment)
-        .and_then(|_| cached_verdict::commit(root, None, environment))
+    // The key names the resolved dependency commits, so the caller floated exactly like a run
+    // (Cargo only, in a copy, no check) before a plan can answer hit or miss.
+    let prepared = cached_verdict::commit(root, None, environment)
         .map(|commit| {
-            cached_verdict::prepare_selection(root, manifest_checks, &keyable, environment, &commit)
+            cached_verdict::prepare_selection(
+                root,
+                manifest_checks,
+                &keyable,
+                environment,
+                &commit,
+                resolved,
+            )
         })
         .unwrap_or_default();
     for name in selected {
@@ -235,11 +242,20 @@ pub(crate) fn run_cached_with_environment(
     }
     crate::safe_relative(manifest)?;
     let root = repo.canonicalize()?;
-    let (parsed, bytes) = load_manifest(&root, manifest)?;
+    let (mut parsed, bytes) = load_manifest(&root, manifest)?;
     let selected = select_checks(&parsed, selectors)?;
     // Before any verdict key or moon task is computed: the digest of the fleet data a
     // `fleet = true` check will read (declared in its cache_env by the manifest load).
     crate::fleet::bind_selection(&parsed.checks, &selected, &mut environment, false)?;
+    // One float for the whole selection, in a copy (the checkout is never written), or the one
+    // an enclosing `ccid check` handed over. Its digest becomes declared environment of every
+    // selected check, so the verdict store and the moon tasks key the locks the checks build;
+    // the moon tasks receive the locks and build exactly them.
+    let float = crate::float::establish(&root, &mut environment, false)?;
+    if float.is_some() {
+        crate::float::bind(&mut parsed.checks, &selected);
+    }
+    let resolved = float.as_ref().map(|handover| &handover.resolution.commits);
     let mut executor_checks = BTreeMap::new();
     for name in &selected {
         executor_checks.insert(name.clone(), executor_check(&parsed.checks[name]));
@@ -262,6 +278,7 @@ pub(crate) fn run_cached_with_environment(
             &executor_checks,
             &selected,
             &environment,
+            resolved,
         );
     }
     // A check that declares an opt-out, or that the purity scan finds reading run metadata or
@@ -285,17 +302,18 @@ pub(crate) fn run_cached_with_environment(
     let mut hits = BTreeSet::new();
     let mut hit_metrics = Vec::new();
     if use_verdicts {
-        // Resolve before keying: the key names the commits the check will build. Anything that
-        // prevents an exact key disables the verdict layer for this run, never guesses.
-        match cached_verdict::resolve_git_dependencies(&root, &environment).and_then(|_| {
-            let commit = cached_verdict::commit(&root, None, &environment)?;
-            Ok(cached_verdict::prepare_selection(
+        // The float above already resolved: the key names the commits the check will build.
+        // Anything that prevents an exact key disables the verdict layer for this run, never
+        // guesses.
+        match cached_verdict::commit(&root, None, &environment).map(|commit| {
+            cached_verdict::prepare_selection(
                 &root,
                 &parsed.checks,
                 &verdict_names,
                 &environment,
                 &commit,
-            ))
+                resolved,
+            )
         }) {
             Ok(entries) => {
                 prepared = entries;
@@ -369,8 +387,9 @@ pub(crate) fn run_cached_with_environment(
     let (runnable, direct): (Vec<String>, Vec<String>) = misses
         .into_iter()
         .partition(|name| checks::cache_eligible(&parsed.checks[name]));
+    // They build this run's float too (the hand-over is in `environment`), never a second one.
     for name in &direct {
-        crate::run_checks(&root, manifest, std::slice::from_ref(name), false)?;
+        crate::run_checks_in(&root, manifest, std::slice::from_ref(name), &environment)?;
     }
     if runnable.is_empty() {
         if use_verdicts {
