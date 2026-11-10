@@ -202,6 +202,7 @@ on everywhere, CI included: under `CI=true` Cargo builds workspace members non-i
 incremental builds. That setting is part of a unit's `-C metadata`, so without the variable a CI build of a PATH crate never
 had the key of the same crate built in a lane. The environment wins over both the CI default and the profile, and the shared
 profile (`profiles/dev.toml`) never sets `incremental = false` (a test asserts it). Cargo applies incremental compilation to
-workspace members only, so registry and git dependencies stay non-incremental and keep their compile-cache hits. The incremental state of a target is capped (2048 MiB, `CCID_INCREMENTAL_CAP_MB`): above the cap ccid
-removes only the `incremental` directories before the run, never build outputs or other caches, and logs an
-`incremental-trimmed` event. Debug information stays off (`CARGO_PROFILE_*_DEBUG` is the job's declaration).
+workspace members only, so registry and git dependencies stay non-incremental and keep their compile-cache hits. ccid never
+removes incremental state: a build cache is never deleted to free space (the former 2048 MiB cap, `CCID_INCREMENTAL_CAP_MB`,
+is gone). Pinned (schema 1) workflows carry the same `CARGO_INCREMENTAL: "1"` in their workflow environment. Debug
+information stays off (`CARGO_PROFILE_*_DEBUG` is the job's declaration).

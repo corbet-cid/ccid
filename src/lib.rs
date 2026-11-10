@@ -610,22 +610,9 @@ fn run_checks_inner(
                         }
                     }
                 }
-                // Incremental compilation only where its state survives: a persistent target at the stable source path.
-                let persistent = !caller_target && stable_cargo;
-                if let Some(flag) = cache::incremental_default(&cargo_environment, persistent) {
+                // Incremental compilation for every cargo check (cache::incremental_default); its state is never removed.
+                if let Some(flag) = cache::incremental_default(&cargo_environment) {
                     set(&mut cargo_environment, "CARGO_INCREMENTAL", flag);
-                }
-                let incremental =
-                    value(&cargo_environment, "CARGO_INCREMENTAL").as_deref() == Some("1");
-                if incremental {
-                    let removed = cache::trim_incremental(
-                        &target,
-                        cache::incremental_cap_mb(&cargo_environment),
-                        false,
-                    );
-                    if removed > 0 {
-                        event(json!({"event":"incremental-trimmed","bytes":removed}));
-                    }
                 }
                 // The shared profile as a config file argument, unless the job declares profile settings itself (environment) : one mechanism fleet-wide, see profiles/dev.toml.
                 let declares_profile = cargo_environment

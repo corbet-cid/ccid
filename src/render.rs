@@ -876,9 +876,11 @@ fn forgejo_workflow(
     // --config` for cargo checks, and the CARGO_HOME config include for commands checks (which get no --config).
     let central = tool_revision.is_empty();
     if !central {
-        // A pinned render (schema 1) has no job-run to decide incremental compilation per target class, and its target does
-        // not persist: it sets no incremental state. Schema 2 leaves that decision to ccid, which knows the class.
-        out.push_str("env:\n  CARGO_INCREMENTAL: \"0\"\n");
+        // A pinned render (schema 1) has no job-run, so its workflow environment carries the fleet's value itself:
+        // incremental compilation stays on, CI included. Under CI=true Cargo builds workspace members non-incrementally, which
+        // changes their -C metadata, so only CARGO_INCREMENTAL=1 gives a CI build of a PATH crate the key a lane computes.
+        // Schema 2 gets the same value from job-run (cache::incremental_default). A repository picks this up with its next render.
+        out.push_str("env:\n  CARGO_INCREMENTAL: \"1\"\n");
     }
     out.push_str("jobs:\n");
     let mut previous: Option<&str> = None;
