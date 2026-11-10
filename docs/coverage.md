@@ -90,9 +90,13 @@ The gate cross-checks the three reports exactly:
   rustc emits such regions for every branch of a function it instrumented but
   never generated code for, such as an uninstantiated generic. Every
   per-function location must also be a per-file location, and every per-file
-  location the function records omit must be unexecuted (both counts zero),
-  else `Missing emitted branch locations`. An export without function records
-  keeps the per-file locations;
+  location the function records omit must be unexecuted (both counts zero)
+  and start on a line LCOV reports with count zero, else `Missing emitted
+  branch locations`. The line condition leaves the omitted code to the line
+  gate: an uninstantiated function's lines are uncovered and refused unless a
+  reviewed exclusion names them, and a folded region on an executed line (a
+  never-called closure beside executed code) still refuses. An export without
+  function records keeps the per-file locations;
 - the annotated report names the same files and lines with consistent hit
   counts; a heading-free annotated report binds only when all three reports
   agree on exactly one production source.

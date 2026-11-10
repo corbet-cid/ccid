@@ -2018,6 +2018,27 @@ fn missing_emitted_branch_location_still_refuses() {
         check(&case.lcov, &executed),
         "Missing emitted branch locations"
     );
+    // A folded region on an executed line (a never-called closure beside
+    // executed code): the line gate cannot see it, so it stays a missing branch.
+    let mut beside_executed = case.raw.clone();
+    for index in [1, 2] {
+        beside_executed["data"][0]["files"][0]["branches"][index] =
+            serde_json::json!([2, 10, 2, 20, 0, 0, 0, 0, 4]);
+    }
+    assert_eq!(
+        check(&case.lcov, &beside_executed),
+        "Missing emitted branch locations"
+    );
+    // A folded region on a line LCOV does not report at all.
+    let mut unreported = case.raw.clone();
+    for index in [1, 2] {
+        unreported["data"][0]["files"][0]["branches"][index] =
+            serde_json::json!([5, 1, 5, 9, 0, 0, 0, 0, 4]);
+    }
+    assert_eq!(
+        check(&case.lcov, &unreported),
+        "Missing emitted branch locations"
+    );
     // A per-function location absent from the per-file list.
     let mut unlisted = case.raw.clone();
     unlisted["data"][0]["functions"][1]["branches"] =

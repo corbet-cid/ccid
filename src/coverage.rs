@@ -481,6 +481,9 @@ struct RawFile {
     branches: Vec<[i64; 4]>,
     /// File-level locations with a nonzero or unreadable execution count.
     counted: BTreeSet<[i64; 4]>,
+    /// File-level locations the function records omit (folded regions); each
+    /// must start on a line LCOV reports unexecuted.
+    folded: BTreeSet<[i64; 4]>,
     lines_count: Option<i64>,
     lines_covered: Option<i64>,
     branches_count: Option<i64>,
@@ -529,6 +532,7 @@ fn raw_file(item: &serde_json::Value) -> std::result::Result<RawFile, String> {
     Ok(RawFile {
         branches: locations,
         counted,
+        folded: BTreeSet::new(),
         lines_count: pick("lines", "count"),
         lines_covered: pick("lines", "covered"),
         branches_count: pick("branches", "count"),
@@ -546,11 +550,17 @@ fn raw_file(item: &serde_json::Value) -> std::result::Result<RawFile, String> {
 /// branch; rustc emits them, for example, for every branch of a function it
 /// instrumented but never generated code for (an uninstantiated generic).
 /// When a unit carries function records, each production file's inventory is
-/// therefore the per-function one, on two conditions that keep a dropped
+/// therefore the per-function one, on three conditions that keep a dropped
 /// branch from passing: every per-function location is also a per-file
-/// location, and every per-file location the function records omit was never
-/// executed (both counts zero, as a folded region's are). A unit without
-/// function records keeps the per-file inventory.
+/// location; every per-file location the function records omit was never
+/// executed (both counts zero, as a folded region's are); and, checked in
+/// [`gate`] once LCOV is read, every omitted location starts on a line LCOV
+/// reports with count zero. The last condition keeps the line gate in charge
+/// of the omitted code: an uninstantiated function's lines are uncovered and
+/// refused unless a reviewed exclusion names them, while a folded region on an
+/// executed line (a never-called closure beside executed code) still refuses
+/// as a missing branch. A unit without function records keeps the per-file
+/// inventory.
 fn emitted_branches(
     functions: &serde_json::Value,
     files: &BTreeMap<PathBuf, String>,
@@ -596,6 +606,7 @@ fn emitted_branches(
         {
             return Err("Missing emitted branch locations".to_owned());
         }
+        raw.folded = listed.difference(&inventory).copied().collect();
         raw.branches = inventory.into_iter().collect();
     }
     Ok(())
@@ -808,6 +819,18 @@ pub fn gate(
         || lines.is_empty()
     {
         return Err("Incomplete or empty source coverage inventory".to_owned());
+    }
+    // A folded region leaves the branch inventory only where the line gate
+    // already sees its line unexecuted (see `emitted_branches`).
+    for (file, raw) in &expected {
+        if raw.folded.iter().any(|location| {
+            u64::try_from(location[0])
+                .ok()
+                .and_then(|line| lines.get(&(file.clone(), line)))
+                != Some(&0)
+        }) {
+            return Err("Missing emitted branch locations".to_owned());
+        }
     }
 
     let mut annotated_lines: BTreeMap<(String, u64), bool> = BTreeMap::new();
