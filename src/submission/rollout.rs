@@ -755,18 +755,7 @@ impl Live<'_> {
                 git(&dir, &["commit", "--quiet", "--amend", "--no-edit"])?;
             }
         }
-        output(
-            &strings(&[
-                "git",
-                "push",
-                "--quiet",
-                "--force",
-                &gates.repo.clone_url,
-                &format!("{GATE_BRANCH}:{GATE_BRANCH}"),
-            ]),
-            Some(&dir),
-            None,
-        )?;
+        verified_push::push_branch(&dir, &gates.repo.clone_url, GATE_BRANCH)?;
         self.cfrg_land(&gates.repo.full_name, GATE_BRANCH)?;
         Ok(Published::Enqueued(added))
     }
@@ -866,18 +855,7 @@ impl Fleet for Live<'_> {
                 "Pin the shared-cache runtime that reports one verdict per commit",
             ],
         )?;
-        output(
-            &strings(&[
-                "git",
-                "push",
-                "--quiet",
-                "--force",
-                &repo.clone_url,
-                &format!("{BRANCH}:{BRANCH}"),
-            ]),
-            Some(&dir),
-            None,
-        )?;
+        verified_push::push_branch(&dir, &repo.clone_url, BRANCH)?;
         Ok(Repin::Pushed)
     }
     fn land(&self, repo: &Repo) -> Result<Landing> {

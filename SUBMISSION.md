@@ -137,6 +137,12 @@ a `verify` job or `[verdict]` declaration, and those matched by the declared ski
 (other lanes) are skipped unless the runtime they already pin contains the verdict
 (`supports_from`). A branch that `cfrg land` reports as already contained in main (exit 2,
 "already contained in the default branch") counts as landed and the run goes on to the verdict.
+Both branch pushes (`ci/verdict-rollout`, `ci/verdict-gates`) are verified when git reports an error: a request on a
+reused keep-alive connection that dies before any response byte is sent again by libcurl, so a push that had landed
+can fail with `cannot lock ref ... is at <sha> but expected <old>`, and a stalled line resets a connection before the
+push arrives. After any push error the rollout asks `git ls-remote` for the branch: the pushed commit means it landed,
+the value from before the push means it did not arrive (one retry after a short backoff), anything else, or a forge
+that cannot be asked, is a real error.
 When the rollout configuration names a `gate_source` (`repository`, `file`, optional `render`
 command run in the checkout, optional `batch`, default 20), every switched gate is also written
 to that declared policy: the rollout edits only the lines it needs on branch `ci/verdict-gates`,

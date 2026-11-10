@@ -13,6 +13,7 @@ mod pod_local;
 mod resolution;
 mod retry;
 mod rollout_cases;
+mod verified_push;
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 fn config(root: &Path) -> Config {

@@ -16,6 +16,7 @@ mod probe;
 mod rollout;
 mod submit;
 mod transport;
+mod verified_push;
 
 use crate::Result;
 pub use cli::{run, Action, JobAction};
