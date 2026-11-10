@@ -117,7 +117,11 @@ touch {s}/stable"#
             .env_clear()
             .env(
                 "PATH",
-                format!("{}:/usr/bin:/bin", self.root.join("bin").display()),
+                format!(
+                    "{}:{}",
+                    self.root.join("bin").display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
             )
             .env("HOME", "/nonexistent")
             .env("CARGO_HOME", self.root.join("cargo"))
@@ -450,9 +454,10 @@ fn ready_reports_through_the_exit_code() {
 #[test]
 fn ready_without_rustup_is_not_ready() {
     let f = Fixture::new("norustup");
+    fs::create_dir_all(f.root.join("empty")).unwrap();
     let status = f
         .ccid()
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", f.root.join("empty"))
         .args(["toolchain", "ready"])
         .status()
         .unwrap();
