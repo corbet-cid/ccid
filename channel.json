@@ -16,14 +16,11 @@
     "first_party": [
       "https://git.corbet.ch/cmtymeet/",
       "https://git.corbet.ch/cmtymt/",
-      "https://git.corbet.ch/corbet-foss/",
       "https://git.corbet.ch/corbet-fsl/",
-      "https://git.corbet.ch/corbet-libre/",
-      "https://git.corbet.ch/corbet-libs/"
+      "https://git.corbet.ch/corbet-libre/"
     ],
     "aliases": {
-      "https://github.com/corbet-foss/": "https://git.corbet.ch/corbet-foss/",
-      "https://github.com/corbet-libs/": "https://git.corbet.ch/corbet-libs/"
+      "https://github.com/corbet-foss/": "https://git.corbet.ch/corbet-libre/"
     }
   }
 }

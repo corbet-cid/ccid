@@ -105,7 +105,7 @@ pub struct Job {
 /// Manifest-owned newest-head refresh scope: update every first-party git
 /// dependency that declares `branch` equal to this branch and whose
 /// canonical source starts with one of these host/path prefixes, then
-/// freeze gates offline. Example prefix: `git.corbet.ch/corbet-libs`.
+/// freeze gates offline. Example prefix: `git.corbet.ch/corbet-libre`.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Refresh {
