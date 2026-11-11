@@ -25,7 +25,7 @@ fn plan() -> Plan {
                 reason: "Nix lane".into(),
             },
             Skip {
-                pattern: "corbet-libs/cfrg".into(),
+                pattern: "corbet-cid/cfrg".into(),
                 reason: "cfrg lane".into(),
             },
         ],
@@ -68,7 +68,7 @@ impl Fake {
             stuck: HashSet::new(),
             contained: HashSet::new(),
             policy: Mutex::new(
-                json!({"contexts":["ci/crow/*"],"repositories":[{"path":"corbet-libs/cfrg"}]}),
+                json!({"contexts":["ci/crow/*"],"repositories":[{"path":"corbet-cid/cfrg"}]}),
             ),
         }
     }
@@ -250,17 +250,17 @@ fn other_lanes_are_skipped_unless_their_runtime_supports_the_verdict() {
     let fake = Fake::new(&[
         ("corbet-nix/old", Some(manifest(OLD, &["verify"]))),
         ("corbet-nix/new", Some(manifest(SUPPORTED, &["verify"]))),
-        ("corbet-libs/cfrg", Some(manifest(OLD, &["verify"]))),
+        ("corbet-cid/cfrg", Some(manifest(OLD, &["verify"]))),
     ]);
     let state = fresh();
     walk(
         &fake,
-        &["corbet-nix/old", "corbet-nix/new", "corbet-libs/cfrg"],
+        &["corbet-nix/old", "corbet-nix/new", "corbet-cid/cfrg"],
         &state,
         2,
     );
     assert_eq!(status(&state, "corbet-nix/old"), "skipped");
-    assert_eq!(status(&state, "corbet-libs/cfrg"), "skipped");
+    assert_eq!(status(&state, "corbet-cid/cfrg"), "skipped");
     assert!(state.lock().unwrap().repos["corbet-nix/old"]
         .note
         .contains("Nix lane"));
@@ -412,8 +412,8 @@ fn the_land_policy_edit_is_per_repository_and_respects_custom_contexts() {
 fn skip_patterns_match_an_organization_or_one_repository() {
     assert!(matches_pattern("corbet-nix/*", "corbet-nix/anything"));
     assert!(!matches_pattern("corbet-nix/*", "corbet-nixish/x"));
-    assert!(matches_pattern("corbet-libs/cfrg", "corbet-libs/cfrg"));
-    assert!(!matches_pattern("corbet-libs/cfrg", "corbet-libs/cfrg2"));
+    assert!(matches_pattern("corbet-cid/cfrg", "corbet-cid/cfrg"));
+    assert!(!matches_pattern("corbet-cid/cfrg", "corbet-cid/cfrg2"));
 }
 
 #[test]

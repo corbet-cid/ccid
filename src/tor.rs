@@ -2428,13 +2428,13 @@ workflows = ["tor-jobs"]
             ("GIT_CONFIG_COUNT", "2"),
             (
                 "GIT_CONFIG_KEY_0",
-                "url.https://git.corbet.ch/corbet-foss/.insteadOf",
+                "url.https://git.corbet.ch/corbet-libre/.insteadOf",
             ),
-            ("GIT_CONFIG_VALUE_0", "https://github.com/corbet-foss/"),
+            ("GIT_CONFIG_VALUE_0", "https://github.com/corbet-libre/"),
         ]);
         push_instead_of(
             &mut env,
-            &["https://github.com/corbet-foss/cfry.git"],
+            &["https://github.com/corbet-libre/cfry.git"],
             "/tmp/mirror.git",
         );
         assert_eq!(
@@ -2450,7 +2450,7 @@ workflows = ["tor-jobs"]
         assert_eq!(
             env.get(&OsString::from("GIT_CONFIG_KEY_0"))
                 .and_then(|value| value.to_str()),
-            Some("url.https://git.corbet.ch/corbet-foss/.insteadOf")
+            Some("url.https://git.corbet.ch/corbet-libre/.insteadOf")
         );
     }
 
