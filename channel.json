@@ -5,7 +5,7 @@
     "sha256": "b9b2f917f34e50494a20259ca7960f78136cab17a6a93be5bf5d216f5a99299d"
   },
   "classes": {
-    "heavy": {
+    "linux": {
       "revision": "d7647515babb621011cbc1fc27912d48d761b934",
       "sha256": "b9b2f917f34e50494a20259ca7960f78136cab17a6a93be5bf5d216f5a99299d"
     }

@@ -11,7 +11,7 @@ env:
   CARGO_INCREMENTAL: "1"
 jobs:
   cache-acceptance:
-    runs-on: heavy
+    runs-on: linux
     steps:
       - name: Fetch the exact commit and run the declared checks
         env:
@@ -110,7 +110,7 @@ jobs:
             echo "no flake.lock or no archive target on this runner: nothing archived"
           fi
   native-compile-cache:
-    runs-on: heavy
+    runs-on: linux
     needs: [cache-acceptance]
     if: ${{ !cancelled() }}
     steps:

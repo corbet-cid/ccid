@@ -2,7 +2,7 @@
   "schema": 1,
   "generator": "ccid render v1",
   "tool_revision": "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
-  "manifest_sha256": "8dc25a3e6b86d1b725627fd8df48145c96d9159f707ff77b1a0126232885c677",
+  "manifest_sha256": "10980c1efa252c1e82f4ae1d9d4a278d67848082705b44bf4e569bc81b2cb205",
   "jobs": {
     "build": {
       "job": "build",
@@ -14,7 +14,7 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy",
+      "runs_on": "linux",
       "archive_inputs": true
     },
     "cache-acceptance": {
@@ -27,7 +27,7 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy",
+      "runs_on": "linux",
       "events": [
         "manual"
       ],
@@ -43,7 +43,7 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy",
+      "runs_on": "linux",
       "archive_inputs": true
     },
     "compile": {
@@ -56,7 +56,7 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy",
+      "runs_on": "linux",
       "archive_inputs": true
     },
     "macos": {
@@ -92,7 +92,7 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy",
+      "runs_on": "linux",
       "events": [
         "manual"
       ],
@@ -110,7 +110,7 @@
       "command": [
         "ccid:run-declared-checks"
       ],
-      "runs_on": "heavy",
+      "runs_on": "linux",
       "archive_inputs": true
     },
     "windows": {

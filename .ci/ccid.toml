@@ -41,7 +41,7 @@ commands = [["cargo", "test", "--release", "--locked", "--test", "it", "--", "--
 
 [jobs.cache-acceptance]
 scheduler = "forgejo"
-runs_on = "heavy"
+runs_on = "linux"
 checks = ["cache-acceptance"]
 workflow = "acceptance"
 command = ["ccid:run-declared-checks"]
@@ -49,14 +49,14 @@ events = ["manual"]
 
 [jobs.verify]
 scheduler = "forgejo"
-runs_on = "heavy"
+runs_on = "linux"
 checks = ["test", "registry-publisher", "remote-ci"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]
 
 [jobs.compile]
 scheduler = "forgejo"
-runs_on = "heavy"
+runs_on = "linux"
 checks = ["compile"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]
@@ -70,7 +70,7 @@ commands = [["bash", ".ci/check-shell-probe.sh"]]
 
 [jobs.check-shell-probe]
 scheduler = "forgejo"
-runs_on = "heavy"
+runs_on = "linux"
 checks = ["check-shell-probe"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]
@@ -81,14 +81,14 @@ commands = [["cargo", "test", "--release", "--locked", "--test", "it", "--", "--
 
 [jobs.build]
 scheduler = "forgejo"
-runs_on = "heavy"
+runs_on = "linux"
 checks = ["build"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]
 
 [jobs.native-compile-cache]
 scheduler = "forgejo"
-runs_on = "heavy"
+runs_on = "linux"
 checks = ["native-compile-cache"]
 workflow = "acceptance"
 command = ["ccid:run-declared-checks"]

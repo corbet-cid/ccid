@@ -14,7 +14,7 @@ env:
   CARGO_INCREMENTAL: "1"
 jobs:
   build:
-    runs-on: heavy
+    runs-on: linux
     steps:
       - name: Fetch the exact commit and run the declared checks
         env:
@@ -113,7 +113,7 @@ jobs:
             echo "no flake.lock or no archive target on this runner: nothing archived"
           fi
   check-shell-probe:
-    runs-on: heavy
+    runs-on: linux
     needs: [build]
     if: ${{ !cancelled() }}
     steps:
@@ -214,7 +214,7 @@ jobs:
             echo "no flake.lock or no archive target on this runner: nothing archived"
           fi
   compile:
-    runs-on: heavy
+    runs-on: linux
     needs: [check-shell-probe]
     if: ${{ !cancelled() }}
     steps:
@@ -315,7 +315,7 @@ jobs:
             echo "no flake.lock or no archive target on this runner: nothing archived"
           fi
   verify:
-    runs-on: heavy
+    runs-on: linux
     needs: [compile]
     if: ${{ !cancelled() }}
     steps:

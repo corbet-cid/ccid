@@ -143,7 +143,7 @@ workflow name share one file; each job becomes a job of that workflow.
 ```toml
 [jobs.verify]
 scheduler = "forgejo"
-runs_on = "heavy"                       # runner label; default "light"
+runs_on = "linux"                       # runner label; default "light"
 checks = ["test"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]  # the only command a Forgejo job takes
