@@ -749,29 +749,61 @@ fn is_c_family(program: &str) -> bool {
 /// `rustup` is deliberately not identified: it only dispatches to a toolchain. The selected
 /// compiler is probed below, and a rustup update that does not change that compiler changes
 /// nothing a build sees.
-fn tool_identity(program: &str, path: &Path, environment: &Environment) -> Result<String> {
+///
+/// `declared` is the declared `cache_tools` argv behind the program: how the manifest asks this
+/// tool for its release. That query runs first, verbatim. A bare program name is asked with
+/// `--version`, falling back to `-v`, so tools that only answer `-v` (poppler's `pdfinfo` and
+/// `pdftotext`) still get a semantic identity instead of no verdict.
+fn tool_identity(
+    program: &str,
+    path: &Path,
+    environment: &Environment,
+    declared: &[String],
+) -> Result<String> {
     if program == "rustup" {
         return Err(failure(
             "Verdict key does not identify rustup: it compiles nothing",
         ));
     }
-    let mut text = if uses_rust_verbose_version(program) {
-        run_tool(path, &["-vV"], environment)?
-    } else {
-        match run_tool(path, &["--version"], environment) {
-            Ok(text) => text,
-            Err(first) => {
-                // A `cargo-*` external subcommand is normally invoked by cargo as
-                // `cargo-<name> <name> ...`; some (cargo-llvm-cov) accept `--version` only in
-                // that form.
-                match program.strip_prefix("cargo-") {
-                    Some(subcommand) if !subcommand.is_empty() => {
-                        run_tool(path, &[subcommand, "--version"], environment)
-                            .map_err(|_| first)?
-                    }
-                    _ => return Err(first),
+    let mut attempts: Vec<Vec<String>> = Vec::new();
+    if !declared.is_empty() {
+        attempts.push(declared.to_vec());
+    }
+    if uses_rust_verbose_version(program) {
+        attempts.push(vec!["-vV".to_owned()]);
+    }
+    attempts.push(vec!["--version".to_owned()]);
+    // A `cargo-*` external subcommand is normally invoked by cargo as
+    // `cargo-<name> <name> ...`; some (cargo-llvm-cov) accept `--version` only in
+    // that form.
+    if let Some(subcommand) = program.strip_prefix("cargo-") {
+        if !subcommand.is_empty() {
+            attempts.push(vec![subcommand.to_owned(), "--version".to_owned()]);
+        }
+    }
+    attempts.push(vec!["-v".to_owned()]);
+    let mut first_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
+    let mut text: Option<String> = None;
+    for attempt in &attempts {
+        let args: Vec<&str> = attempt.iter().map(String::as_str).collect();
+        match run_tool(path, &args, environment) {
+            Ok(answer) => {
+                text = Some(answer);
+                break;
+            }
+            Err(error) => {
+                if first_err.is_none() {
+                    first_err = Some(error);
                 }
             }
+        }
+    }
+    let mut text = match text {
+        Some(text) => text,
+        None => {
+            return Err(
+                first_err.unwrap_or_else(|| failure("Verdict key found no tool to identify"))
+            );
         }
     };
     if uses_rust_verbose_version(program) {
@@ -800,6 +832,7 @@ fn add_tool(
     role: &str,
     path: &Path,
     environment: &Environment,
+    declared: &[String],
 ) -> Result<String> {
     if !is_plain(role) {
         return Err(failure(format!(
@@ -807,7 +840,7 @@ fn add_tool(
         )));
     }
     let program = program_name(path);
-    let identity = tool_identity(&program, path, environment).map_err(|error| {
+    let identity = tool_identity(&program, path, environment, declared).map_err(|error| {
         failure(format!(
             "Verdict key cannot identify tool {role:?}: {error}"
         ))
@@ -845,6 +878,10 @@ fn rustup_tool(toolchain: &str, program: &str, environment: &Environment) -> Res
 fn add_command_tool(
     tools: &mut BTreeMap<String, String>,
     argv: &[String],
+    // The manifest's version query for this tool (`cache_tools` only): the argv behind the
+    // program, probed verbatim first. A check's own `commands` pass `None`: their trailing
+    // arguments run the check, they never ask for a release.
+    version_query: Option<&[String]>,
     environment: &Environment,
 ) -> Result<()> {
     let Some(program) = argv.first() else {
@@ -876,6 +913,7 @@ fn add_command_tool(
             &format!("{toolchain}-{selected}"),
             &path,
             environment,
+            &[],
         )?;
         // `cargo llvm-cov` and friends are external subcommands; their version matters too.
         if selected == "cargo" {
@@ -888,6 +926,7 @@ fn add_command_tool(
                         &format!("{toolchain}-cargo-{subcommand}"),
                         &path,
                         environment,
+                        &[],
                     )?;
                 }
             }
@@ -899,13 +938,25 @@ fn add_command_tool(
         return Ok(());
     }
     let path = find_program(program, environment)?;
-    add_tool(tools, base, &path, environment)?;
+    add_tool(
+        tools,
+        base,
+        &path,
+        environment,
+        version_query.unwrap_or(&[]),
+    )?;
     if base == "cargo" {
         if let Some(subcommand) = argv.get(1).filter(|arg| !arg.starts_with('-')) {
             if let Some(path) =
                 crate::compile_cache::executable(environment, &format!("cargo-{subcommand}"))
             {
-                add_tool(tools, &format!("cargo-{subcommand}"), &path, environment)?;
+                add_tool(
+                    tools,
+                    &format!("cargo-{subcommand}"),
+                    &path,
+                    environment,
+                    &[],
+                )?;
             }
         }
     }
@@ -923,7 +974,7 @@ fn add_compiler_tools(
         let program = value(environment, variable);
         let program = program.as_deref().map(program_of).unwrap_or(default);
         if let Ok(path) = find_program(program, environment) {
-            add_tool(tools, role, &path, environment)?;
+            add_tool(tools, role, &path, environment, &[])?;
         }
     }
     Ok(())
@@ -945,14 +996,15 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                     rustup_tool(toolchain, "cargo", environment)?,
                 ),
             };
-            add_tool(&mut tools, "rustc", &rustc, environment)?;
-            add_tool(&mut tools, "cargo", &cargo, environment)?;
+            add_tool(&mut tools, "rustc", &rustc, environment, &[])?;
+            add_tool(&mut tools, "cargo", &cargo, environment, &[])?;
             if check.test_runner.as_deref() == Some("nextest") {
                 add_tool(
                     &mut tools,
                     "cargo-nextest",
                     &find_program("cargo-nextest", environment)?,
                     environment,
+                    &[],
                 )?;
             }
             for (role, variable) in [("cc", "CC"), ("cxx", "CXX")] {
@@ -962,6 +1014,7 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                         role,
                         &find_program(&program, environment)?,
                         environment,
+                        &[],
                     )?;
                 }
             }
@@ -971,6 +1024,7 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                     "linker",
                     &find_program(&linker, environment)?,
                     environment,
+                    &[],
                 )?;
             }
             // A compiler cache wrapper changes no result, only how it was produced: it is
@@ -978,21 +1032,24 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
         }
         "commands" => {
             for argv in &check.commands {
-                add_command_tool(&mut tools, argv, environment)?;
+                add_command_tool(&mut tools, argv, None, environment)?;
             }
             for argv in &check.cache_tools {
-                add_command_tool(&mut tools, argv, environment)?;
+                // The manifest declares how to ask this tool for its release; that query is
+                // probed verbatim. An empty argv is refused below, never sliced here.
+                let query: &[String] = if argv.is_empty() { &[] } else { &argv[1..] };
+                add_command_tool(&mut tools, argv, Some(query), environment)?;
             }
             // A check script resolves dependencies with Git; its release decides the resolution.
             if let Some(path) = crate::compile_cache::executable(environment, "git") {
-                add_tool(&mut tools, "git", &path, environment)?;
+                add_tool(&mut tools, "git", &path, environment, &[])?;
             }
             if check.cache_tools.is_empty() {
                 // A custom command that declares no tools is keyed by the common toolchains it
                 // can find, exactly as the ordinary cached key does.
                 for name in ["rustc", "cargo", "node", "python3", "nix"] {
                     if let Some(path) = crate::compile_cache::executable(environment, name) {
-                        add_tool(&mut tools, name, &path, environment)?;
+                        add_tool(&mut tools, name, &path, environment, &[])?;
                     }
                 }
             }
@@ -1003,6 +1060,7 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                     "linker",
                     &find_program(program_of(&linker), environment)?,
                     environment,
+                    &[],
                 )?;
             }
         }
@@ -1014,6 +1072,7 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                     "node",
                     &find_program("node", environment)?,
                     environment,
+                    &[],
                 )?;
             }
             add_tool(
@@ -1021,6 +1080,7 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                 manager,
                 &find_program(manager, environment)?,
                 environment,
+                &[],
             )?;
         }
         "nix" => {
@@ -1029,6 +1089,7 @@ fn toolchain(check: &crate::Check, environment: &Environment) -> Result<BTreeMap
                 "nix",
                 &find_program("nix", environment)?,
                 environment,
+                &[],
             )?;
         }
         other => {
@@ -1134,12 +1195,17 @@ fn check_identity_payload(
     // carries flags is different: those flags are keyed verbatim.
     const SELECTOR: &[&str] = &["CC", "CXX"];
     const PRESENTATION: &[&str] = &["RUSTC_WRAPPER", "LANG", "LC_ALL", "LANGUAGE", "TZ"];
+    // Systemd per-unit directories (`StateDirectory=`/`RuntimeDirectory=`): the unit layout
+    // names a producer's process state, never a check input. Excluded even when declared,
+    // like INVOCATION_ID is absent: the unit layout can never split the ledger.
+    const NEVER_SEMANTIC: &[&str] = &["STATE_DIRECTORY", "RUNTIME_DIRECTORY"];
     let mut declared: BTreeMap<String, Option<String>> = BTreeMap::new();
     for name in cmnp::inputs::SEMANTIC_ENV
         .iter()
         .copied()
         .filter(|name| !PRESENTATION.contains(name))
         .chain(check.cache_env.iter().map(String::as_str))
+        .filter(|name| !NEVER_SEMANTIC.contains(name))
     {
         let value = environment
             .get(OsStr::new(name))

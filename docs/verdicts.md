@@ -34,6 +34,7 @@ The toolchain is identified by what a tool **is**, not by how it was installed:
 | `rustc`, `cargo`, `rustdoc` (stable and nightly) | `<tool> -vV`: release, commit hash, commit date, host and LLVM version. |
 | C/C++ compilers (`cc`, `cxx`, `clang`, `gcc`, …) | `--version` (installation-directory and configure-prefix lines removed) plus `-dumpmachine`. |
 | `git`, `bash`, `python3`, `pkg-config`, `node`, `npm`, `deno`, `nix`, `cargo-llvm-cov`, other Cargo subcommands | the tool's `--version` output. |
+| any other declared `cache_tools` entry | the declared argv verbatim (`cache_tools` names the version query: `["go", "version"]`, `["pdfinfo", "-v"]`). A bare program name falls back from `--version` to `-v`, so tools that only answer `-v` (poppler's `pdfinfo`, `pdftotext`) still get an identity. |
 | `rustup` | **not part of the key.** It only dispatches to a selected toolchain and compiles nothing. The compiler rustup selects is keyed by its own semantic identity, so a rustup update that changes no compiler release changes nothing a build sees. A declared `rustup` probe is likewise not a build input. |
 
 An upstream rustup install, a distribution package and a Nix package whose binaries are
@@ -58,7 +59,9 @@ search path still changes the key. This is what lets a land gate that inherited 
 
 Per-run scheduler and systemd state (`FORGEJO_*`, `ACTIONS_*`, `RUNNER_*`, `GITHUB_*`, `CI_*`,
 `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`, `*_PRESSURE_*`, `nix-shell` attributes)
-is never keyed. `GIT_CONFIG_*` `url.*.insteadOf` rewrites are forwarded to cached work as plumbing
+is never keyed. `STATE_DIRECTORY` and `RUNTIME_DIRECTORY` are never keyed either, even when a
+check declares them: systemd's per-unit directories name a producer's process state, so the
+unit layout can never split the ledger. `GIT_CONFIG_*` `url.*.insteadOf` rewrites are forwarded to cached work as plumbing
 so a land can serve unpushed commits from mirrors; they are not keyed, because the resolved
 commits they lead to are. `RUSTC_WRAPPER`, a plain `CC`/`CXX` selector (its compiler's identity is
 keyed through the toolchain; a selector that carries flags is keyed verbatim) and the presentation

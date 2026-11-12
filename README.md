@@ -78,7 +78,8 @@ executables it names and by the directories on `PATH`. Anything that cannot be k
 degrades to an ordinary uncached run with a receipt, never a failure.
 
 Declare `cache_tools = [["go", "version"], ["git", "--version"]]` on custom
-checks to hash the actual installed tools, and `cache_env = ["CGO_ENABLED"]`
+checks to hash the actual installed tools (the declared argv is the version query;
+a bare program falls back from `--version` to `-v`), and `cache_env = ["CGO_ENABLED"]`
 for environment settings that affect their results. These identities are per check;
 selecting an additional check does not add its environment or tools to the others.
 

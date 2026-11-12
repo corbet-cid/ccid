@@ -203,6 +203,8 @@ fn every_key_component_changes_the_key_and_none_is_provenance() {
         "ACTIONS_CACHE_URL",
         "RUNNER_TRACKING_ID",
         "INVOCATION_ID",
+        "STATE_DIRECTORY",
+        "RUNTIME_DIRECTORY",
         "SYSTEMD_EXEC_PID",
         "JOURNAL_STREAM",
         "SOME_UNRELATED_FLAG",
@@ -1087,4 +1089,163 @@ fn the_release_channel_with_fleet_data_still_names_its_releases() {
         .classes
         .values()
         .all(|entry| is_hex(&entry.sha256, 64)));
+}
+
+/// A poppler-style tool: it answers `-v` and fails `--version` (and with no arguments).
+fn poppler_tool(directory: &Path, release: &str) {
+    fs::write(
+        directory.join("poppler-tool"),
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = '-v' ]; then echo 'poppler-tool version {release} (fixture)'; exit 0; fi\necho 'usage: poppler-tool [-v]' >&2\nexit 1\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            directory.join("poppler-tool"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+}
+
+/// A tool that answers both `--version` and `-v`, with different text each.
+fn both_tool(directory: &Path) {
+    fs::write(
+        directory.join("both-tool"),
+        "#!/bin/sh\nif [ \"$1\" = '--version' ]; then echo 'both-tool version 1.0 (long)'; exit 0; fi\nif [ \"$1\" = '-v' ]; then echo 'both-tool v1.0 (short)'; exit 0; fi\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            directory.join("both-tool"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+}
+
+fn tool_path_env(env: &Environment, directory: &Path) -> Environment {
+    let mut with_tool = env.clone();
+    with_tool.insert(
+        "PATH".into(),
+        std::env::join_paths(
+            std::iter::once(directory.to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap(),
+    );
+    with_tool
+}
+
+#[test]
+fn the_declared_cache_tools_argv_is_the_version_query_with_a_dash_v_fallback() {
+    let fixture = fixture("tool-probe");
+    let root = fixture.path();
+    let tools = tempfile::tempdir().unwrap();
+    poppler_tool(tools.path(), "24.02.0");
+    let env = tool_path_env(&environment(), tools.path());
+    let commit_id = commit(root, None, &env).unwrap();
+
+    // The declared query runs verbatim: a tool that only answers `-v` gets a verdict.
+    // (On the old code this prepare fails: `--version` is the only probe.)
+    let mut declared = check();
+    declared.commands = vec![vec!["sh".into(), "-c".into(), "true".into()]];
+    declared.cache_tools = vec![vec!["poppler-tool".into(), "-v".into()]];
+    let verbatim = prepare(root, "verify", &declared, &env, &commit_id, &[]).unwrap();
+    // A different release of the same tool changes the key.
+    poppler_tool(tools.path(), "25.04.0");
+    assert_ne!(
+        prepare(root, "verify", &declared, &env, &commit_id, &[])
+            .unwrap()
+            .key,
+        verbatim.key
+    );
+    poppler_tool(tools.path(), "24.02.0");
+
+    // A bare program name falls back from `--version` to `-v`: the same tool release
+    // keys the same digest whether the manifest declares the query or not.
+    // (On the old code this prepare fails too.)
+    let mut bare = check();
+    bare.commands = vec![vec!["sh".into(), "-c".into(), "true".into()]];
+    bare.cache_tools = vec![vec!["poppler-tool".into()]];
+    let fallback = prepare(root, "verify", &bare, &env, &commit_id, &[]).unwrap();
+    assert_eq!(
+        fallback.components.toolchain["poppler-tool"],
+        verbatim.components.toolchain["poppler-tool"]
+    );
+
+    // `--version` still wins when the tool answers it: the fallback never shadows the
+    // primary query.
+    both_tool(tools.path());
+    let long = format!("{:x}", Sha256::digest("both-tool version 1.0 (long)"));
+    let short = format!("{:x}", Sha256::digest("both-tool v1.0 (short)"));
+    assert_ne!(long, short);
+    let mut bare_both = check();
+    bare_both.commands = vec![vec!["sh".into(), "-c".into(), "true".into()]];
+    bare_both.cache_tools = vec![vec!["both-tool".into()]];
+    assert_eq!(
+        prepare(root, "verify", &bare_both, &env, &commit_id, &[])
+            .unwrap()
+            .components
+            .toolchain["both-tool"],
+        long
+    );
+    let mut declared_both = check();
+    declared_both.commands = vec![vec!["sh".into(), "-c".into(), "true".into()]];
+    declared_both.cache_tools = vec![vec!["both-tool".into(), "-v".into()]];
+    assert_eq!(
+        prepare(root, "verify", &declared_both, &env, &commit_id, &[])
+            .unwrap()
+            .components
+            .toolchain["both-tool"],
+        short
+    );
+}
+
+#[test]
+fn systemd_unit_directories_never_enter_the_semantic_environment() {
+    let fixture = fixture("unit-layout");
+    let root = fixture.path();
+    let env = environment();
+    let commit_id = commit(root, None, &env).unwrap();
+    // Even declared, the per-unit directories are not inputs: a `StateDirectory=` or
+    // `RuntimeDirectory=` layout must never split the ledger.
+    // (On the old code the three keys below differ: declared values are keyed.)
+    let mut declared = check();
+    declared.cache_env = vec!["STATE_DIRECTORY".into(), "RUNTIME_DIRECTORY".into()];
+    let base = prepare(root, "verify", &declared, &env, &commit_id, &[]).unwrap();
+    let mut unit = env.clone();
+    unit.insert("STATE_DIRECTORY".into(), "/var/lib/ccid-runner".into());
+    unit.insert("RUNTIME_DIRECTORY".into(), "/run/ccid-runner".into());
+    assert_eq!(
+        prepare(root, "verify", &declared, &unit, &commit_id, &[])
+            .unwrap()
+            .key,
+        base.key
+    );
+    // A different unit layout keys the same too.
+    let mut other = env.clone();
+    other.insert("STATE_DIRECTORY".into(), "/var/lib/other-unit".into());
+    other.insert("RUNTIME_DIRECTORY".into(), "/run/other-unit".into());
+    assert_eq!(
+        prepare(root, "verify", &declared, &other, &commit_id, &[])
+            .unwrap()
+            .key,
+        base.key
+    );
+    // Neither name reaches the hashed payload.
+    let payload = check_identity_payload(&declared, &unit, root).unwrap();
+    let names: Vec<&str> = payload["env"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(!names.contains(&"STATE_DIRECTORY"));
+    assert!(!names.contains(&"RUNTIME_DIRECTORY"));
 }
