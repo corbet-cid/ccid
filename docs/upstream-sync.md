@@ -23,18 +23,23 @@ by `render`, because an unchecked merge must never be pushed.
 `.forgejo/workflows/upstream-sync.yml` (dispatch only, input `upstream_commit`, one run at a
 time per repository, the job runs on the label of `downstream-check`):
 
-1. **Merge, locally.** The upstream commit must have a successful `ci.yml` run on the
-   upstream forge (read from its API), be on the upstream branch's history, and not be part
-   of the downstream branch yet; a repeated or superseded event finds it contained and
-   changes nothing. The merge is made in a work tree of the runner (stable per repository
-   when the runner names `CCID_SOURCE_ROOT`) with the identity of the branch tip.
-   **A conflict ends the run red and pushes nothing**; the conflicting paths are in the log.
-   Git LFS files the checks need are materialised from the shared store, the upstream and
-   the downstream, in that order.
-2. **Check.** The central `ccid job-run --local` runs the declared `downstream-check` job on
-   the merge commit (the land gate's entry point), so ccid's result ledger and the compile
-   caches are reused: only what the downstream's own tree changes runs again. A red check
-   ends the run red.
+1. **Merge, locally.** The upstream commit must have a successful `ci.yml` run (read from
+   the Actions API), be on the upstream branch's history, and not be part of the downstream
+   branch yet; a repeated or superseded event finds it contained and changes nothing. The
+   upstream is read from the forge that runs the job (the declared URL only identifies it),
+   anonymously first because the job token reaches only its own repository, and a fetch that
+   the runner's route to a local copy cannot serve is asked of the forge itself. The merge is
+   made in a work tree of the runner (stable per repository when the runner names
+   `CCID_SOURCE_ROOT`) with the identity of the branch tip. **A conflict ends the run red and
+   pushes nothing**; the conflicting paths are in the log. Then git alone (no program of the
+   merged tree, which could vouch for itself) compares the merge with the upstream commit:
+   every path outside the branch's own `allowed_paths` must be identical, or the run is red.
+2. **Check.** The checks run on a shallow, detached, single-commit export of the merge, the
+   layout of every other job (Git LFS files materialised from the shared store, the upstream
+   and the downstream, in that order). The central `ccid job-run --local` runs the declared
+   `downstream-check` job there (the land gate's entry point), so ccid's result ledger and
+   the compile caches are reused: only what the downstream's own tree changes runs again. A
+   red check ends the run red.
 3. **Push.** Only when both were clean: the merge is pushed to the branch the run was
    dispatched on with the job's own token, a plain push (a branch that moved meanwhile
    refuses it, the run is red, the next event merges again). Then:
@@ -47,8 +52,8 @@ time per repository, the job runs on the label of `downstream-check`):
      assets. **No build and no asset copy**: the program is the upstream's, so there is
      nothing to build or upload. A draft upstream release waits.
 
-The job token goes only to the forge that runs the job; the upstream is read anonymously
-(its API and its git remote) unless it is on the same forge.
+The job token goes only to the forge that runs the job and reaches only the repository the
+job runs for; the upstream's API and git remote are read anonymously first.
 
 ## Receiver contract
 
