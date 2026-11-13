@@ -18,6 +18,8 @@ registries = ["crates"]              # crates | npm | pypi | aur
 notes = "CHANGELOG.md"               # optional: the text of the release (default: one generated line)
 ```
 
+At `render_schema = 3` the notes (the file or the generated line) end with a "Security and dependencies" section built from the data at the released commit ([security.md](security.md)); a fork gets none.
+
 `seal` and `manifests` go together (or neither). A library (`kind = "library"`) has no `platforms`, no
 `legs`; its release is the registry packages the build checks leave in `$CCID_RELEASE_DIR`.
 

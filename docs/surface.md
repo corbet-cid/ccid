@@ -51,9 +51,9 @@ tracked files and new files git does not ignore.
 | Class | Meaning | `render` | `render --check` |
 |---|---|---|---|
 | rendered | carries the render marker (or is `jobs.json`) | writes it; deletes it when it is no longer rendered | drift is red |
-| data | `.ci/ccid.toml`, `.ci/archives.toml`, `.ci/live-inputs.toml` | reads | must parse |
+| data | `.ci/ccid.toml`, `.ci/archives.toml`, `.ci/live-inputs.toml`, `.ci/security.toml`, `.ci/own-advisories.toml` ([security.md](security.md)) | reads | must parse |
 | script | named by the manifest (a check or job argv, `cache_inputs`, a job environment value), used by such a script, or listed in `[surface] keep` with a reason | leaves | - |
-| community | issue and pull-request templates, CODEOWNERS, FUNDING, SECURITY, CONTRIBUTING, `.ci/README.md`, ... | leaves | - |
+| community | issue and pull-request templates, CODEOWNERS, FUNDING, SECURITY, CONTRIBUTING, `.ci/README.md`, ... | leaves (`SECURITY.md` and `README.md` also carry a [managed block](security.md#the-managed-block); `.github/SECURITY.md` is one of the files it can go into) | - |
 | upstream | matches `[surface] upstream` | never touches | - |
 | legacy | a retired family (table in `src/render/surface.rs`) | see below | red |
 | unknown | anything else | refuses the render | red |

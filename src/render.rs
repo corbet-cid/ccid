@@ -968,6 +968,35 @@ fn render_outputs(
     Ok(outputs)
 }
 
+/// Whether the rendered security files of R47 apply to a repository: `render_schema = 3`, and not a
+/// fork that lists an upstream's CI files (a contributed project gets nothing of ours, R10 and R11).
+pub(crate) fn security_applies(parsed: &crate::Manifest) -> bool {
+    parsed
+        .render
+        .as_ref()
+        .is_some_and(|config| config.render_schema == Some(3))
+        && !parsed
+            .surface
+            .as_ref()
+            .is_some_and(|surface| !surface.upstream.is_empty())
+}
+
+/// Replace a file a person owns with `text` atomically, keeping its permissions.
+fn write_text_file(repo: &Path, relative: &Path, text: &str) -> Result<()> {
+    let path = repo.join(relative);
+    let parent = path
+        .parent()
+        .expect("Generated paths have parent directories");
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(text.as_bytes())?;
+    if let Some(existing) = metadata(&path)? {
+        fs::set_permissions(temporary.path(), existing.permissions())?;
+    }
+    temporary.persist(path)?;
+    Ok(())
+}
+
 /// Render repository jobs, or check byte-for-byte drift without modifying files.
 /// Manual Crow execution adapters come from job workflows; push execution
 /// adapters come from job push opt-ins and consumer fan-out declarations.
@@ -1004,6 +1033,12 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         Some(entries)
     } else {
         None
+    };
+    // R47: the security status in the README and the policy file, between markers; schema 3 only.
+    let security_plans = if security_applies(&parsed) {
+        crate::security::plan_files(repo)?
+    } else {
+        Vec::new()
     };
     let replaced: Vec<&Path> = surface
         .iter()
@@ -1098,6 +1133,23 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         }
         drift = kept;
     }
+    // The security blocks: a file without one yet is a declared transition for a check (the next render
+    // adds it, like any file a release introduces); a block that differs from the data is drift.
+    let mut security_drift = Vec::new();
+    for plan in &security_plans {
+        if !plan.drifted() {
+            continue;
+        }
+        if check && plan.introduced {
+            eprintln!(
+                "ccid render: {} has no security block yet (a declared transition); the next render adds it",
+                plan.path.display()
+            );
+            transitional.push(plan.path.clone());
+        } else {
+            security_drift.push(plan.path.clone());
+        }
+    }
     // A check accepts a file this release renders from a declared transition's previous body.
     if check && !committed.is_empty() {
         let accepted = transitions(&committed, |templates| {
@@ -1127,9 +1179,10 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
     if fs::read(repo.join(manifest))? != bytes {
         return Err(failure("Manifest changed during job rendering"));
     }
-    if check && (!drift.is_empty() || !obsolete.is_empty()) {
+    if check && (!drift.is_empty() || !obsolete.is_empty() || !security_drift.is_empty()) {
         let paths = drift
             .iter()
+            .chain(&security_drift)
             .chain(&obsolete)
             .map(|path| match legacy.get(path.as_path()) {
                 Some(replacement) => {
@@ -1160,10 +1213,15 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         for relative in &obsolete {
             fs::remove_file(repo.join(relative))?;
         }
+        for plan in security_plans.iter().filter(|plan| plan.drifted()) {
+            write_text_file(repo, &plan.path, &plan.expected)?;
+        }
     }
+    let mut files: Vec<PathBuf> = outputs.into_keys().collect();
+    files.extend(security_plans.iter().map(|plan| plan.path.clone()));
     Ok(Report {
         checked: check,
-        files: outputs.into_keys().collect(),
+        files,
         removed: obsolete,
         transitional,
     })

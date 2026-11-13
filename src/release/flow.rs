@@ -48,6 +48,8 @@ pub struct Job {
     pub config: Config,
     pub plan: Plan,
     pub sha: String,
+    /// The release notes carry the security and dependency section (R47): `render_schema = 3`, no fork.
+    pub security: bool,
 }
 
 fn git_head(repo: &Path) -> Result<String> {
@@ -92,6 +94,7 @@ impl Job {
             repo: repo.to_owned(),
             project: manifest.project.clone(),
             plan: config.plan(version),
+            security: crate::render::security_applies(&manifest),
             config,
             sha,
         })
@@ -105,8 +108,18 @@ impl Job {
         format!("{} (draft of {})", self.plan.version, &self.sha[..12])
     }
 
-    /// The body of the release: the notes file when `[release] notes` names one, else one line.
+    /// The body of the release: the notes file when `[release] notes` names one, else one line,
+    /// then the security and dependency section (R47) built from the data at the released commit.
     pub fn notes(&self) -> Result<String> {
+        let base = self.base_notes()?;
+        if !self.security {
+            return Ok(base);
+        }
+        let section = crate::security::release_section(&self.repo)?;
+        Ok(format!("{}\n\n{section}", base.trim_end()))
+    }
+
+    fn base_notes(&self) -> Result<String> {
         match &self.config.notes {
             Some(file) => {
                 let text = fs::read_to_string(self.repo.join(file)).map_err(|error| {

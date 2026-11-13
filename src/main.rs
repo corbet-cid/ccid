@@ -18,6 +18,16 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum SecurityCommand {
+    /// Print, as JSON, the requests that would publish `.ci/own-advisories.toml` through each
+    /// forge's advisory feature. Nothing is sent.
+    Plan {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum Action {
     /// Submit exact committed source and inspect Crow runs.
     CrowCi {
@@ -196,6 +206,12 @@ enum Action {
     Surface {
         #[command(subcommand)]
         command: ccid::render::surface::Command,
+    },
+    /// Security and dependency work made visible (R47): the offline plan that would publish the
+    /// project's own advisories. Sends nothing.
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommand,
     },
     /// Fleet data from the release channel: first-party owner prefixes and their legacy aliases.
     Fleet {
@@ -708,6 +724,20 @@ fn main() -> ExitCode {
                     eprintln!("ccid surface: {error}");
                     ExitCode::from(2)
                 }
+            };
+        }
+        Action::Security { command } => {
+            return match command {
+                SecurityCommand::Plan { repo } => match ccid::security::plan_json(&repo) {
+                    Ok(plan) => {
+                        print!("{plan}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("ccid security: {error}");
+                        ExitCode::from(2)
+                    }
+                },
             };
         }
         Action::Fleet { action } => {

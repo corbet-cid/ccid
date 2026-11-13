@@ -46,6 +46,7 @@ mod render_golden;
 mod resolve_lock;
 mod resolver_config;
 mod retired_mirror;
+mod security;
 #[cfg(unix)]
 mod surface;
 #[cfg(unix)]

@@ -156,7 +156,13 @@ const NO_REMOTE: &str = "a Forgejo job on the `windows` or `macos` label, or an 
 const TABLE: &[Family] = &[
     data(
         "manifest",
-        &[".ci/ccid.toml", ".ci/archives.toml", ".ci/live-inputs.toml"],
+        &[
+            ".ci/ccid.toml",
+            ".ci/archives.toml",
+            ".ci/live-inputs.toml",
+            ".ci/security.toml",
+            ".ci/own-advisories.toml",
+        ],
     ),
     community(
         "provider-community",
