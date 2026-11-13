@@ -155,7 +155,10 @@ siblings = { cdate = "main", cink = "<40-hex commit>" }  # optional; see below
 
 The workflow runs on push, pull request and manual dispatch, cancels a
 superseded run of the same ref, and fetches the exact commit with the job token.
-It then runs `ccid check` from the pinned `tool_revision`. The CI speed profile
+It then runs `ccid check` from the pinned `tool_revision`. A manifest with
+`[runtime]` gets the persistent job environment around that `ccid check`: state
+root and lock, tools from the check-shell's nixpkgs pin, the toolchain lock (see
+[job-runtime.md](job-runtime.md)); no job script is needed. The CI speed profile
 is part of the workflow: no incremental state and no debug information.
 
 The runner, not the repository, owns every operator fact: `CCID_TOOL_ROOT` names

@@ -426,7 +426,7 @@ fn main() -> ExitCode {
             } else {
                 None
             };
-            ccid::job_run::run(
+            match ccid::job_run::run(
                 &ccid::job_run::Options {
                     job,
                     repository,
@@ -436,8 +436,11 @@ fn main() -> ExitCode {
                     local,
                 },
                 &ccid::job_run::Pace::default(),
-            )
-            .map(|_| ())
+            ) {
+                // An exec'd job never returns; a returned code is the job's own refusal.
+                Ok(code) => return code,
+                Err(error) => Err(error),
+            }
         }
         Action::SourceRevision => {
             println!("{}", ccid::SOURCE_REVISION);

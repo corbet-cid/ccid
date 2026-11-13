@@ -271,5 +271,6 @@ installation disables lifecycle scripts by default. Required native preparation
 belongs in an explicit repository command. Use `kind="commands"` for existing
 authoritative scripts, Nix apps/packages and special integration contracts.
 
+See [the job runtime](docs/job-runtime.md) for `[runtime]`, which replaces a repository's `.ci/run-cached.sh`.
 See [execution and worker contracts](docs/execution.md) for resource allocation,
 verified source staging, bootstrap artifacts and platform evidence.

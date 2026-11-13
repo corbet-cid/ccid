@@ -412,6 +412,27 @@ pub fn ensure(
     )))
 }
 
+/// `rustup which --toolchain stable cargo`: the stable cargo a job's `PATH` should find first
+/// (the cached runners' `cargo_bin`). A missing or non-executable answer is an error.
+pub fn stable_cargo(environment: &Environment) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = listing(
+        "rustup",
+        &["which", "--toolchain", "stable", "cargo"],
+        environment,
+    )
+    .map(|output| PathBuf::from(output.trim_end()))
+    .filter(|path| path.is_absolute())
+    .ok_or_else(|| failure("toolchain-lock: rustup which --toolchain stable cargo failed"))?;
+    match fs::metadata(&path) {
+        Ok(meta) if meta.is_file() && meta.permissions().mode() & 0o111 != 0 => Ok(path),
+        _ => Err(failure(format!(
+            "toolchain-lock: the stable cargo {} is not an executable file",
+            path.display()
+        ))),
+    }
+}
+
 /// `repo_install_exact`: the binary under `CARGO_INSTALL_ROOT/bin` must report
 /// exactly `<binary> <version>`; otherwise `cargo install --locked` and check
 /// again. Equality is exact: a substring match would accept 0.2.1000 for 0.2.100.

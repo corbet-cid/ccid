@@ -45,6 +45,7 @@ pub mod render;
 pub mod resolve_lock;
 pub mod resolver;
 mod runner;
+pub mod runtime;
 pub mod rustc_diag;
 mod source;
 #[cfg(unix)]
@@ -172,6 +173,13 @@ struct Manifest {
     /// forbidden crates and transport version floors. Absent: no exceptions.
     #[serde(default)]
     advisories: Option<advisories::Config>,
+    /// The persistent job environment `ccid job-run` sets up around the declared checks of a
+    /// `ccid:run-declared-checks` job (see `runtime`). Absent: the job runs as before.
+    #[serde(default)]
+    runtime: Option<runtime::Config>,
+    /// What the job runtime's Rust toolchain needs besides stable (see `runtime`).
+    #[serde(default)]
+    toolchain: Option<runtime::ToolchainConfig>,
 }
 /// The jobs whose success is the commit's aggregated verdict; every other job
 /// (release, publish, scheduled gates) reports under its own non-gating context.
@@ -223,6 +231,7 @@ fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
     let mut parsed: Manifest = toml::from_str(std::str::from_utf8(&bytes)?)?;
     // `fleet = true` keys the fleet digest through the existing cache_env path (verdict store and moon).
     fleet::normalise(&mut parsed.checks)?;
+    runtime::validate(parsed.runtime.as_ref(), parsed.toolchain.as_ref())?;
     let slug = &parsed.project;
     if parsed.schema != 1
         || slug.is_empty()

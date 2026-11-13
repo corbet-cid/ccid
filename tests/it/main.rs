@@ -28,6 +28,8 @@ mod fleet;
 mod float;
 mod freshness;
 mod job_execution;
+#[cfg(unix)]
+mod job_runtime;
 mod native_compile_cache;
 mod prose_cli;
 mod quality_cli;

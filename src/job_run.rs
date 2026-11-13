@@ -477,6 +477,42 @@ fn execute_job(
     }
     // The generated adapters must be the ones this binary renders (a stale render fails here, with the fix named).
     render::render(Path::new("."), manifest, true)?;
+    // [runtime]: the persistent job environment the repository's job script used to set up. Its
+    // locks are held from here until the job command exits (they outlive the exec below).
+    let runtime = match &plan.runtime {
+        Some(runtime) => {
+            let mut environment: crate::Environment = std::env::vars_os().collect();
+            for (key, value) in &extra {
+                environment.insert(key.into(), value.into());
+            }
+            // Fleet aliases become git `insteadOf` rules, as the script's pairs did; without
+            // fleet data the job refuses rather than fetching through a legacy URL.
+            let (fleet, _) = crate::fleet::load(&environment).map_err(|error| {
+                failure(format!(
+                    "[runtime] needs the release channel's fleet data: {error}"
+                ))
+            })?;
+            let repository_url = extra["CI_REPOSITORY_URL"].clone();
+            match crate::runtime::prepare(
+                runtime,
+                &environment,
+                &repository_url,
+                exe,
+                &pace.git,
+                &fleet.insteadof_pairs(),
+            )? {
+                crate::runtime::Setup::Ready(prepared) => {
+                    extra.extend(prepared.environment.clone());
+                    Some(prepared)
+                }
+                crate::runtime::Setup::Refused(message) => {
+                    eprintln!("ccid job-run: {message}");
+                    return Ok(ExitCode::from(1));
+                }
+            }
+        }
+        None => None,
+    };
     // The job command as one argv, so the rendered check-shell can run it as a
     // whole. Without a generated shell this is byte-identical to before.
     let mut argv: Vec<std::ffi::OsString> = Vec::new();
@@ -509,7 +545,17 @@ fn execute_job(
     for key in stripped_profile_variables(&plan.environment) {
         command.env_remove(key);
     }
+    if let Some(prepared) = &runtime {
+        // One ordered log, as the job scripts' `exec 2>&1` gave.
+        use std::os::fd::AsFd;
+        command.stderr(std::process::Stdio::from(
+            io::stdout().as_fd().try_clone_to_owned()?,
+        ));
+        prepared.keep_across_exec()?;
+    }
     let error = command.exec();
+    // Still here: the locks go with this process.
+    drop(runtime);
     Err(failure(format!("cannot start the job command: {error}")))
 }
 

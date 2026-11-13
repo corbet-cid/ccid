@@ -169,6 +169,11 @@ pub struct Plan {
     /// Declared secret variables this job must not see; `execute` strips them.
     #[serde(skip)]
     pub withheld: Vec<String>,
+    /// Forgejo sentinel jobs of a manifest with `[runtime]`: the persistent job environment
+    /// `job-run` sets up. Not part of the inventory (`jobs.json`), whose manifest digest already
+    /// covers the declaration.
+    #[serde(skip)]
+    pub runtime: Option<crate::runtime::Runtime>,
 }
 
 /// Exact inputs staged by a scheduler adapter. Credentials never belong here.
@@ -410,6 +415,13 @@ pub fn plan(
     }
     if effective == Scheduler::Forgejo {
         validate_forgejo_job(job)?;
+        // One job entry: with [runtime] the runtime replaces the repository's job script, so a
+        // job that still names a command of its own would run without it.
+        if manifest.runtime.is_some() && !is_self_checks_command(&job.command) {
+            return Err(failure(format!(
+                "[runtime] serves ccid:run-declared-checks jobs only; job {name} runs its own command"
+            )));
+        }
     } else if effective == Scheduler::Remote {
         validate_remote_job(job)?;
     } else if job.runs_on.is_some()
@@ -450,6 +462,13 @@ pub fn plan(
             None
         },
         withheld,
+        runtime: match &manifest.runtime {
+            Some(config) if effective == Scheduler::Forgejo => Some(crate::runtime::Runtime {
+                config: config.clone(),
+                toolchain: manifest.toolchain.clone(),
+            }),
+            _ => None,
+        },
     })
 }
 
@@ -843,6 +862,46 @@ mod tests {
             let bad = repository(job);
             assert!(plan(bad.path(), Path::new("ci.toml"), "verify", None).is_err());
         }
+    }
+
+    #[test]
+    fn the_runtime_rides_in_the_plan_of_forgejo_sentinel_jobs_but_never_in_the_inventory() {
+        let tables = "\n[runtime]\ntools = ['python3']\n[toolchain]\nnightly = true\n";
+        let sentinel = repository(&format!(
+            "scheduler = 'forgejo'\nchecks = ['test']\nworkflow = 'ci'\ncommand = ['ccid:run-declared-checks']\n{tables}"
+        ));
+        let planned = plan(sentinel.path(), Path::new("ci.toml"), "verify", None).unwrap();
+        let runtime = planned.runtime.as_ref().expect("runtime");
+        assert_eq!(runtime.config.tools, ["python3"]);
+        assert!(runtime.toolchain.as_ref().is_some_and(|t| t.nightly));
+        // jobs.json is the serialized plan: the declaration stays out of it.
+        let inventory = serde_json::to_value(&planned).unwrap();
+        assert!(inventory.get("runtime").is_none(), "{inventory}");
+        // A Crow job of the same manifest gets no runtime.
+        let crow = plan(
+            sentinel.path(),
+            Path::new("ci.toml"),
+            "verify",
+            Some(Scheduler::Crow),
+        )
+        .unwrap();
+        assert!(crow.runtime.is_none());
+        // A Forgejo job with a command of its own cannot sit beside [runtime].
+        let script = repository(&format!(
+            "scheduler = 'forgejo'\nchecks = ['test']\nworkflow = 'ci'\ncommand = ['bash', '.ci/run-cached.sh']\n{tables}"
+        ));
+        let error = plan(script.path(), Path::new("ci.toml"), "verify", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[runtime] serves ccid:run-declared-checks jobs only"));
+        // Without [runtime] nothing changes.
+        let plain = repository(
+            "scheduler = 'forgejo'\nchecks = ['test']\nworkflow = 'ci'\ncommand = ['bash', '.ci/run-cached.sh']",
+        );
+        assert!(plan(plain.path(), Path::new("ci.toml"), "verify", None)
+            .unwrap()
+            .runtime
+            .is_none());
     }
 
     #[test]
