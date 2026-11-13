@@ -23,6 +23,8 @@ mod content_pins;
 #[cfg(unix)]
 mod coverage_run;
 mod dependency_resolution;
+#[cfg(unix)]
+mod fake_forge;
 mod first_party;
 mod fleet;
 mod float;
@@ -37,6 +39,8 @@ mod mirror_check;
 mod native_compile_cache;
 mod prose_cli;
 mod quality_cli;
+#[cfg(unix)]
+mod release;
 mod release_mirror;
 mod render;
 mod render_golden;
