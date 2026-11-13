@@ -42,6 +42,7 @@ pub mod job_run;
 pub mod jobs;
 pub mod lock_refresh;
 pub mod push;
+pub mod release;
 #[cfg(unix)]
 pub mod read_set;
 pub mod render;
@@ -165,6 +166,9 @@ struct Manifest {
     #[serde(default)]
     #[allow(dead_code)]
     content_pins: Vec<content_pins::Pin>,
+    /// The release flow (`render_schema = 3`): `ccid release` and the rendered `release.yml`.
+    #[serde(default)]
+    release: Option<release::Config>,
     /// First-party branch and revision rules checked by `ccid first-party`.
     #[serde(default)]
     #[allow(dead_code)]

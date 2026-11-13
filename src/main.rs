@@ -190,6 +190,12 @@ enum Action {
         #[arg(long, hide = true)]
         parent_watch: bool,
     },
+    /// The release flow of a repository with a `[release]` table (render_schema = 3): the release job,
+    /// the platform legs, promotion, and the commands a leg's scripts use against the draft.
+    Release {
+        #[command(subcommand)]
+        command: ccid::release::Command,
+    },
     /// The CI surface: the class of every CI file and the plan of the move to render_schema = 3.
     Surface {
         #[command(subcommand)]
@@ -693,6 +699,15 @@ fn main() -> ExitCode {
                 }
                 Err(error) => Err(error),
             }
+        }
+        Action::Release { command } => {
+            return match ccid::release::run(&command) {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("ccid release: {error}");
+                    ExitCode::from(2)
+                }
+            };
         }
         Action::Surface { command } => {
             return match ccid::render::surface::run(&command) {
