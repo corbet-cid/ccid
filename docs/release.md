@@ -207,3 +207,5 @@ registry the old workflows published to. The GitHub release workflow of a JSR li
 JSR; JSR is now left out until it can be published from our side (see JSR above).
 A library's own packing code (a `release-check.py`, a `publish.py`, the packing steps of a GitHub release workflow)
 goes with them: `kind = "pack"` makes the files, the publisher uploads them.
+
+At `render_schema = 3` the notes end with a "Security and dependencies" section ([security.md](security.md)); a fork gets none.

@@ -54,6 +54,7 @@ pub mod resolver;
 mod runner;
 pub mod runtime;
 pub mod rustc_diag;
+pub mod security;
 mod source;
 #[cfg(unix)]
 pub mod toolchain;

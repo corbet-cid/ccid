@@ -284,3 +284,4 @@ See [lock refresh](docs/lock-refresh.md) for `ccid lock-refresh`, the event-star
 See [measured check inputs](docs/measure-inputs.md) for `ccid measure-inputs`, which derives a check's `cache_inputs` from what it actually touched.
 See [execution and worker contracts](docs/execution.md) for resource allocation,
 verified source staging, bootstrap artifacts and platform evidence.
+See [security and dependency visibility](docs/security.md) for the README status, the SECURITY.md block and the release-notes section.
