@@ -30,6 +30,17 @@ const BRANCH: &str = "main";
 /// The trailer of a lock-only commit that a release preflight made.
 const REFRESH_TRAILER: &str = "CCID-Lock-Refresh: third-party";
 
+/// The seconds a check of a release may run: a release builds everything on a cold cache and cross compiles, so
+/// two hours unless the job already allows more.
+const CHECK_DEADLINE: u64 = 7_200;
+
+fn check_deadline(current: Option<&str>) -> String {
+    current
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or(CHECK_DEADLINE, |value| value.max(CHECK_DEADLINE))
+        .to_string()
+}
+
 /// One release of one repository at one commit.
 pub struct Job {
     pub repo: PathBuf,
@@ -154,6 +165,10 @@ impl Job {
             command.arg("--check").arg(check);
         }
         command.envs(self.environment(dir));
+        command.env(
+            "CI_TIMEOUT",
+            check_deadline(std::env::var("CI_TIMEOUT").ok().as_deref()),
+        );
         if !credentials {
             for name in CREDENTIALS {
                 command.env_remove(name);
@@ -852,6 +867,14 @@ mod tests {
         git(dir.path(), &["add", "-A"]);
         git(dir.path(), &["commit", "-q", "-m", "fixture"]);
         dir
+    }
+
+    #[test]
+    fn a_release_check_gets_two_hours_or_what_the_job_allows() {
+        assert_eq!(check_deadline(None), "7200");
+        assert_eq!(check_deadline(Some("2700")), "7200");
+        assert_eq!(check_deadline(Some("10000")), "10000");
+        assert_eq!(check_deadline(Some("soon")), "7200");
     }
 
     #[test]
