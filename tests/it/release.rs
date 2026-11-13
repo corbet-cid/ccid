@@ -540,3 +540,17 @@ fn the_release_jobs_of_a_rendered_workflow_run_as_ccid_release_commands() {
     assert!(!unknown.status.success());
     assert!(text(&unknown).contains("Unknown job"), "{}", text(&unknown));
 }
+
+#[test]
+fn a_successful_upload_is_never_followed_by_a_pause() {
+    let fixture = Fixture::new(LIBRARY, "1.2.0");
+    let started = std::time::Instant::now();
+    // A long retry delay: only a failed attempt may wait for it.
+    let built = fixture.ccid(&["release", "build"], &[("CCID_RELEASE_RETRY_DELAY", "30")]);
+    assert!(built.status.success(), "{}", text(&built));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the build paused after successful uploads: {:?}",
+        started.elapsed()
+    );
+}

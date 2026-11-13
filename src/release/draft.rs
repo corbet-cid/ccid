@@ -193,13 +193,17 @@ impl<'a> Draft<'a> {
         let size = fs::metadata(path)?.len();
         for attempt in 1..=4u32 {
             self.require_draft()?;
-            match self.forge.upload(self.release.id, name, path, size) {
-                Ok(()) => {}
-                Err(error) => eprintln!(
-                    "ccid release: upload of {name} failed (attempt {attempt} of 4): {error}"
-                ),
-            }
-            if attempt < 4 {
+            let failed = match self.forge.upload(self.release.id, name, path, size) {
+                Ok(()) => false,
+                Err(error) => {
+                    eprintln!(
+                        "ccid release: upload of {name} failed (attempt {attempt} of 4): {error}"
+                    );
+                    true
+                }
+            };
+            // A pause only after a failure: the forge may still be storing what the client gave up on.
+            if failed && attempt < 4 {
                 std::thread::sleep(self.forge.retry_delay * attempt);
             }
             self.reload()?;
