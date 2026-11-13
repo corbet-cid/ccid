@@ -14,7 +14,7 @@ build = ["release-build"]            # checks the release job runs; they leave t
 legs = { windows = "release-windows", macos = "release-macos" }   # the check each leg runs on its label
 seal = ["release-seal"]              # checks promotion runs on the complete draft to derive the manifests
 manifests = ["manifest.json"]        # the only files promotion may replace (besides SHA256SUMS)
-registries = ["crates", "jsr"]       # crates | npm | pypi | aur | jsr
+registries = ["crates"]              # crates | npm | pypi | aur
 notes = "CHANGELOG.md"               # optional: the text of the release (default: one generated line)
 ```
 
@@ -118,11 +118,16 @@ flow and release again.
 
 ## JSR
 
-`registries` containing `jsr` renders `.github/workflows/jsr-publish.yml`: on a pushed `v*` tag of a public
-copy it checks out the tag, sets up Deno and runs `deno publish` with GitHub's OIDC identity
-(`id-token: write`, `contents: read`). Nothing is built or tested there, nothing of ours is a credential, and
-the workflow refuses a tag that disagrees with the version in `jsr.json` or `deno.json`. The other
-registries have their own publishers (one publisher per registry).
+`jsr` is not a registry of the table. JSR accepts a publish only from a GitHub workflow (OIDC), which would be CI on
+a mirror forge (operating model R6, R7); R46 has such a registry published from our side with a key that needs no
+renewal, or not at all. Nothing publishes to JSR until that key exists, so `registries = ["jsr"]` is refused. The
+workflow `.github/workflows/jsr-publish.yml` that earlier releases rendered is retired
+([mirror-forges.md](mirror-forges.md)).
+
+## Copies on other forges
+
+The release is built and published once, on the primary forge. Its files reach every copy by an upload made from
+the primary's side (R8, R45); no job runs on a copy and ccid renders nothing for one ([mirror-forges.md](mirror-forges.md)).
 
 ## Commands
 
@@ -148,5 +153,5 @@ put on the channel, and what the clone's runner environment must provide: [darwi
 `.forgejo/workflows/release.yml`, `release-macos.yml`, `.github/workflows/release.yml` and
 `.ci/release-check.py` are legacy files that render replaces or deletes (without the table they are refused,
 so a repository never loses its release before it has a new one). Check that `registries` names every
-registry the old workflows published to: the GitHub release workflow of a JSR library published both Cargo
-and JSR.
+registry the old workflows published to. The GitHub release workflow of a JSR library published both Cargo and
+JSR; JSR is now left out until it can be published from our side (see JSR above).

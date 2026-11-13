@@ -58,10 +58,11 @@ tracked files and new files git does not ignore.
 | legacy | a retired family (table in `src/render/surface.rs`) | see below | red |
 | unknown | anything else | refuses the render | red |
 
-The rendered files of a schema-3 repository include the [mirror checks](mirror-check.md):
-`.github/workflows/pr-check.yml` (a pull request) and, in `.gitlab-ci.yml` next to the release mirror, the
-pipeline rules and the `mr-check` job (a merge request). They replace the hand-written
-`.github/workflows/ci.yml`, a legacy family that render now deletes (unless a declared check reads it).
+No rendered file is for a mirror forge: a copy on GitHub, GitLab or Bitbucket runs no CI (R6, R7). The files that
+earlier releases rendered for one (`release-mirror.yml`, `pr-check.yml`, `jsr-publish.yml`, the generated
+`.gitlab-ci.yml`) are the legacy family `mirror-ci`, which render deletes at every schema, and the hand-written
+`.github/workflows/ci.yml` is a legacy family that render deletes too (unless a declared check reads it). The
+per-commit verify on the primary forge is the check. See [mirror-forges.md](mirror-forges.md).
 
 A legacy family has a replacement. When the replacement is live:
 
@@ -71,8 +72,8 @@ A legacy family has a replacement. When the replacement is live:
 
 When the replacement is not live yet, render refuses the file unless the manifest or a script it runs uses
 it, so a repository with that family stays on `render_schema = 2` until the replacement lands. Each such
-family names what it waits for. A hand-written remote-scheduler pipeline in `.gitlab-ci.yml` is replaced by
-the rendered release mirror.
+family names what it waits for. A hand-written remote-scheduler pipeline in `.gitlab-ci.yml` is deleted (nothing
+replaces it: a mirror forge runs no CI).
 
 Render deletes or overwrites a hand-written file only when git can restore it: tracked and unmodified in the
 work tree. An untracked or changed file is refused with that reason. A symlink is never followed, read or
@@ -105,7 +106,33 @@ without writing: `render_schema = 3`; drop an own `tool_revision`/`tool_sha256` 
 labels to `linux`; `events` dropped on verdict jobs and `events = ["manual"]` dropped elsewhere; a separate
 pull-request job with the verdict's checks and command folded into the verdict job; a non-verdict job that
 shares the verdict's workflow moved to its own; the native aarch64 job of a nix repository replaced by the
-evaluation-only `mode = "eval"` check ([the pattern](mirror-check.md#the-aarch64-pattern-for-nix-repositories-evaluation-only)).
+evaluation-only `mode = "eval"` check ([the pattern](#the-aarch64-pattern-for-nix-repositories-evaluation-only)).
 A remote, Crow or Argo job and `push_consumer` are decisions for a person; the plan applies the conservative
 default (the job goes, or moves to Forgejo) and says so. For each repository the plan lists the edits, the decisions, the files render writes, deletes,
 keeps and refuses, and whether it is ready; the totals count repositories per edit kind and files per family.
+
+## The aarch64 pattern for nix repositories (evaluation only)
+
+A nix repository used to ask a hosted ARM runner for a native `nix flake check` (a remote job). No runner
+is ever ARM; aarch64 is covered by evaluating every system without building, on `linux`:
+
+```toml
+[checks.native]            # the build, on x86_64
+kind = "nix"
+mode = "native"
+
+[checks.eval]              # every system, evaluated: aarch64 included, nothing built
+kind = "nix"
+mode = "eval"              # nix flake check --all-systems --no-build
+
+[jobs.verify]
+scheduler = "forgejo"
+checks = ["native", "eval"]
+workflow = "ci"
+command = ["ccid:run-declared-checks"]
+```
+
+The verify job runs on every commit. `ccid surface plan` makes the edit: for a remote job on an
+`arm64`/`aarch64` platform in a repository with `kind = "nix"` checks, it drops the remote job, adds
+`[checks.eval]` when none has `mode = "eval"` and lists it in the first verdict job; it leaves a repository
+without nix checks as a decision.

@@ -1,5 +1,6 @@
 //! The release surface of `render_schema = 3` (`[release]`): the Forgejo workflow that holds the whole release
-//! (`.forgejo/workflows/release.yml`) and, for a JSR package, the GitHub publisher (`.github/workflows/jsr-publish.yml`).
+//! (`.forgejo/workflows/release.yml`). Nothing of it runs on a mirror forge (R6, R7): the GitHub publisher for JSR that
+//! earlier releases rendered is retired (R46, `retired.rs`).
 //!
 //! The workflow is four jobs in one run, ordered by `needs` (no dispatch chain, no polling):
 //!
@@ -13,12 +14,11 @@
 //! from `[release]` (see `release::job_plan`).
 
 use super::Templates;
-use crate::release::{self, Registry};
+use crate::release;
 use crate::{failure, Result};
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub(super) const FORGEJO: &str = ".forgejo/workflows/release.yml";
-pub(super) const JSR: &str = ".github/workflows/jsr-publish.yml";
 
 /// One job of the workflow: its shim step. The release job's step has an id: the outputs are read from it.
 fn job(templates: &Templates, name: &str, label: &str) -> String {
@@ -89,9 +89,6 @@ pub(super) fn outputs(
     };
     config.validate(parsed)?;
     outputs.insert(PathBuf::from(FORGEJO), workflow(templates, config));
-    if config.registries.contains(&Registry::Jsr) {
-        outputs.insert(PathBuf::from(JSR), templates.jsr_publish.to_owned());
-    }
     Ok(outputs)
 }
 

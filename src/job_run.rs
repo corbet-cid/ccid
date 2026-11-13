@@ -41,10 +41,6 @@ pub struct Options {
     /// Run the job against this existing source export instead of fetching the commit. The land
     /// gate is the second producer of CI's job and must use the same entry point (P5).
     pub local: Option<PathBuf>,
-    /// Mirror mode (`--mirror`): the pull-request or merge-request check of a mirror platform. The
-    /// checkout is the platform's own (`local`, else the current directory); `repository`, `sha`,
-    /// `server_url` and `owner` are read from it, not passed.
-    pub mirror: bool,
 }
 
 /// Timing knobs; tests shorten them.
@@ -343,7 +339,7 @@ fn command_environment(
         env.insert(key.clone(), value.clone());
     }
     env.insert("CI_COMMIT_SHA".into(), options.sha.clone());
-    // A mirror checkout whose origin is unknown has no repository URL; nothing is invented for it.
+    // A `--local` run of a tree without an origin has no repository URL; nothing is invented for it.
     if !options.server_url.is_empty() {
         env.insert(
             "CI_REPOSITORY_URL".into(),
@@ -381,9 +377,6 @@ fn stripped_profile_variables(declared: &BTreeMap<String, String>) -> Vec<&'stat
 /// Run the whole job: claim, fetch, check the adapters, exec the declared command. Does not return on success of the exec.
 #[cfg(unix)]
 pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
-    if options.mirror {
-        return run_mirror(options, pace);
-    }
     let token = std::env::var("CCID_FORGE_TOKEN").ok();
     if token.is_none() && options.local.is_none() {
         return Err(failure("CCID_FORGE_TOKEN (the job token) is required"));
@@ -452,125 +445,6 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     execute_job(options, &exe, plan, Some((&token, &dir)), pace)
 }
 
-/// Variables a mirror check never sees: the forge's tokens, caches and tool locations (a platform's
-/// own job token is scrubbed too: a check has no use for it), and the compiler-cache wrappers.
-fn mirror_scrubbed(key: &str) -> bool {
-    const NAMES: &[&str] = &[
-        "RUSTC_WRAPPER",
-        "CARGO_BUILD_RUSTC_WRAPPER",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "CI_JOB_TOKEN",
-        "CI_BUILD_TOKEN",
-        "CI_REGISTRY_PASSWORD",
-        "CI_DEPLOY_PASSWORD",
-    ];
-    const PREFIXES: &[&str] = &["SCCACHE_", "KACHE_", "CCID_REMOTE_"];
-    // Everything of ccid's own that points at the forge's infrastructure; the check's own plumbing
-    // (`CCID_BIN`, `CCID_SIBLINGS_*`, `CCID_FLEET_FILE`, `CCID_CHANNEL_FILE`) is set by this process or by the script.
-    const CCID: &[&str] = &[
-        "CCID_FORGE_TOKEN",
-        "CCID_FORGE_HOSTS",
-        "CCID_RESULT_CACHE",
-        "CCID_COMPILE_CACHE_CONFIG",
-        "CCID_FLAKE_ARCHIVE_PUSH",
-        "CCID_LFS_STORAGE",
-        "CCID_SOURCE_ROOT",
-        "CCID_SOURCE_SLOTS",
-        "CCID_TOOL_ROOT",
-        "CCID_TOOL_URL",
-        "CCID_TOOL_SHA256",
-        "CCID_TOOL_REVISION",
-        "CCID_TOOL_TRIPLE",
-        "CCID_CHANNEL_URL",
-    ];
-    NAMES.contains(&key)
-        || CCID.contains(&key)
-        || PREFIXES.iter().any(|prefix| key.starts_with(prefix))
-}
-
-/// `https://host/path` of a git remote URL without credentials, or none for what is not an https URL.
-fn plain_remote(url: &str) -> Option<String> {
-    let rest = url.trim().strip_prefix("https://")?;
-    let (authority, path) = rest.split_once('/')?;
-    let host = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    (!host.is_empty() && path.split('/').count() == 2 && !path.contains(char::is_whitespace))
-        .then(|| format!("https://{host}/{path}"))
-}
-
-/// `ccid job-run --mirror`: the pull-request or merge-request check of a mirror platform. The platform
-/// has checked the commit out; this runs one verdict job's declared checks against it, with no token,
-/// no result cache, no compile-cache wrapper and nothing else of ours: render decided at render time
-/// that the job needs none (`mirror::forge_only_reason`), and this refuses a job that does.
-#[cfg(unix)]
-fn run_mirror(options: &Options, pace: &Pace) -> Result<ExitCode> {
-    let exe = std::env::current_exe()?;
-    let source = options.local.clone().unwrap_or_else(|| PathBuf::from("."));
-    if !source.is_dir() {
-        return Err(failure(format!(
-            "--source {} is not a directory",
-            source.display()
-        )));
-    }
-    std::env::set_current_dir(&source)?;
-    let git_output = |args: &[&str]| {
-        git(pace, Path::new("."))
-            .args(args)
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-            .filter(|text| !text.is_empty())
-    };
-    let sha = git_output(&["rev-parse", "HEAD"])
-        .ok_or_else(|| failure("--mirror needs a git checkout of the commit to check"))?;
-    if let Some(reason) =
-        render::mirror_refusal(Path::new("."), Path::new(".ci/ccid.toml"), &options.job)?
-    {
-        eprintln!(
-            "ccid job-run --mirror: {} runs on the forge only: {reason}",
-            options.job
-        );
-        return Ok(ExitCode::from(2));
-    }
-    // The repository's identity is what the platform's checkout says about itself (its `origin`, without credentials).
-    let origin = git_output(&["remote", "get-url", "origin"]).and_then(|url| plain_remote(&url));
-    let (server_url, repository, owner) = origin
-        .as_deref()
-        .and_then(|url| {
-            let rest = url.strip_prefix("https://")?;
-            let (host, path) = rest.split_once('/')?;
-            let (owner, _) = path.split_once('/')?;
-            Some((format!("https://{host}"), path.to_owned(), owner.to_owned()))
-        })
-        .unwrap_or_default();
-    eprintln!(
-        "ccid job-run --mirror: tool revision {} for {} at {sha}",
-        crate::SOURCE_REVISION,
-        options.job
-    );
-    let options = Options {
-        job: options.job.clone(),
-        repository,
-        sha,
-        server_url,
-        owner,
-        local: Some(source),
-        mirror: true,
-    };
-    let plan = jobs::plan(
-        Path::new("."),
-        Path::new(".ci/ccid.toml"),
-        &options.job,
-        None,
-    )?;
-    execute_job(&options, &exe, plan, None, pace)
-}
-
 /// Run the declared job command after the source is staged. One definition for the scheduler
 /// (`job-run`) and the land gate (`job-run --local`).
 fn execute_job(
@@ -601,11 +475,7 @@ fn execute_job(
         extra.insert("CCID_SIBLINGS_REVISIONS".into(), revisions);
     }
     // The generated adapters must be the ones this binary renders (a stale render fails here, with the fix named).
-    // A mirror check does not ask: the copy's `origin` is the platform's, not the forge's, and the forge's
-    // own per-commit verify already holds every commit to its adapters.
-    if !options.mirror {
-        render::render(Path::new("."), manifest, true)?;
-    }
+    render::render(Path::new("."), manifest, true)?;
     // [runtime]: the persistent job environment the repository's job script used to set up. Its
     // locks are held from here until the job command exits (they outlive the exec below).
     let runtime = match &plan.runtime {
@@ -680,13 +550,6 @@ fn execute_job(
     // lanes and CI). Workflows rendered earlier still export CARGO_PROFILE_*_DEBUG: those are dropped here, before ccid decides, unless the job declares them itself.
     for key in stripped_profile_variables(&plan.environment) {
         command.env_remove(key);
-    }
-    if options.mirror {
-        for (key, _) in std::env::vars_os() {
-            if mirror_scrubbed(&key.to_string_lossy()) {
-                command.env_remove(key);
-            }
-        }
     }
     if let Some(prepared) = &runtime {
         // One ordered log, as the job scripts' `exec 2>&1` gave.
@@ -974,7 +837,6 @@ mod tests {
             server_url: "https://forge.example/".into(),
             owner: "o".into(),
             local: None,
-            mirror: false,
         };
         let mut pace = quick();
         pace.git = bin.clone().into();

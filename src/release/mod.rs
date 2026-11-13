@@ -122,7 +122,6 @@ pub(crate) fn job_plan(
         timeout_minutes: None,
         withheld: Vec::new(),
         runtime,
-        mirror_optout: None,
     }))
 }
 
@@ -144,8 +143,6 @@ pub enum Registry {
     Npm,
     Pypi,
     Aur,
-    /// Published from the GitHub copy through OIDC (`jsr-publish.yml`).
-    Jsr,
 }
 
 /// `[release]`: absent means no release surface is rendered.
@@ -479,11 +476,18 @@ mod tests {
 
     #[test]
     fn registries_are_a_closed_set() {
-        let ok = config("kind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"p\"]\nregistries = [\"crates\", \"jsr\"]\n");
-        assert_eq!(ok.registries, vec![Registry::Crates, Registry::Jsr]);
-        assert!(toml::from_str::<Config>(
-            "kind = \"library\"\nversion = \"Cargo.toml\"\nregistries = [\"homebrew\"]\n"
-        )
-        .is_err());
+        let ok = config("kind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"p\"]\nregistries = [\"crates\", \"npm\"]\n");
+        assert_eq!(ok.registries, vec![Registry::Crates, Registry::Npm]);
+        // JSR accepts a publish from a GitHub workflow only (OIDC): CI on a mirror forge, which the operating model
+        // rules out (R6, R7, R46). It is not a registry of this set until it can be published from our side.
+        for unknown in ["homebrew", "jsr"] {
+            assert!(
+                toml::from_str::<Config>(&format!(
+                    "kind = \"library\"\nversion = \"Cargo.toml\"\nregistries = [\"{unknown}\"]\n"
+                ))
+                .is_err(),
+                "{unknown}"
+            );
+        }
     }
 }

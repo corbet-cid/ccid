@@ -233,16 +233,26 @@ const TABLE: &[Family] = &[
         "nothing: a Bitbucket copy is git only",
         None,
     ),
+    // The CI files of the mirror forges that earlier releases rendered (R6, R7). Only a file that carries the render
+    // marker belongs here: a hand-written file at one of these paths is the repository's own and stays unknown.
+    Family {
+        id: "mirror-ci",
+        class: Class::Legacy,
+        patterns: &super::retired::FILES,
+        contains: Some(super::CROW_MARKER),
+        replacement: super::retired::REPLACEMENT,
+        waits_for: None,
+    },
     legacy(
         "github-ci",
         &[".github/workflows/ci.yml"],
-        "per-commit verify on Forgejo and the rendered pull-request check (`.github/workflows/pr-check.yml`)",
+        "per-commit verify on Forgejo (a mirror forge runs no CI: R6)",
         None,
     ),
     legacy(
         "github-release",
         &[".github/workflows/release.yml"],
-        "the rendered Forgejo release flow and the JSR publisher",
+        "the rendered Forgejo release flow (a registry that a forge publishes only through its CI is published from our side or not at all: R46)",
         RELEASE_TEMPLATE,
     ),
     legacy(
@@ -410,7 +420,7 @@ const LIVE_RELEASE: &[Family] = &[
     legacy(
         "github-release",
         &[".github/workflows/release.yml"],
-        "the rendered Forgejo release flow and the JSR publisher",
+        "the rendered Forgejo release flow (a registry that a forge publishes only through its CI is published from our side or not at all: R46)",
         None,
     ),
     legacy(
@@ -439,21 +449,6 @@ fn family_for(relative: &str, content: Option<&[u8]>, release: bool) -> Option<&
         }
     }
     Some(table)
-}
-
-/// A hand-written file at a path ccid renders may be overwritten at `render_schema = 3` only when it is a live
-/// legacy family (the hand-written remote-scheduler pipeline where the release mirror's GitLab file goes).
-pub(super) fn replaceable(repo: &Path, relative: &str) -> Result<bool> {
-    let path = repo.join(relative);
-    let Some(found) = metadata(&path)? else {
-        return Ok(false);
-    };
-    if !found.is_file() || found.file_type().is_symlink() {
-        return Ok(false);
-    }
-    let bytes = fs::read(&path)?;
-    Ok(family(relative, Some(&bytes))
-        .is_some_and(|family| family.class == Class::Legacy && family.waits_for.is_none()))
 }
 
 /// `*` and `?` inside one path segment, `**` as a whole segment for any number of segments.
@@ -827,22 +822,12 @@ fn restorable(repo: &Path, paths: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
-/// The files of a mirror whose forge location is unknown here are not judged.
-const MIRROR_FILES: [&str; 3] = [
-    super::mirror::GITHUB,
-    super::mirror::GITLAB,
-    super::mirror::BITBUCKET,
-];
-
 /// Classify every surface file of `repo` for a `render_schema = 3` render whose files are `outputs`.
 ///
-/// `mirror_known`: the repository's forge location could be told, so the release mirror files are rendered
-/// (when it cannot, committed mirror files are left as they are).
 pub(super) fn assess(
     repo: &Path,
     parsed: &crate::Manifest,
     outputs: &BTreeMap<PathBuf, String>,
-    mirror_known: bool,
 ) -> Result<Vec<Entry>> {
     let default = Config::default();
     let config = parsed.surface.as_ref().unwrap_or(&default);
@@ -921,13 +906,14 @@ pub(super) fn assess(
             continue;
         }
         if ours {
-            let item = if MIRROR_FILES.contains(&relative) && !mirror_known {
+            let item = if super::retired::FILES.contains(&relative) {
+                // The CI of a mirror forge that an earlier release rendered: retired, not merely "no longer rendered".
                 entry(
                     relative,
-                    Class::Rendered,
-                    Action::Keep,
-                    None,
-                    "the repository's forge location is unknown here, so its release mirror is not judged".to_owned(),
+                    Class::Legacy,
+                    Action::Delete,
+                    table,
+                    "a mirror forge runs no CI (R6, R7)".to_owned(),
                 )
             } else {
                 entry(

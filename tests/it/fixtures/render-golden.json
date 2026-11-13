@@ -9,14 +9,11 @@
     ".ci/jobs.json": "6ff3c07a1fc90e451e3762eeea7542674a9de3c1698f1efe4478d57410a082c8",
     ".forgejo/workflows/ci.yml": "f3ec1bd8f0b00f65f0d73c3d3366acb0919c82250df70ca2e3362103cc99977e",
     ".forgejo/workflows/downstream-check.yml": "7691f8d1d41f34317d076a2668ae6ef4bb75f7a48abcc27304424da1d020ad8b",
-    ".forgejo/workflows/upstream-sync.yml": "df830ee9d3096e7db0e7c3be2bb02ebb057e8317e8a0ca28e2a8e6a487c669dd",
-    ".github/workflows/release-mirror.yml": "13903fcb53790b7f86e40f894a887d41e580115b40aa215aa38f7a26b057f216",
-    ".gitlab-ci.yml": "c0fdfa496a958e820b9b3109065e7ea3e9e64ef3eae933bb3919f34edf978fb6"
+    ".forgejo/workflows/upstream-sync.yml": "df830ee9d3096e7db0e7c3be2bb02ebb057e8317e8a0ca28e2a8e6a487c669dd"
   },
   "manual-remote": {
     ".ci/jobs.json": "9546fc8ace3a10e861af213b74edbe715aaca4a8d4de58755b757bfc8c816776",
-    ".forgejo/workflows/ci.yml": "5769d052af0757a03d15b4bed8d7b8024c150c5d053fcf451b89f53e0098b119",
-    ".github/workflows/release-mirror.yml": "24cc50be87d1bd3b2b2659197d7cb5f42894bece5bf3e7b336d073c2c5b9b8bb"
+    ".forgejo/workflows/ci.yml": "5769d052af0757a03d15b4bed8d7b8024c150c5d053fcf451b89f53e0098b119"
   },
   "pinned-crow": {
     ".ci/jobs.json": "950ebca3baa7605b36f483eeb55fe03925280dc14f123d6b97e0384cbb37dcf3",
@@ -26,8 +23,6 @@
   "push-pr": {
     ".ci/jobs.json": "20702ec416d18623dc58ae130da5f6472e13e7d83fa520b2f7db34267a8245e1",
     ".forgejo/workflows/ci.yml": "da1845ec56c077189e1b0129e6689eb0ea8a06e24fd35fda4f5086cf7e74b063",
-    ".forgejo/workflows/pr.yml": "e0849bb794ccfbac6a3a7c96b1e747aca613c6445a640ddd27d1abd740847221",
-    ".github/workflows/release-mirror.yml": "0091c5308c074565c97ab7c3ba9d989a035bb8c4e0ed0e997c67d0a527781e6d",
-    ".gitlab-ci.yml": "df5aeb5c5bea69bceb99934671ebc7325bcfb0e650b681d146777a8a4de28415"
+    ".forgejo/workflows/pr.yml": "e0849bb794ccfbac6a3a7c96b1e747aca613c6445a640ddd27d1abd740847221"
   }
 }

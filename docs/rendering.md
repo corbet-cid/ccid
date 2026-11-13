@@ -144,9 +144,8 @@ file. See [surface.md](surface.md). Schemas 1 and 2 render byte for byte as befo
 ## The release flow
 
 A manifest with a `[release]` table (`render_schema = 3`) gets `.forgejo/workflows/release.yml`: the release
-job, the platform legs and the promotion in one run, ordered by `needs`; with `jsr` among its registries also
-`.github/workflows/jsr-publish.yml`. The jobs are planned from the table, never declared. See
-[release.md](release.md).
+job, the platform legs and the promotion in one run, ordered by `needs`. The jobs are planned from the table,
+never declared. See [release.md](release.md).
 
 ## Forgejo Actions
 
@@ -225,12 +224,16 @@ rendering fails. A host-side broker (`adapters/remote_ci.py`) dispatches the
 workflow and reports a commit status. A remote job never runs through
 `execute-job`.
 
-## Release mirror
+A remote job starts CI on a copy of the repository, which the operating model rules out (R6, R7): the Windows and
+macOS builds run on our own build VMs through the `windows` and `macos` runner labels. `render_schema = 3` refuses
+remote jobs ([surface.md](surface.md)); schemas 1 and 2 still record them, and the declaration is to be replaced.
 
-Besides the job adapters, `render` writes the thin provider files that copy a Forgejo release
-to GitHub and GitLab when its tag arrives there (and checks them like every adapter). See
-[release-mirror.md](release-mirror.md). At `render_schema = 3` it also writes the pull-request and
-merge-request checks of the mirror platforms: [mirror-check.md](mirror-check.md).
+## Mirror forges
+
+`render` writes no file for the CI of a mirror forge (GitHub, GitLab, Bitbucket), at any schema: no CI runs on a
+copy (operating model R6, R7). The release mirror, the pull-request and merge-request checks and the JSR publisher
+that earlier releases rendered are retired; `render` removes them and `render --check` names them.
+See [mirror-forges.md](mirror-forges.md).
 
 Repositories that declare an upstream in `ccvl-downstream.json` also get the dispatch-only
 workflow `.forgejo/workflows/upstream-sync.yml`, which merges, checks and pushes every green

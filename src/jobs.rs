@@ -100,13 +100,6 @@ pub struct Job {
     /// Absent uses the default of 60; allowed range 5..=360.
     #[serde(default)]
     timeout_minutes: Option<u32>,
-    /// Forgejo verdict jobs at `render_schema = 3`: `mirror = false` keeps the job off the pull-request
-    /// and merge-request checks of the mirror platforms (`mirror_reason` says why and is required with it).
-    /// `true` is the default and is refused as noise.
-    #[serde(default)]
-    mirror: Option<bool>,
-    #[serde(default)]
-    mirror_reason: Option<String>,
 }
 
 /// Manifest-owned newest-head refresh scope: update every first-party git
@@ -181,10 +174,6 @@ pub struct Plan {
     /// covers the declaration.
     #[serde(skip)]
     pub runtime: Option<crate::runtime::Runtime>,
-    /// `mirror = false`: the reason the job stays off the mirror platforms' checks. Not part of the
-    /// inventory either: the manifest digest covers it.
-    #[serde(skip)]
-    pub mirror_optout: Option<String>,
 }
 
 /// Exact inputs staged by a scheduler adapter. Credentials never belong here.
@@ -445,9 +434,6 @@ pub(crate) fn plan_parsed(
             "Push jobs require explicit ccid:run-declared-checks command; arbitrary commands are refused",
         ));
     }
-    if effective != Scheduler::Forgejo && (job.mirror.is_some() || job.mirror_reason.is_some()) {
-        return Err(failure("mirror and mirror_reason belong to Forgejo jobs"));
-    }
     if effective != Scheduler::Remote
         && (job.provider.is_some() || job.platform.is_some() || job.timeout_minutes.is_some())
     {
@@ -511,38 +497,7 @@ pub(crate) fn plan_parsed(
             }),
             _ => None,
         },
-        mirror_optout: job
-            .mirror
-            .map(|_| job.mirror_reason.clone().unwrap_or_default()),
     })
-}
-
-/// The longest `mirror_reason`: it is printed in a check's step summary and in `render --check`.
-const MIRROR_REASON_LIMIT: usize = 120;
-
-/// `mirror` and `mirror_reason` of a Forgejo job: `mirror = false` with a plain-text reason, or neither.
-fn validate_mirror(job: &Job) -> Result<()> {
-    match (job.mirror, job.mirror_reason.as_deref()) {
-        (None, None) => Ok(()),
-        (Some(true), _) => Err(failure(
-            "mirror = true is the default: remove it (or write mirror = false with a mirror_reason)",
-        )),
-        (None, Some(_)) => Err(failure("mirror_reason belongs to mirror = false")),
-        (Some(false), None) => Err(failure("mirror = false needs a mirror_reason")),
-        (Some(false), Some(reason)) => {
-            if reason.is_empty()
-                || reason.len() > MIRROR_REASON_LIMIT
-                || !reason
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b" .,;:()/_+=-".contains(&c))
-            {
-                return Err(failure(format!(
-                    "mirror_reason is plain text of at most {MIRROR_REASON_LIMIT} characters (letters, digits, spaces and . , ; : ( ) / _ + = -)"
-                )));
-            }
-            Ok(())
-        }
-    }
 }
 
 /// A plain runner label or workflow path glob: nothing the YAML renderer
@@ -563,7 +518,6 @@ fn validate_forgejo_job(job: &Job) -> Result<()> {
     if !job.secrets.is_empty() || job.refresh.is_some() {
         return Err(failure("Forgejo jobs take no secrets or refresh scope"));
     }
-    validate_mirror(job)?;
     if let Some(label) = &job.runs_on {
         if !plain_token(label, b"") {
             return Err(failure("Job runs_on must be a plain runner label"));

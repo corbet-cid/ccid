@@ -34,20 +34,18 @@ mod job_execution;
 mod job_runtime;
 #[cfg(unix)]
 mod measure_inputs;
-#[cfg(unix)]
-mod mirror_check;
 mod native_compile_cache;
 mod prose_cli;
 mod quality_cli;
 #[cfg(unix)]
 mod release;
-mod release_mirror;
 #[cfg(unix)]
 mod release_render;
 mod render;
 mod render_golden;
 mod resolve_lock;
 mod resolver_config;
+mod retired_mirror;
 #[cfg(unix)]
 mod surface;
 #[cfg(unix)]
