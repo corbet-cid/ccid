@@ -139,6 +139,11 @@ impl KeyComponents {
             {
                 return Err(failure("Verdict key read set must be sha256 digests"));
             }
+            if read_set.proof != crate::narrowing::PROOF {
+                return Err(failure(
+                    "Verdict key read set names a proof this ccid does not know",
+                ));
+            }
         }
         Ok(())
     }
@@ -217,6 +222,20 @@ pub struct Record {
     pub started_at: u64,
     pub finished_at: u64,
     pub duration_seconds: u64,
+    /// Present exactly when the key is narrowed: how the run that stored this verdict proved, on
+    /// that run, that the read-set suffices (see `narrowing`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<Proof>,
+}
+
+/// The evidence a narrowed verdict carries from the run that stored it: that run executed the
+/// check in a copy holding `files` of the tree's `of` files, and it passed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proof {
+    pub method: String,
+    pub files: u64,
+    pub of: u64,
 }
 
 impl Record {
@@ -247,6 +266,18 @@ impl Record {
         if self.finished_at < self.started_at {
             return Err(failure("Verdict record ends before it starts"));
         }
+        // A narrowed key is only ever answered by a verdict whose run proved the read-set.
+        match (&self.components.read_set, &self.proof) {
+            (None, None) => {}
+            (Some(read_set), Some(proof))
+                if proof.method == read_set.proof && proof.files > 0 && proof.files <= proof.of => {
+            }
+            _ => {
+                return Err(failure(
+                    "Verdict record's proof does not match its key's read set",
+                ))
+            }
+        }
         Ok(())
     }
 }
@@ -272,6 +303,7 @@ impl Status {
 }
 
 /// Everything one selected check needs for a lookup or a record.
+#[derive(Clone)]
 pub struct Prepared {
     pub check: String,
     pub key: String,
@@ -308,6 +340,145 @@ impl Prepared {
         } else {
             "tree"
         }
+    }
+
+    /// Whether the key names the check's measured read-set instead of the whole tree.
+    pub fn is_narrowed(&self) -> bool {
+        self.narrowed.is_some()
+    }
+
+    /// The check's declared outputs, as the store archives them.
+    pub fn outputs(&self) -> &[String] {
+        &self.outputs
+    }
+
+    /// The same check keyed on the whole tree: where a narrowed lookup looks second, and where a
+    /// run that could not prove the read-set stores its verdict.
+    pub fn whole_tree(&self) -> Result<Prepared> {
+        let mut whole = self.clone();
+        whole.components.tree = self.full_tree.clone();
+        whole.components.read_set = None;
+        whole.key = whole.components.key_hex()?;
+        whole.narrowed = None;
+        Ok(whole)
+    }
+
+    /// How many files a narrowed key covers, and how many the tree holds.
+    fn read_set_size(&self) -> Option<(u64, u64)> {
+        self.narrowed
+            .as_ref()
+            .map(|selected| (selected.len() as u64, self.tree_entries.len() as u64))
+    }
+}
+
+/// A copy of the tree that holds a narrowed check's read-set and nothing else, in which the check
+/// runs to prove, on that run, that the read-set suffices (see `narrowing`).
+pub(crate) struct ProvingCopy {
+    directory: tempfile::TempDir,
+    /// The copy's own HEAD: the copy is a repository of its own, whose commit differs from the
+    /// one being judged.
+    pub commit: String,
+    /// Files with their real content.
+    pub files: u64,
+    /// Files outside the read-set, present with placeholder content.
+    pub placeholders: u64,
+}
+
+impl ProvingCopy {
+    pub(crate) fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+#[cfg(unix)]
+impl Prepared {
+    /// Build the proving copy: every committed file is present, so the copy has the tree's shape
+    /// (a probe for a file that exists finds it, a probe for one that does not still fails), but
+    /// only the read-set, `.ci/**`, the locks and manifests, and git's own plumbing keep their
+    /// content. Every other file holds [`crate::narrowing::PLACEHOLDER`] and the original mode.
+    pub(crate) fn proving_copy(&self) -> Result<ProvingCopy> {
+        use std::os::unix::fs::symlink;
+        let Some(selected) = &self.narrowed else {
+            return Err(failure("Only a narrowed key is proven"));
+        };
+        let chosen: BTreeSet<usize> = selected.iter().copied().collect();
+        let directory = tempfile::Builder::new().prefix("ccid-proof-").tempdir()?;
+        let (mut files, mut placeholders) = (0u64, 0u64);
+        for (index, entry) in self.tree_entries.iter().enumerate() {
+            let generated = entry.path.split('/').any(|part| GENERATED.contains(&part))
+                || entry.path == "moon.yml";
+            if generated {
+                continue;
+            }
+            let source = self.root.join(&entry.path);
+            let destination = directory.path().join(&entry.path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if entry.submodule.is_some() {
+                fs::create_dir_all(&destination)?;
+                continue;
+            }
+            let meta = fs::symlink_metadata(&source).map_err(|error| {
+                failure(format!("Proving copy cannot read {}: {error}", entry.path))
+            })?;
+            if meta.file_type().is_symlink() {
+                symlink(fs::read_link(&source)?, &destination)?;
+            } else if chosen.contains(&index) || crate::narrowing::is_plumbing(&entry.path) {
+                fs::copy(&source, &destination)?;
+                files += 1;
+            } else {
+                fs::write(&destination, crate::narrowing::PLACEHOLDER)?;
+                fs::set_permissions(&destination, meta.permissions())?;
+                placeholders += 1;
+            }
+        }
+        let repository = |arguments: &[&str]| -> Result<String> {
+            let output = Command::new("git")
+                .args(["-c", "core.hooksPath=/dev/null"])
+                .args([
+                    "-c",
+                    "user.name=ccid-proof",
+                    "-c",
+                    "user.email=ccid-proof@invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(arguments)
+                .current_dir(directory.path())
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .map_err(|error| failure(format!("Proving copy needs git: {error}")))?;
+            if !output.status.success() {
+                return Err(failure(format!(
+                    "Proving copy: git {} failed: {}",
+                    arguments.join(" "),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        repository(&["init", "--quiet"])?;
+        repository(&["add", "-A"])?;
+        repository(&["commit", "--quiet", "--allow-empty", "-m", "proving copy"])?;
+        let commit = repository(&["rev-parse", "HEAD"])?;
+        Ok(ProvingCopy {
+            directory,
+            commit,
+            files,
+            placeholders,
+        })
+    }
+}
+
+#[cfg(not(unix))]
+impl Prepared {
+    pub(crate) fn proving_copy(&self) -> Result<ProvingCopy> {
+        Err(failure("A narrowed verdict is proven on unix hosts only"))
     }
 }
 
@@ -397,6 +568,7 @@ fn mode_for_meta(meta: &fs::Metadata) -> &'static str {
 }
 
 /// One entry of the tree: a path, its Git kind and, for a submodule, the commit it names.
+#[derive(Clone)]
 struct TreeEntry {
     path: String,
     mode: &'static str,
@@ -1937,15 +2109,52 @@ pub fn lookup_ready(prepared: &Prepared, environment: &Environment) -> Lookup {
     }
 }
 
+/// [`lookup`] for a check that may be keyed narrowed: a narrowed key is asked first, and when it
+/// has no pass the whole-tree key is asked too, because a run that could not prove the read-set
+/// stores its pass there. Returns the lookup and the key that answered it (the whole-tree variant
+/// only when that is the one that hit). `ready` also requires the declared outputs (the plan's
+/// view); a lookup that is not a hit reports the first key's reason.
+pub fn lookup_chain(
+    prepared: &Prepared,
+    environment: &Environment,
+    ready: bool,
+) -> (Lookup, Option<Prepared>) {
+    let ask = |entry: &Prepared| {
+        if ready {
+            lookup_ready(entry, environment)
+        } else {
+            lookup(entry, environment)
+        }
+    };
+    let first = ask(prepared);
+    if first.status == Status::Hit || !prepared.is_narrowed() {
+        return (first, None);
+    }
+    if let Ok(whole) = prepared.whole_tree() {
+        let second = ask(&whole);
+        if second.status == Status::Hit {
+            return (second, Some(whole));
+        }
+    }
+    (first, None)
+}
+
 /// Record a successful run of every prepared check that actually went through the result cache.
 /// `bypassed` names checks that ran uncached for a semantic reason; their result is not reused.
 /// The record is written only when the checkout still holds the inputs the key was built from:
 /// a check that wrote the checkout (its tree or its locks) never leaves a pass under the old key.
 /// A floated check ran in a staged copy; its run reports locks it moved there
 /// (`float-locks-moved` in its receipt), which refuses the record too.
+///
+/// `executed` names the narrowed checks that actually ran in this invocation: `true` when the run
+/// proved the read-set (the check passed in a copy holding only it), `false` when it ran on the
+/// whole tree. The first is recorded under the narrowed key with its proof, the second under the
+/// whole-tree key; a narrowed check that did not run (it was answered from the store) records
+/// nothing, because no run has proven anything about this tree.
 pub fn record_success(
     prepared: &[Prepared],
     bypassed: &BTreeSet<String>,
+    executed: &BTreeMap<String, bool>,
     producer: &Producer,
     started_at: u64,
     environment: &Environment,
@@ -1958,7 +2167,31 @@ pub fn record_success(
         }
     };
     let finished_at = now();
-    for entry in prepared {
+    for original in prepared {
+        let entry: &Prepared = original;
+        let whole;
+        let entry = if entry.is_narrowed() {
+            match executed.get(&entry.check) {
+                Some(true) => entry,
+                Some(false) => match entry.whole_tree() {
+                    Ok(variant) => {
+                        whole = variant;
+                        &whole
+                    }
+                    Err(error) => {
+                        event(json!({
+                            "event": "verdict-store-error",
+                            "check": entry.check,
+                            "reason": error.to_string(),
+                        }));
+                        continue;
+                    }
+                },
+                None => continue,
+            }
+        } else {
+            entry
+        };
         if bypassed.contains(&entry.check) {
             event(json!({
                 "event": "verdict-skipped",
@@ -2023,6 +2256,11 @@ pub fn record_success(
             started_at,
             finished_at,
             duration_seconds: finished_at.saturating_sub(started_at),
+            proof: entry.read_set_size().map(|(files, of)| Proof {
+                method: crate::narrowing::PROOF.to_owned(),
+                files,
+                of,
+            }),
         };
         match publish_record(directory, &record, entry, producer) {
             Ok(()) => event(json!({
@@ -2033,6 +2271,7 @@ pub fn record_success(
                 "tool": tool.sha256,
                 "result": "success",
                 "scope": entry.scope(),
+                "proof": record.proof.as_ref().map(|proof| proof.method.as_str()),
                 "outputs": entry.outputs.len(),
             })),
             // The check itself passed; a store failure must not turn it red. CI will recompute,
@@ -2101,12 +2340,13 @@ pub fn bypassed(root: &Path) -> BTreeSet<String> {
 
 /// A one-line plan event for `ccid cached --plan`.
 pub fn plan_event(prepared: &Prepared, environment: &Environment) {
-    let lookup = lookup_ready(prepared, environment);
+    let (lookup, whole) = lookup_chain(prepared, environment, true);
+    let answered = whole.as_ref().unwrap_or(prepared);
     event(json!({
         "event": "verdict-plan",
-        "check": prepared.check,
-        "key": prepared.key,
-        "scope": prepared.scope(),
+        "check": answered.check,
+        "key": answered.key,
+        "scope": answered.scope(),
         "status": lookup.status.as_str(),
         "reason": lookup.reason,
     }));

@@ -403,6 +403,7 @@ fn a_record_round_trips_and_is_validated() {
         started_at: 10,
         finished_at: 20,
         duration_seconds: 10,
+        proof: None,
     };
     let bytes = serde_json::to_vec(&record).unwrap();
     let parsed: Record = serde_json::from_slice(&bytes).unwrap();
@@ -458,6 +459,7 @@ fn a_hit_requires_every_component_and_a_channel_binary() {
         started_at: 10,
         finished_at: 20,
         duration_seconds: 10,
+        proof: None,
     };
     let directory = store.path().join(STORE_DIR);
     write_record(&directory, &record).unwrap();
@@ -534,6 +536,7 @@ fn a_failure_record_is_never_a_pass() {
         started_at: 10,
         finished_at: 20,
         duration_seconds: 10,
+        proof: None,
     };
     write_record(&store.path().join(STORE_DIR), &record).unwrap();
     channel(&channel_path, &record.tool.sha256);
@@ -573,6 +576,7 @@ fn the_store_is_group_writable_when_the_root_is() {
         started_at: 10,
         finished_at: 20,
         duration_seconds: 10,
+        proof: None,
     };
     write_record(&directory, &record).unwrap();
     let mode = fs::metadata(record_path(&directory, &prepared.key))
@@ -666,6 +670,7 @@ fn a_stored_verdict_makes_the_cached_run_skip_the_check_entirely() {
             started_at: 10,
             finished_at: 20,
             duration_seconds: 10,
+            proof: None,
         },
     )
     .unwrap();
@@ -778,6 +783,7 @@ fn a_pass_from_another_producing_binary_is_refreshed_not_kept_forever() {
             started_at: 10,
             finished_at: 20,
             duration_seconds: 10,
+            proof: None,
         },
     )
     .unwrap();
@@ -786,6 +792,7 @@ fn a_pass_from_another_producing_binary_is_refreshed_not_kept_forever() {
     record_success(
         std::slice::from_ref(&prepared),
         &BTreeSet::new(),
+        &BTreeMap::new(),
         &producer,
         30,
         &env,
@@ -801,6 +808,7 @@ fn a_pass_from_another_producing_binary_is_refreshed_not_kept_forever() {
     record_success(
         std::slice::from_ref(&prepared),
         &BTreeSet::new(),
+        &BTreeMap::new(),
         &producer,
         40,
         &env,
@@ -1388,6 +1396,11 @@ fn record_for(prepared: &Prepared) -> Record {
         started_at: 10,
         finished_at: 20,
         duration_seconds: 10,
+        proof: prepared.read_set_size().map(|(files, of)| Proof {
+            method: crate::narrowing::PROOF.to_owned(),
+            files,
+            of,
+        }),
     }
 }
 
@@ -1539,12 +1552,13 @@ fn an_input_outside_the_measured_set_seen_when_the_check_runs_fails_closed() {
         kind: ProducerKind::Lane,
         identity: None,
     };
-    record_success(&[run], &BTreeSet::new(), &producer, 0, &env).unwrap();
+    let proven = BTreeMap::from([("verify".to_owned(), true)]);
+    record_success(&[run], &BTreeSet::new(), &proven, &producer, 0, &env).unwrap();
     assert!(read_record(&directory, &base.key).unwrap().is_none());
     git(root, &["checkout", "--quiet", "--", "docs/guide.md"]);
     // The same run without the write is recorded.
     let clean = prepared_for(root, &env, &narrowed);
-    record_success(&[clean], &BTreeSet::new(), &producer, 0, &env).unwrap();
+    record_success(&[clean], &BTreeSet::new(), &proven, &producer, 0, &env).unwrap();
     assert!(read_record(&directory, &base.key).unwrap().is_some());
 
     // A top-level entry the measurement never saw is an input outside the measured set: the
@@ -1633,15 +1647,17 @@ fn the_key_schema_and_a_golden_key_are_pinned() {
         inputs: "5".repeat(64),
         layout: "6".repeat(64),
         commands: "7".repeat(64),
+        proof: crate::narrowing::PROOF.to_owned(),
     });
     assert_ne!(narrowed.key_hex().unwrap(), whole.key_hex().unwrap());
     let narrowed_bytes = String::from_utf8(narrowed.canonical_bytes().unwrap()).unwrap();
     assert!(narrowed_bytes.starts_with(&bytes[..bytes.len() - 1]));
     assert!(narrowed_bytes.ends_with(&format!(
-        ",\"read_set\":{{\"inputs\":\"{}\",\"layout\":\"{}\",\"commands\":\"{}\"}}}}",
+        ",\"read_set\":{{\"inputs\":\"{}\",\"layout\":\"{}\",\"commands\":\"{}\",\"proof\":\"{}\"}}}}",
         "5".repeat(64),
         "6".repeat(64),
         "7".repeat(64),
+        crate::narrowing::PROOF,
     )));
 }
 
@@ -1756,4 +1772,549 @@ fn a_docs_only_commit_skips_a_measured_check_in_a_cached_run_from_its_manifest()
         serde_json::from_slice(&fs::read(root.join(".ccid/cache-metrics.json")).unwrap()).unwrap();
     assert_eq!(metrics["checks"][0]["status"], "cached");
     assert_eq!(metrics["checks"][0]["computed"], 0);
+}
+
+// ---- the proof a narrowed verdict carries from the run that stored it ----
+
+fn lane() -> Producer {
+    Producer {
+        kind: ProducerKind::Lane,
+        identity: None,
+    }
+}
+
+#[test]
+fn a_narrowed_key_names_its_proof_and_only_that_proof() {
+    let fixture = narrow_fixture("proof-key");
+    let root = fixture.path();
+    let env = environment();
+    let first = prepared_for(root, &env, &measured(root, &env));
+    let read_set = first.components.read_set.clone().unwrap();
+    assert_eq!(read_set.proof, crate::narrowing::PROOF);
+    let mut other = first.components.clone();
+    other.read_set.as_mut().unwrap().proof = "unproven".into();
+    assert!(other.validate().is_err(), "an unknown proof names no key");
+    other.read_set.as_mut().unwrap().proof = String::new();
+    assert!(other.validate().is_err());
+}
+
+#[test]
+fn a_record_must_carry_the_proof_its_key_names() {
+    let fixture = narrow_fixture("proof-record");
+    let root = fixture.path();
+    let env = environment();
+    let first = prepared_for(root, &env, &measured(root, &env));
+    let good = record_for(&first);
+    good.validate(&good.key).unwrap();
+    // A narrowed verdict without a proof is refused: no run ever showed the read-set suffices.
+    let mut bare = good.clone();
+    bare.proof = None;
+    assert!(bare.validate(&bare.key).is_err());
+    // So is a proof of another method, an empty one, or one claiming more files than the tree.
+    let mut foreign = good.clone();
+    foreign.proof.as_mut().unwrap().method = "trace".into();
+    assert!(foreign.validate(&foreign.key).is_err());
+    let mut empty = good.clone();
+    empty.proof.as_mut().unwrap().files = 0;
+    assert!(empty.validate(&empty.key).is_err());
+    let mut inflated = good.clone();
+    inflated.proof.as_mut().unwrap().files = inflated.proof.as_ref().unwrap().of + 1;
+    assert!(inflated.validate(&inflated.key).is_err());
+    // A whole-tree verdict claims no proof.
+    let whole = first.whole_tree().unwrap();
+    let mut claimed = record_for(&whole);
+    claimed.proof = good.proof.clone();
+    assert!(claimed.validate(&claimed.key).is_err());
+    let honest = record_for(&whole);
+    assert!(honest.proof.is_none());
+    honest.validate(&honest.key).unwrap();
+}
+
+#[test]
+fn the_whole_tree_variant_is_the_same_check_keyed_on_every_file() {
+    let fixture = narrow_fixture("proof-whole");
+    let root = fixture.path();
+    let env = environment();
+    let narrowed = prepared_for(root, &env, &measured(root, &env));
+    let whole = narrowed.whole_tree().unwrap();
+    assert!(narrowed.is_narrowed() && !whole.is_narrowed());
+    assert_eq!(whole.scope(), "tree");
+    assert!(whole.components.read_set.is_none());
+    assert_ne!(whole.key, narrowed.key);
+    // It moves with a file outside the read-set; the narrowed key does not.
+    fs::write(root.join("README.md"), "# readme, revised\n").unwrap();
+    commit_all(root, "readme");
+    let later = prepared_for(root, &env, &measured(root, &env));
+    assert_eq!(later.key, narrowed.key);
+    assert_ne!(later.whole_tree().unwrap().key, whole.key);
+}
+
+#[test]
+fn a_narrowed_lookup_asks_the_whole_tree_key_second() {
+    let fixture = narrow_fixture("proof-chain");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let env = store_environment(store.path());
+    let directory = store.path().join(STORE_DIR);
+    let narrowed = prepared_for(root, &env, &measured(root, &env));
+    let (lookup, answered) = lookup_chain(&narrowed, &env, false);
+    assert_eq!(lookup.status, Status::Miss);
+    assert!(answered.is_none());
+    // A run that could not prove the read-set stored its pass under the whole-tree key.
+    let whole = narrowed.whole_tree().unwrap();
+    write_record(&directory, &record_for(&whole)).unwrap();
+    let (lookup, answered) = lookup_chain(&narrowed, &env, false);
+    assert_eq!(lookup.status, Status::Hit);
+    assert_eq!(answered.unwrap().key, whole.key);
+    // A docs-only commit moves the whole tree: that pass no longer answers.
+    fs::write(root.join("docs/guide.md"), "# guide, revised\n").unwrap();
+    commit_all(root, "docs");
+    let next = prepared_for(root, &env, &measured(root, &env));
+    assert_eq!(lookup_chain(&next, &env, false).0.status, Status::Miss);
+    // The narrowed pass answers first.
+    write_record(&directory, &record_for(&next)).unwrap();
+    let (lookup, answered) = lookup_chain(&next, &env, false);
+    assert_eq!(lookup.status, Status::Hit);
+    assert!(answered.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_proving_copy_keeps_the_read_set_and_fills_every_other_file_with_placeholders() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = narrow_fixture("proof-copy");
+    let root = fixture.path();
+    let env = environment();
+    fs::write(root.join("docs/run.sh"), "#!/bin/sh\n").unwrap();
+    fs::set_permissions(root.join("docs/run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(root.join("docs/.github")).unwrap();
+    fs::write(root.join("docs/.gitignore"), "*.tmp\n").unwrap();
+    commit_all(root, "more docs");
+    let entry = prepared_for(root, &env, &measured(root, &env));
+    assert!(entry.is_narrowed());
+    let copy = entry.proving_copy().unwrap();
+    let dir = copy.path();
+    // The read-set, the manifest, the locks and git's own plumbing keep their bytes.
+    for kept in [
+        "src/lib.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        ".ci/ccid.toml",
+        ".gitignore",
+        "docs/.gitignore",
+    ] {
+        assert_eq!(
+            fs::read(dir.join(kept)).unwrap(),
+            fs::read(root.join(kept)).unwrap(),
+            "{kept}"
+        );
+    }
+    // Everything else is there, with the original mode, and unreadable as content.
+    for outside in ["docs/guide.md", "README.md", "docs/run.sh"] {
+        assert_eq!(
+            fs::read(dir.join(outside)).unwrap(),
+            crate::narrowing::PLACEHOLDER,
+            "{outside}"
+        );
+        assert_eq!(
+            fs::metadata(dir.join(outside))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            fs::metadata(root.join(outside))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            "{outside}"
+        );
+    }
+    assert!(String::from_utf8(crate::narrowing::PLACEHOLDER.to_vec()).is_err());
+    // A file that is not in the tree stays missing, and generated state is not copied.
+    assert!(!dir.join("docs/optional.md").exists());
+    assert!(!dir.join("target").exists());
+    // The copy is a repository of its own, committed and clean.
+    assert_eq!(git_text(dir, &["rev-parse", "HEAD"]), copy.commit);
+    assert!(git_text(dir, &["status", "--porcelain"]).is_empty());
+    let (files, of) = entry.read_set_size().unwrap();
+    assert_eq!(
+        copy.files + copy.placeholders,
+        entry.tree_entries.len() as u64
+    );
+    assert!(copy.files >= files && copy.placeholders >= 3);
+    assert!(files < of);
+}
+
+#[test]
+fn a_proven_run_stores_the_narrowed_key_an_unproven_one_the_whole_tree_and_a_hit_nothing() {
+    let fixture = narrow_fixture("proof-record-success");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let env = store_environment(store.path());
+    let directory = store.path().join(STORE_DIR);
+    let entry = prepared_for(root, &env, &measured(root, &env));
+    let whole = entry.whole_tree().unwrap();
+    let stored = |key: &str| read_record(&directory, key).unwrap();
+
+    // The check did not run (a store hit): no run proved anything about this tree.
+    record_success(
+        std::slice::from_ref(&entry),
+        &BTreeSet::new(),
+        &BTreeMap::new(),
+        &lane(),
+        0,
+        &env,
+    )
+    .unwrap();
+    assert!(stored(&entry.key).is_none() && stored(&whole.key).is_none());
+
+    // It ran in the proving copy and passed: the narrowed key, with the proof of that run.
+    let proven = BTreeMap::from([("verify".to_owned(), true)]);
+    record_success(
+        std::slice::from_ref(&entry),
+        &BTreeSet::new(),
+        &proven,
+        &lane(),
+        0,
+        &env,
+    )
+    .unwrap();
+    let record = stored(&entry.key).expect("the narrowed pass");
+    let (files, of) = entry.read_set_size().unwrap();
+    assert_eq!(
+        record.proof,
+        Some(Proof {
+            method: crate::narrowing::PROOF.to_owned(),
+            files,
+            of,
+        })
+    );
+    assert!(stored(&whole.key).is_none(), "a proven run stores one key");
+
+    // It could not be proven and ran on the whole tree: the whole-tree key, and no proof.
+    let other = tempfile::tempdir().unwrap();
+    let other_env = store_environment(other.path());
+    let entry = prepared_for(root, &other_env, &measured(root, &other_env));
+    let unproven = BTreeMap::from([("verify".to_owned(), false)]);
+    record_success(
+        std::slice::from_ref(&entry),
+        &BTreeSet::new(),
+        &unproven,
+        &lane(),
+        0,
+        &other_env,
+    )
+    .unwrap();
+    let directory = other.path().join(STORE_DIR);
+    assert!(read_record(&directory, &entry.key).unwrap().is_none());
+    let record = read_record(&directory, &whole.key)
+        .unwrap()
+        .expect("the whole-tree pass");
+    assert!(record.proof.is_none() && record.components.read_set.is_none());
+}
+
+#[test]
+fn a_proven_run_that_moved_a_file_outside_the_read_set_stores_nothing() {
+    let fixture = narrow_fixture("proof-moved");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let env = store_environment(store.path());
+    let entry = prepared_for(root, &env, &measured(root, &env));
+    // The check wrote beside its inputs: the narrowed digest did not move, the whole tree did.
+    fs::write(root.join("docs/guide.md"), "# written by the check\n").unwrap();
+    let proven = BTreeMap::from([("verify".to_owned(), true)]);
+    record_success(
+        std::slice::from_ref(&entry),
+        &BTreeSet::new(),
+        &proven,
+        &lane(),
+        0,
+        &env,
+    )
+    .unwrap();
+    let directory = store.path().join(STORE_DIR);
+    assert!(read_record(&directory, &entry.key).unwrap().is_none());
+}
+
+/// A `ccid` on PATH for the executor's nested call: it names this build's revision and runs the
+/// check's script, from the working directory the executor chose (the checkout or a proving copy).
+#[cfg(unix)]
+fn stub_ccid(directory: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(directory).unwrap();
+    let path = directory.join("ccid");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  source-revision) printf '%s' '{SOURCE_REVISION}' ;;\n  check) exec sh .ci/check.sh ;;\n  *) exit 2 ;;\nesac\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+fn proof_run(root: &Path, env: &Environment) -> crate::Result<()> {
+    crate::cached::run_cached_with_environment(
+        root,
+        Path::new(".ci/ccid.toml"),
+        &["verify".to_owned()],
+        false,
+        false,
+        env.clone(),
+    )
+}
+
+/// A repository whose `verify` check carries the provenance `ccid measure-inputs` prints for a
+/// script that reads only `src/lib.rs`, a store, and a PATH whose `ccid` runs the script.
+#[cfg(unix)]
+struct ProofRun {
+    fixture: tempfile::TempDir,
+    scratch: tempfile::TempDir,
+    env: Environment,
+    counter: std::path::PathBuf,
+    checks: BTreeMap<String, crate::Check>,
+}
+
+#[cfg(unix)]
+impl ProofRun {
+    fn new(name: &str) -> Self {
+        let fixture = narrow_fixture(name);
+        let root = fixture.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let store = scratch.path().join("store");
+        fs::create_dir_all(&store).unwrap();
+        let counter = scratch.path().join("counter");
+        stub_ccid(&scratch.path().join("bin"));
+        let mut env = store_environment(&store);
+        env.insert("CI".into(), "true".into());
+        env.insert("VK_COUNTER".into(), counter.as_os_str().to_owned());
+        let path = std::env::join_paths(std::iter::once(scratch.path().join("bin")).chain(
+            std::env::split_paths(&env.get(OsStr::new("PATH")).cloned().unwrap_or_default()),
+        ))
+        .unwrap();
+        env.insert("PATH".into(), path);
+        let channel_file = scratch.path().join("channel.json");
+        channel(&channel_file, &own_tool().unwrap().sha256);
+        env.insert(
+            "CCID_CHANNEL_FILE".into(),
+            channel_file.as_os_str().to_owned(),
+        );
+        fs::write(root.join(".ci/check.sh"), script("true")).unwrap();
+        let mut declared = check();
+        declared.commands = vec![vec!["sh".into(), ".ci/check.sh".into()]];
+        declared.cache_inputs = Some(vec!["src/**".into(), "Cargo.toml".into(), ".ci/**".into()]);
+        let globs = declared.cache_inputs.clone().unwrap();
+        let mut provenance = measured_provenance(root, &declared, &globs).unwrap();
+        provenance.tool = "a".repeat(40);
+        fs::write(
+            root.join(".ci/ccid.toml"),
+            format!(
+                "schema = 1\nproject = 'proof-run'\n[checks.verify]\nkind = 'commands'\n\
+                 commands = [['sh', '.ci/check.sh']]\ncache_tools = [['sh', '--version']]\n\
+                 cache_inputs = ['src/**', 'Cargo.toml', '.ci/**']\n\
+                 cache_inputs_measured = {{ tool = '{}', commands = '{}', inputs = '{}', layout = '{}', date = '{}' }}\n",
+                provenance.tool, provenance.commands, provenance.inputs, provenance.layout, provenance.date,
+            ),
+        )
+        .unwrap();
+        commit_all(root, "measured manifest and script");
+        let (parsed, _) = crate::load_manifest(root, Path::new(".ci/ccid.toml")).unwrap();
+        Self {
+            fixture,
+            scratch,
+            env,
+            counter,
+            checks: parsed.checks,
+        }
+    }
+
+    fn root(&self) -> &Path {
+        self.fixture.path()
+    }
+
+    fn narrowed(&self) -> Prepared {
+        prepared_for(self.root(), &self.env, &self.checks["verify"])
+    }
+
+    fn directory(&self) -> std::path::PathBuf {
+        self.scratch.path().join("store").join(STORE_DIR)
+    }
+
+    fn runs(&self) -> usize {
+        fs::read_to_string(&self.counter).map_or(0, |text| text.lines().count())
+    }
+
+    /// The proving runs of one invocation, as `ccid cached` makes them for a miss.
+    fn prove(&self) -> crate::cached::Proofs {
+        let executor: BTreeMap<String, cmnp::executor::Check> = self
+            .checks
+            .iter()
+            .map(|(name, check)| (name.clone(), crate::cached::executor_check(check)))
+            .collect();
+        crate::cached::prove_runnable(
+            self.root(),
+            &[self.narrowed()],
+            &["verify".to_owned()],
+            &executor,
+            "proof-run",
+            ".ci/ccid.toml",
+            &self.env,
+        )
+    }
+}
+
+/// The check's script: it always reads `src/lib.rs`, then whatever else `reads` says.
+#[cfg(unix)]
+fn script(reads: &str) -> String {
+    format!("echo ran >> \"$VK_COUNTER\"\ncat src/lib.rs >/dev/null\n{reads}\n")
+}
+
+#[cfg(unix)]
+#[test]
+fn a_check_that_passes_in_the_proving_copy_proves_its_read_set_and_one_that_fails_does_not() {
+    let run = ProofRun::new("proof-direct");
+    let root = run.root();
+
+    // It reads only what the measurement saw: proven, it runs once, nothing is left for the
+    // whole tree, and its receipt is in the checkout.
+    let proofs = run.prove();
+    assert_eq!(
+        proofs.executed,
+        BTreeMap::from([("verify".to_owned(), true)])
+    );
+    assert!(proofs.remaining.is_empty());
+    assert_eq!(proofs.metrics.len(), 1);
+    assert_eq!(proofs.metrics[0]["computed"], 1);
+    assert_eq!(run.runs(), 1);
+    assert!(root.join(".ccid/results/verify.jsonl").is_file());
+
+    // It starts to read a file outside the read-set: the placeholder fails it in the copy, so it
+    // is not proven, it is left for the whole-tree run, and no metrics line claims it computed.
+    fs::write(
+        root.join(".ci/check.sh"),
+        script("grep -q '^# guide' docs/guide.md"),
+    )
+    .unwrap();
+    commit_all(root, "the check reads docs");
+    let proofs = run.prove();
+    assert_eq!(
+        proofs.executed,
+        BTreeMap::from([("verify".to_owned(), false)])
+    );
+    assert_eq!(proofs.remaining, vec!["verify".to_owned()]);
+    assert!(proofs.metrics.is_empty());
+    assert_eq!(run.runs(), 2, "the proving attempt ran once more");
+
+    // A check that fails on its merits fails the same way, and is left for the whole-tree run to
+    // report: the proof never turns a failure into a pass.
+    fs::write(root.join(".ci/check.sh"), script("false")).unwrap();
+    commit_all(root, "a red check");
+    let proofs = run.prove();
+    assert_eq!(
+        proofs.executed,
+        BTreeMap::from([("verify".to_owned(), false)])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missed_narrowed_check_is_proven_in_a_copy_and_only_then_skipped_for_unrelated_commits() {
+    let run = ProofRun::new("proof-run");
+    let root = run.root();
+    let directory = run.directory();
+
+    // A miss: the check runs once, in the proving copy, and its pass is stored with the proof.
+    proof_run(root, &run.env).unwrap();
+    assert_eq!(run.runs(), 1);
+    let first = run.narrowed();
+    assert_eq!(first.scope(), "read-set");
+    let record = read_record(&directory, &first.key)
+        .unwrap()
+        .expect("the narrowed pass");
+    assert_eq!(
+        record.proof.as_ref().map(|p| p.method.as_str()),
+        Some(crate::narrowing::PROOF)
+    );
+    assert!(
+        root.join(".ccid/results/verify.jsonl").is_file(),
+        "the receipt reaches the checkout"
+    );
+
+    // A commit outside the read-set: answered from the store, nothing runs.
+    fs::write(root.join("docs/guide.md"), "# guide, revised\n").unwrap();
+    commit_all(root, "docs only");
+    proof_run(root, &run.env).unwrap();
+    assert_eq!(run.runs(), 1, "a docs-only commit must not rerun the check");
+
+    // The check starts to read a file the measurement never saw. The script is under .ci/, so the
+    // key moves and the check reruns; in the proving copy that file holds placeholder bytes, the
+    // check fails there, and no narrowed verdict is stored for the new tree.
+    fs::write(
+        root.join(".ci/check.sh"),
+        script("grep -q '^# guide' docs/guide.md"),
+    )
+    .unwrap();
+    commit_all(root, "the check reads docs");
+    let stale = run.narrowed();
+    assert_ne!(stale.key, first.key);
+    proof_run(root, &run.env).unwrap();
+    assert_eq!(
+        run.runs(),
+        3,
+        "the proving attempt and the whole-tree run both ran"
+    );
+    assert!(
+        read_record(&directory, &stale.key).unwrap().is_none(),
+        "an unproven read-set never leaves a narrowed verdict"
+    );
+
+    // Because nothing was stored under the narrowed key, the file the check really reads cannot be
+    // changed behind a stale verdict: a commit that touches only it reruns the check.
+    fs::write(root.join("docs/guide.md"), "# guide, revised again\n").unwrap();
+    commit_all(root, "docs only, but now read");
+    proof_run(root, &run.env).unwrap();
+    assert!(
+        run.runs() > 3,
+        "the file the check reads moved: it must rerun"
+    );
+}
+
+#[test]
+fn an_optional_file_the_measurement_probed_for_changes_the_key_when_it_appears() {
+    let fixture = narrow_fixture("narrow-optional");
+    let root = fixture.path();
+    let env = environment();
+    // The measurement looked for docs/optional.toml and did not find it: `ccid measure-inputs`
+    // records such a probe as the path and everything below it.
+    let mut declared = check();
+    declared.cache_inputs = Some(vec![
+        "src/**".into(),
+        "Cargo.toml".into(),
+        ".ci/**".into(),
+        "docs/optional.toml".into(),
+        "docs/optional.toml/**".into(),
+    ]);
+    let globs = declared.cache_inputs.clone().unwrap();
+    let mut provenance = measured_provenance(root, &declared, &globs).unwrap();
+    provenance.tool = "a".repeat(40);
+    declared.cache_inputs_measured = Some(provenance);
+    let absent = prepared_for(root, &env, &declared);
+    assert_eq!(absent.scope(), "read-set");
+
+    // Other documentation does not move the key.
+    fs::write(root.join("docs/guide.md"), "# guide, revised\n").unwrap();
+    commit_all(root, "guide");
+    assert_eq!(prepared_for(root, &env, &declared).key, absent.key);
+
+    // The probed file appears: the check would now find it, so the key moves (and stays narrowed).
+    fs::write(root.join("docs/optional.toml"), "level = 1\n").unwrap();
+    commit_all(root, "the optional file appears");
+    let present = prepared_for(root, &env, &declared);
+    assert_eq!(present.scope(), "read-set");
+    assert_ne!(present.key, absent.key);
+    fs::write(root.join("docs/optional.toml"), "level = 2\n").unwrap();
+    commit_all(root, "and changes");
+    assert_ne!(prepared_for(root, &env, &declared).key, present.key);
 }

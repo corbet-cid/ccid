@@ -125,7 +125,7 @@ fn plan(
         let entry = prepared.iter().find(|entry| &entry.check == name);
         let (status, reason) = match entry {
             Some(entry) => {
-                let lookup = cached_verdict::lookup_ready(entry, environment);
+                let (lookup, _) = cached_verdict::lookup_chain(entry, environment, true);
                 (lookup.status.as_str().to_owned(), lookup.reason)
             }
             None => (
@@ -318,8 +318,12 @@ pub(crate) fn run_cached_with_environment(
             Ok(entries) => {
                 prepared = entries;
                 if !force {
-                    for entry in &prepared {
-                        let lookup = cached_verdict::lookup(entry, &environment);
+                    for slot in prepared.iter_mut() {
+                        // A narrowed key is asked first and the whole-tree key second: a run that
+                        // could not prove the read-set stored its pass under the latter.
+                        let (lookup, answered) =
+                            cached_verdict::lookup_chain(slot, &environment, false);
+                        let entry = answered.as_ref().unwrap_or(&*slot);
                         if lookup.status == cached_verdict::Status::Hit {
                             // The verdict answers for the check; its declared outputs are the
                             // evidence later steps archive. Restore them byte-for-byte first, or
@@ -409,27 +413,48 @@ pub(crate) fn run_cached_with_environment(
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let outcome = cmnp::executor::execute(&cmnp::executor::Request {
-        repo: root.clone(),
-        project,
-        manifest_arg: manifest_arg.to_owned(),
-        checks: executor_checks,
-        selected: runnable.clone(),
-        plan: false,
-        force,
-        tool: "ccid".into(),
-        tool_revision: verdict_epoch_label(),
-        environment: environment
-            .clone()
-            .into_iter()
-            .collect::<cmnp::Environment>(),
-    });
+    // A narrowed key is a claim made from an earlier measurement. The run that stores a verdict
+    // under it proves the claim on that run: the check executes in a copy that holds its
+    // read-set and nothing else (`docs/verdicts.md#narrowed-keys`). A check that cannot be
+    // proven runs on the whole tree below, and its pass is stored under the whole-tree key.
+    let proofs = prove_runnable(
+        &root,
+        &prepared,
+        &runnable,
+        &executor_checks,
+        &project,
+        manifest_arg,
+        &environment,
+    );
+    let executed = proofs.executed;
+    let remaining = proofs.remaining;
+    hit_metrics.extend(proofs.metrics);
+    let outcome = if remaining.is_empty() {
+        Ok(())
+    } else {
+        cmnp::executor::execute(&cmnp::executor::Request {
+            repo: root.clone(),
+            project,
+            manifest_arg: manifest_arg.to_owned(),
+            checks: executor_checks,
+            selected: remaining,
+            plan: false,
+            force,
+            tool: "ccid".into(),
+            tool_revision: verdict_epoch_label(),
+            environment: environment
+                .clone()
+                .into_iter()
+                .collect::<cmnp::Environment>(),
+        })
+    };
     let bypassed = cached_verdict::bypassed(&root);
     if outcome.is_ok() {
         if let Some(producer) = &producer {
             cached_verdict::record_success(
                 &prepared,
                 &bypassed,
+                &executed,
                 producer,
                 started_at,
                 &environment,
@@ -440,6 +465,167 @@ pub(crate) fn run_cached_with_environment(
         write_metrics(&root, &hit_metrics, &bypassed)?;
     }
     outcome
+}
+
+/// What the proving runs of one invocation decided.
+pub(crate) struct Proofs {
+    /// Every narrowed check that was asked to run: `true` when its pass proved the read-set.
+    pub executed: BTreeMap<String, bool>,
+    /// The checks still to run on the whole tree: every check that has no narrowed key, and
+    /// every narrowed one that could not be proven.
+    pub remaining: Vec<String>,
+    /// The metrics lines of the checks the proving runs computed.
+    pub metrics: Vec<serde_json::Value>,
+}
+
+/// Run each narrowed check of `runnable` in its proving copy, in order (see [`prove_narrowed`]).
+pub(crate) fn prove_runnable(
+    root: &Path,
+    prepared: &[cached_verdict::Prepared],
+    runnable: &[String],
+    executor_checks: &BTreeMap<String, cmnp::executor::Check>,
+    project: &str,
+    manifest_arg: &str,
+    environment: &Environment,
+) -> Proofs {
+    let mut proofs = Proofs {
+        executed: BTreeMap::new(),
+        remaining: Vec::new(),
+        metrics: Vec::new(),
+    };
+    for name in runnable {
+        let Some(entry) = prepared
+            .iter()
+            .find(|entry| &entry.check == name && entry.is_narrowed())
+        else {
+            proofs.remaining.push(name.clone());
+            continue;
+        };
+        let proven = prove_narrowed(
+            root,
+            entry,
+            executor_checks,
+            project,
+            manifest_arg,
+            environment,
+        );
+        proofs.executed.insert(name.clone(), proven);
+        if proven {
+            proofs.metrics.push(json!({
+                "event": "cache-check",
+                "check": entry.check,
+                "key": entry.key,
+                "status": "computed",
+                "computed": 1,
+            }));
+        } else {
+            proofs.remaining.push(name.clone());
+        }
+    }
+    proofs
+}
+
+/// Run one narrowed check in a copy of the tree that holds its read-set and nothing else
+/// (`Prepared::proving_copy`). `true`: it passed there, so the read-set suffices for this tree;
+/// its declared outputs and receipt are now in the checkout, where the store archives them from.
+/// `false`: it could not be proven, and the caller runs the check on the whole tree. A failure in
+/// the copy is not a failure of the check (the measurement may be stale): the reason is reported
+/// with `remeasure`, and the whole-tree run decides.
+///
+/// The run is forced past the moon result cache on purpose: a replayed result executes nothing,
+/// so it would prove nothing on this run.
+fn prove_narrowed(
+    root: &Path,
+    entry: &cached_verdict::Prepared,
+    executor_checks: &BTreeMap<String, cmnp::executor::Check>,
+    project: &str,
+    manifest_arg: &str,
+    environment: &Environment,
+) -> bool {
+    let unproven = |reason: String| {
+        event(json!({
+            "event": "verdict-narrowing",
+            "check": entry.check,
+            "scope": "tree",
+            "remeasure": true,
+            "reason": reason,
+        }));
+        false
+    };
+    let copy = match entry.proving_copy() {
+        Ok(copy) => copy,
+        Err(error) => return unproven(format!("no proving copy: {error}")),
+    };
+    event(json!({
+        "event": "verdict-proof",
+        "check": entry.check,
+        "method": crate::narrowing::PROOF,
+        "files": copy.files,
+        "placeholders": copy.placeholders,
+    }));
+    let mut proving = environment.clone();
+    // The copy is a repository of its own: a verified commit names its HEAD, not the commit judged.
+    if proving.contains_key(std::ffi::OsStr::new("CI_COMMIT_SHA")) {
+        proving.insert("CI_COMMIT_SHA".into(), copy.commit.clone().into());
+    }
+    let outcome = cmnp::executor::execute(&cmnp::executor::Request {
+        repo: copy.path().to_path_buf(),
+        project: project.to_owned(),
+        manifest_arg: manifest_arg.to_owned(),
+        checks: executor_checks.clone(),
+        selected: vec![entry.check.clone()],
+        plan: false,
+        force: true,
+        tool: "ccid".into(),
+        tool_revision: verdict_epoch_label(),
+        environment: proving.into_iter().collect::<cmnp::Environment>(),
+    });
+    if let Err(error) = outcome {
+        return unproven(format!(
+            "the check failed in a copy holding only its measured inputs, so the measurement may be stale: {error}"
+        ));
+    }
+    match copy_back(copy.path(), root, &entry.check, entry.outputs()) {
+        Ok(()) => true,
+        Err(error) => unproven(format!(
+            "the proving run's outputs could not be moved into the checkout: {error}"
+        )),
+    }
+}
+
+/// Move what a proving run left to the checkout: the declared outputs and the check's receipt.
+/// An output the run did not produce stays missing, and the store then refuses the record.
+fn copy_back(from: &Path, to: &Path, check: &str, outputs: &[String]) -> Result<()> {
+    let receipt = format!(".ccid/results/{check}.jsonl");
+    for relative in outputs.iter().map(String::as_str).chain([receipt.as_str()]) {
+        let source = from.join(relative);
+        if std::fs::symlink_metadata(&source).is_err() {
+            continue;
+        }
+        copy_tree(&source, &to.join(relative))?;
+    }
+    Ok(())
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(source)?;
+    if meta.is_dir() {
+        std::fs::create_dir_all(destination)?;
+        for child in std::fs::read_dir(source)? {
+            let child = child?;
+            copy_tree(&child.path(), &destination.join(child.file_name()))?;
+        }
+    } else if meta.is_file() {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, destination)?;
+    } else {
+        return Err(failure(
+            "A proving run left a link or special file as output",
+        ));
+    }
+    Ok(())
 }
 
 /// The version of what a cached verdict MEANS. Cached results are keyed by this number, not by the binary revision: a new

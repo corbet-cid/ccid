@@ -62,8 +62,10 @@ its own.
 - `cache_inputs` narrows the moon result cache. The shared verdict store keys the measured
   read-set only for a check that also carries `cache_inputs_measured` and whose provenance still
   holds (see [narrowed keys](verdicts.md#narrowed-keys)); any other check keys the whole tree.
-- The measurement holds for the tree it was taken on. A change that makes the check read a new
-  top-level entry is covered only if that entry was already looked for (cargo, for example, probes
-  for `build.rs`, `benches` and `examples`). Measure again after a structural change.
+- The measurement holds for the tree it was taken on, and a verdict never inherits it: the run
+  that stores a narrowed verdict executes the check in a copy of the tree that holds only the
+  read-set, and a failure there (a check that started reading a file the measurement never saw)
+  keys the pass on the whole tree and reports `remeasure`. Measure again after such a report or a
+  structural change (a new top-level entry changes `layout`, and keys the whole tree).
 - A `kind = "nix"` check keys every file anyway.
 - strace slows the check down considerably: measure on a workstation, not in a job.
