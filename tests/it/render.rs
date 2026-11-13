@@ -1090,3 +1090,341 @@ fn render_schema_2_renders_the_stable_shim_without_a_pin_and_refuses_pins() {
         forgejo_manifest("").replace(&format!("tool_revision='{PIN}'"), "render_schema=3");
     assert!(render(forgejo_repository(&unknown).path(), false).is_err());
 }
+
+/// The rendered shim of a central workflow, run as the script the runner would run, with a fake ccid.
+#[cfg(unix)]
+mod shim_runs {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    const REVISION: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const TRIPLE: &str = "test-triple";
+
+    /// A fake ccid for `revision`: it logs every call (`<file>.ran`) and answers `source-revision`. `variant` makes the bytes differ.
+    fn fake_ccid_as(revision: &str, variant: &str) -> Vec<u8> {
+        format!(
+            "#!/bin/sh\necho \"$@\" >> \"$0.ran\"\ncase \"$1\" in source-revision) printf '%s' {revision};; esac\n# {variant}\n"
+        )
+        .into_bytes()
+    }
+
+    fn fake_ccid(variant: &str) -> Vec<u8> {
+        fake_ccid_as(REVISION, variant)
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn write_tool(path: &Path, bytes: &[u8]) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The `run:` script of the step for job `verify`, with the runner's expressions filled in.
+    fn script() -> String {
+        let manifest =
+            forgejo_manifest("").replace(&format!("tool_revision='{PIN}'"), "render_schema=2");
+        let root = forgejo_repository(&manifest);
+        render(root.path(), false).unwrap();
+        let text = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
+        let step = &text[text.find("      - name: Run verify\n").unwrap()..];
+        let body = step.split_once("        run: |\n").unwrap().1;
+        let mut script = String::new();
+        for line in body.lines() {
+            if !line.is_empty() && !line.starts_with("          ") {
+                break;
+            }
+            script.push_str(line.get(10..).unwrap_or(""));
+            script.push('\n');
+        }
+        script
+            .replace("${{ github.repository }}", "owner/repo")
+            .replace("${{ github.sha }}", &"0".repeat(40))
+            .replace("${{ github.server_url }}", "https://forge.example.invalid")
+            .replace("${{ github.repository_owner }}", "owner")
+    }
+
+    struct Runner {
+        dir: tempfile::TempDir,
+    }
+
+    impl Runner {
+        fn new() -> Runner {
+            Runner {
+                dir: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn tool_root(&self) -> PathBuf {
+            self.dir.path().join("tools")
+        }
+
+        fn in_root(&self) -> PathBuf {
+            self.tool_root()
+                .join(format!("ccid/{REVISION}/{TRIPLE}/ccid"))
+        }
+
+        /// The runner's own cache, where a tool goes when the root is read-only.
+        fn in_cache(&self) -> PathBuf {
+            self.dir
+                .path()
+                .join(format!("cache/ccid-channel/tools/{REVISION}/{TRIPLE}/ccid"))
+        }
+
+        /// The shim as the runner starts it: no channel, no release named, the runner's HOME and cache inside the scratch directory.
+        fn command(&self) -> Command {
+            let file = self.dir.path().join("shim.sh");
+            fs::write(&file, script()).unwrap();
+            let mut command = Command::new("sh");
+            command
+                .arg(&file)
+                .env("HOME", self.dir.path())
+                .env("CCID_FORGE_TOKEN", "token")
+                .env("CCID_TOOL_ROOT", self.tool_root())
+                .env("CCID_TOOL_TRIPLE", TRIPLE)
+                .env("XDG_CACHE_HOME", self.dir.path().join("cache"))
+                .env_remove("CCID_CHANNEL_URL")
+                .env_remove("CCID_TOOL_REVISION")
+                .env_remove("CCID_TOOL_SHA256")
+                .env_remove("CCID_TOOL_URL");
+            command
+        }
+
+        /// Run the shim with the channel unreachable (the environment names the release), `sha256` as its digest.
+        fn run(&self, sha256: Option<&str>, tool_url: Option<&str>) -> std::process::Output {
+            let mut command = self.command();
+            command.env("CCID_TOOL_REVISION", REVISION);
+            if let Some(sha256) = sha256 {
+                command.env("CCID_TOOL_SHA256", sha256);
+            }
+            if let Some(url) = tool_url {
+                command.env("CCID_TOOL_URL", url);
+            }
+            command.output().unwrap()
+        }
+
+        /// Run the shim with the channel file `channel` (a `file://` address, as the forge's raw file would be).
+        fn run_with_channel(&self, channel: &Path) -> std::process::Output {
+            let mut command = self.command();
+            command.env("CCID_CHANNEL_URL", format!("file://{}", channel.display()));
+            command.output().unwrap()
+        }
+
+        /// A tool root the job cannot write: the tool then lives in the runner's cache (a root user could write it anyway).
+        fn read_only_root(&self) -> bool {
+            fs::create_dir_all(self.tool_root()).unwrap();
+            fs::set_permissions(self.tool_root(), fs::Permissions::from_mode(0o555)).unwrap();
+            let user = Command::new("id").arg("-u").output().unwrap();
+            String::from_utf8_lossy(&user.stdout).trim() != "0"
+        }
+    }
+
+    impl Drop for Runner {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(self.tool_root(), fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    fn ran(tool: &Path) -> Option<String> {
+        fs::read_to_string(format!("{}.ran", tool.display())).ok()
+    }
+
+    fn text(output: &std::process::Output) -> String {
+        format!(
+            "{} / {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    #[test]
+    fn a_tool_that_matches_the_channel_digest_runs() {
+        let runner = Runner::new();
+        let bytes = fake_ccid("good");
+        write_tool(&runner.in_root(), &bytes);
+        let output = runner.run(Some(&digest(&bytes)), None);
+        assert!(output.status.success(), "{}", text(&output));
+        let calls = ran(&runner.in_root()).unwrap();
+        assert!(
+            calls.contains("source-revision") && calls.contains("job-run --job verify"),
+            "{calls}"
+        );
+    }
+
+    #[test]
+    fn a_tampered_tool_is_refused_before_a_single_byte_of_it_runs() {
+        let runner = Runner::new();
+        let bytes = fake_ccid("good");
+        let wanted = digest(&bytes);
+        // The same revision answer, one byte more: what a job that rewrote the file would leave.
+        write_tool(&runner.in_root(), &fake_ccid("tampered"));
+        let output = runner.run(Some(&wanted), None);
+        assert_eq!(output.status.code(), Some(2), "{}", text(&output));
+        assert!(
+            text(&output).contains("does not match sha256"),
+            "{}",
+            text(&output)
+        );
+        assert_eq!(ran(&runner.in_root()), None, "the tampered binary ran");
+    }
+
+    #[test]
+    fn a_tampered_copy_in_the_runner_cache_is_refused_and_a_good_one_runs() {
+        let runner = Runner::new();
+        if !runner.read_only_root() {
+            eprintln!("skipped: a root user can write the tool root, the cache is not reached");
+            return;
+        }
+        let bytes = fake_ccid("good");
+        let wanted = digest(&bytes);
+        write_tool(&runner.in_cache(), &fake_ccid("tampered"));
+        let output = runner.run(Some(&wanted), None);
+        assert_eq!(output.status.code(), Some(2), "{}", text(&output));
+        assert!(
+            text(&output).contains("does not match sha256"),
+            "{}",
+            text(&output)
+        );
+        assert_eq!(
+            ran(&runner.in_cache()),
+            None,
+            "the tampered cached binary ran"
+        );
+        // The same cache holding the exact release is used, run after run.
+        write_tool(&runner.in_cache(), &bytes);
+        for _ in 0..2 {
+            let output = runner.run(Some(&wanted), None);
+            assert!(output.status.success(), "{}", text(&output));
+        }
+        assert!(ran(&runner.in_cache())
+            .unwrap()
+            .contains("job-run --job verify"));
+    }
+
+    const OTHER: &str = "1111111111111111111111111111111111111111";
+
+    fn channel_naming(revision: &str, bytes: &[u8]) -> String {
+        format!(
+            "{{\"default\":{{\"revision\":\"{revision}\",\"sha256\":\"{}\"}}}}",
+            digest(bytes)
+        )
+    }
+
+    #[test]
+    fn the_channel_names_the_release_and_its_digest() {
+        let runner = Runner::new();
+        let bytes = fake_ccid("good");
+        write_tool(&runner.in_root(), &bytes);
+        let channel = runner.dir.path().join("channel.json");
+        fs::write(&channel, channel_naming(REVISION, &bytes)).unwrap();
+        let output = runner.run_with_channel(&channel);
+        assert!(output.status.success(), "{}", text(&output));
+        assert!(ran(&runner.in_root())
+            .unwrap()
+            .contains("job-run --job verify"));
+        // The same channel with a digest of other bytes: the file at the path is refused.
+        fs::write(&channel, channel_naming(REVISION, &fake_ccid("other"))).unwrap();
+        let before = ran(&runner.in_root()).unwrap().lines().count();
+        let output = runner.run_with_channel(&channel);
+        assert_eq!(output.status.code(), Some(2), "{}", text(&output));
+        assert_eq!(ran(&runner.in_root()).unwrap().lines().count(), before);
+    }
+
+    /// A job can write the runner's HOME and cache. A `.curlrc` that makes the channel fetch fail must not send the next
+    /// job to the last copy of the channel (also a file a job can write) and to a binary the job left in the cache.
+    #[test]
+    fn a_job_written_curlrc_cannot_send_the_shim_to_a_planted_channel_copy() {
+        let runner = Runner::new();
+        let good = fake_ccid("good");
+        write_tool(&runner.in_root(), &good);
+        let channel = runner.dir.path().join("channel.json");
+        fs::write(&channel, channel_naming(REVISION, &good)).unwrap();
+        // What the job planted: a channel copy naming its own release, and that release with the digest the copy names.
+        let planted = fake_ccid_as(OTHER, "planted");
+        let tool = runner
+            .tool_root()
+            .join(format!("ccid/{OTHER}/{TRIPLE}/ccid"));
+        write_tool(&tool, &planted);
+        let state = runner.dir.path().join("cache/ccid-channel");
+        fs::create_dir_all(&state).unwrap();
+        fs::write(
+            state.join("last-good.json"),
+            channel_naming(OTHER, &planted),
+        )
+        .unwrap();
+        // Any fetch that reads this curlrc fails (the file:// address is longer than one byte).
+        fs::write(runner.dir.path().join(".curlrc"), "max-filesize = 1\n").unwrap();
+        let output = runner.run_with_channel(&channel);
+        assert!(output.status.success(), "{}", text(&output));
+        assert!(ran(&runner.in_root())
+            .unwrap()
+            .contains("job-run --job verify"));
+        assert_eq!(ran(&tool), None, "the planted binary ran");
+        // The real channel replaced the planted copy.
+        let copy = fs::read_to_string(state.join("last-good.json")).unwrap();
+        assert!(copy.contains(REVISION) && !copy.contains(OTHER), "{copy}");
+    }
+
+    #[test]
+    fn no_digest_means_no_run() {
+        let runner = Runner::new();
+        write_tool(&runner.in_root(), &fake_ccid("good"));
+        let output = runner.run(None, None);
+        assert_eq!(output.status.code(), Some(2), "{}", text(&output));
+        assert!(
+            text(&output).contains("names no sha256"),
+            "{}",
+            text(&output)
+        );
+        assert_eq!(ran(&runner.in_root()), None);
+    }
+
+    #[test]
+    fn a_download_is_kept_only_when_it_matches_and_is_checked_again_when_reused() {
+        let runner = Runner::new();
+        if !runner.read_only_root() {
+            eprintln!("skipped: a root user can write the tool root, the cache is not reached");
+            return;
+        }
+        let bytes = fake_ccid("good");
+        let wanted = digest(&bytes);
+        let served = runner.dir.path().join("served");
+        fs::create_dir_all(served.join(REVISION)).unwrap();
+        let url = format!("file://{}", served.display());
+        // A wrong download is refused and leaves no tool behind.
+        fs::write(
+            served.join(format!("{REVISION}/ccid-{TRIPLE}")),
+            fake_ccid("other"),
+        )
+        .unwrap();
+        let output = runner.run(Some(&wanted), Some(&url));
+        assert_eq!(output.status.code(), Some(2), "{}", text(&output));
+        assert!(
+            text(&output).contains("does not match sha256"),
+            "{}",
+            text(&output)
+        );
+        assert!(
+            !runner.in_cache().exists(),
+            "a download that did not match was kept"
+        );
+        // The right download is installed, runs, and a later rewrite of it is caught.
+        fs::write(served.join(format!("{REVISION}/ccid-{TRIPLE}")), &bytes).unwrap();
+        let output = runner.run(Some(&wanted), Some(&url));
+        assert!(output.status.success(), "{}", text(&output));
+        assert!(runner.in_cache().is_file());
+        let calls = ran(&runner.in_cache()).unwrap().lines().count();
+        fs::set_permissions(runner.in_cache(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(runner.in_cache(), fake_ccid("rewritten")).unwrap();
+        let output = runner.run(Some(&wanted), Some(&url));
+        assert_eq!(output.status.code(), Some(2), "{}", text(&output));
+        assert_eq!(
+            ran(&runner.in_cache()).unwrap().lines().count(),
+            calls,
+            "the rewritten binary ran"
+        );
+    }
+}

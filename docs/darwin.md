@@ -30,7 +30,7 @@ forge's certificate chain on macOS (libgit2 with Secure Transport, error -9836),
 
 `channel.json` selects a release per runner label: `classes.macos = {revision, sha256}` with the commit and the
 digest `release-darwin-publish.sh` prints. The shim of a rendered workflow does the rest: it takes the `macos`
-class (else the default), downloads `$CCID_TOOL_URL/<revision>/ccid-<triple>` and checks the digest.
+class (else the default), downloads `$CCID_TOOL_URL/<revision>/ccid-<triple>` and checks the digest, now and before every later run (`sha256sum`, or `shasum -a 256` where the userland has no GNU tools).
 
 A rendered job on the clone needs these variables in the clone's runner environment (the `envs` of the macOS
 runner template, next to `CI_CACHE_ROOT`), none of which is a secret:

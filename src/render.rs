@@ -180,9 +180,10 @@ const TRANSITIONS: &[Transition] = &[
         since: "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
         previous: include_str!("render/previous/check-shell.nix"),
     },
+    // The shim checks the binary's sha256 against the channel entry before every execution.
     Transition {
         template: Template::ForgejoShim,
-        since: "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
+        since: "376f6066ac2e3e071cf110d39b43a6a75f425090",
         previous: include_str!("render/previous/forgejo-shim.yml"),
     },
     // R54: the merge commit of an upstream sync carries the `Upstream-Sync:` trailer.

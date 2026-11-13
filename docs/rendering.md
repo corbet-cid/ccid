@@ -178,7 +178,9 @@ The runner, not the repository, owns every operator fact: `CCID_TOOL_ROOT` names
 the directory that holds the pinned tools as
 `<root>/ccid/<revision>/<triple>/ccid` (`CCID_TOOL_TRIPLE` overrides the host
 triple), and cache endpoints arrive through the runner environment. A missing or
-mismatched tool fails the job; a check never installs a tool. Jobs of one
+mismatched tool fails the job; a check never installs a tool. The shim of a central (`render_schema` 2 and 3) workflow checks the sha256 of the binary against the channel entry before every run, a copy that is already on the runner included: a runner's own tool cache is a place other jobs can write, so a digest checked only at download proves nothing about the file that runs later. An entry without a sha256 is refused. Both fetches of the step (the channel file, the tool) run `curl -q`: no `~/.curlrc`, a file every job of the runner can write, can fail the channel fetch over to the last copy of the channel or read the token.
+
+The digest is only as good as the entry: when the forge does not answer, the entry comes from the runner's last copy of the channel, a file the jobs can write, and a job running at the same time under the same account is not covered (it could replace the file between the check and the start, and can read the other job's environment anyway). A runner that must exclude both keeps its tools in a root only it writes and gives each job its own account. Jobs of one
 workflow must agree on `events`. Forgejo jobs take no secrets, environment or
 refresh scope; switching a job from Crow removes the owned Crow adapter.
 
