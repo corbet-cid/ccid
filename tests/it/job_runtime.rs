@@ -218,6 +218,14 @@ esac"#,
     }
 }
 
+/// The per-run compiler wrapper directory `ccid check` puts in front of a check's PATH.
+fn compiler_wrapper(entry: &str) -> bool {
+    entry
+        .rsplit('/')
+        .next()
+        .is_some_and(|last| last.starts_with("ccid-compiler-"))
+}
+
 fn inherited_path() -> String {
     std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
 }
@@ -392,7 +400,7 @@ fn the_runtime_sets_up_the_scripts_environment_and_holds_its_locks_across_exec()
     // (`ccid check` itself puts its per-run compiler wrapper directory in front.)
     let checked: Vec<&str> = seen["PATH"]
         .split(':')
-        .skip_while(|entry| entry.contains("/ccid-job-"))
+        .skip_while(|entry| compiler_wrapper(entry))
         .collect();
     assert!(
         checked.join(":").starts_with(&format!("{prefix}:")),
@@ -443,7 +451,7 @@ fn without_the_runtime_a_job_runs_as_before() {
     assert_eq!(seen["GIT_CONFIG_COUNT"], "1");
     let checked: Vec<&str> = seen["PATH"]
         .split(':')
-        .skip_while(|entry| entry.contains("/ccid-job-"))
+        .skip_while(|entry| compiler_wrapper(entry))
         .collect();
     assert_eq!(
         checked.join(":"),
