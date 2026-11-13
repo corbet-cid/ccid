@@ -123,6 +123,9 @@ if git show "$merge:.gitattributes" 2>/dev/null | grep -q 'filter=lfs'; then
   git config lfs.storage "$lfs_store"
   ( [ -z "${CCID_LFS_STORAGE:-}" ] || umask 002; git lfs fetch "$served" "$commit" >/dev/null 2>&1 || true )
 fi
+# The merge exists only here, so the export's history is completed from this work tree (a branch names the merge for that): the
+# checks that complete a shallow checkout from `origin` (the private check does) then find both parents.
+git branch -f ccid-sync "$merge"
 git -C "$export_dir" init --quiet .
 git -C "$export_dir" remote add origin "${SYNC_SERVER%/}/$SYNC_REPOSITORY.git"
 git -C "$export_dir" fetch --quiet --depth 1 "file://$work" "$merge"
@@ -137,4 +140,5 @@ if git -C "$export_dir" show "FETCH_HEAD:.gitattributes" 2>/dev/null | grep -q '
     CCID_LFS_TOKEN=$SYNC_TOKEN git -C "$export_dir" -c "credential.helper=$helper" lfs pull origin ) \
     || fail "cannot materialise the Git LFS files of $merge"
 fi
+git -C "$export_dir" remote set-url origin "file://$work"
 { echo "SYNC_WORK=$export_dir"; echo "SYNC_MERGE=$merge"; echo "SYNC_CHECK=1"; echo "SYNC_PUSH=1"; } >> "$env_out"

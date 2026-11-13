@@ -458,6 +458,30 @@ fn a_clean_merge_is_pushed_only_by_the_last_step() {
         "true"
     );
     assert_eq!(git(&work, &["rev-list", "--count", "HEAD"]), "1");
+    // A check that completes the shallow checkout from `origin` finds the whole history, both parents included, although the merge
+    // is not on the forge: the private check unshallows and clones exactly so.
+    git(&work, &["fetch", "--quiet", "--unshallow", "origin"]);
+    assert_eq!(
+        git(&work, &["rev-parse", "--is-shallow-repository"]),
+        "false"
+    );
+    assert_eq!(
+        git(&work, &["rev-list", "--parents", "-n", "1", "HEAD"])
+            .split(' ')
+            .count(),
+        3
+    );
+    let clone = forge.dir.path().join("completed-clone");
+    git(
+        forge.dir.path(),
+        &[
+            "clone",
+            "--quiet",
+            work.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    git(&clone, &["fsck", "--no-dangling"]);
     let repo = PathBuf::from(merged.var("SYNC_REPO").unwrap());
     assert_eq!(git(&repo, &["rev-parse", "HEAD"]), merge);
     assert_eq!(
