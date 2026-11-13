@@ -11,7 +11,7 @@ either gets no files). There is nothing to declare:
 | Provider | File | Trigger | Writes |
 |---|---|---|---|
 | GitHub | `.github/workflows/release-mirror.yml` | a pushed `v*` tag (or a manual run naming one) | a GitHub release with the same name, notes and pre-release flag, and every asset, with the job's own `GITHUB_TOKEN` |
-| GitLab | `.gitlab-ci.yml` (only when absent or generated) | a pushed `v*` tag (or a manual pipeline with `RELEASE_TAG`) | the assets as generic package files and a GitLab release linking them, with `CI_JOB_TOKEN` |
+| GitLab | `.gitlab-ci.yml` (only when absent or generated) | a pushed `v*` tag (or a manual or API pipeline with `RELEASE_TAG`) | the assets as generic package files and a GitLab release linking them, with `CI_JOB_TOKEN` |
 | Bitbucket | `bitbucket-pipelines.yml` | a pushed `v*` tag | the assets as Downloads named `<tag>-<asset>`. Not rendered yet: Downloads need a paid Bitbucket plan |
 
 A hand-written `.gitlab-ci.yml` is never overwritten; that repository has no GitLab mirror
