@@ -97,6 +97,19 @@ fi
 merge=$(git rev-parse HEAD)
 say "merged $commit into $SYNC_BRANCH: $merge"
 
+# 3b. Ownership, asked of git alone (not of any program in the merged tree, which could vouch for itself): outside the paths the
+# downstream declares as its own, the merge must equal the upstream commit exactly. A path git has to quote is refused.
+policy=$(git show "$tip:ccvl-downstream.json" 2>/dev/null) || fail "ccvl-downstream.json is missing on $SYNC_BRANCH: nothing is merged"
+stray=$(git -c core.quotepath=false diff --name-only "$commit" "$merge" | jq -Rrs --argjson policy "$policy" '
+  ($policy.allowed_paths // []) as $allowed
+  | split("\n") | map(select(length > 0))
+  | map(select(. as $path | ($allowed | any(. as $entry | if ($entry | endswith("/")) then ($path | startswith($entry)) else ($path == $entry) end)) | not))
+  | join(" ")') || fail "cannot read the ownership policy of $SYNC_BRANCH"
+if [ -n "$stray" ]; then
+  git reset --quiet --hard "$tip"
+  fail "paths outside the downstream's own, nothing is pushed: $stray"
+fi
+
 # 4. The checks need real files, not Git LFS pointers: objects come from the shared store, the upstream, then this repository.
 if git show "$merge:.gitattributes" 2>/dev/null | grep -q 'filter=lfs'; then
   git lfs install --local --skip-smudge >/dev/null

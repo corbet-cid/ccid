@@ -14,7 +14,7 @@ use std::{
 const MANIFEST: &str = "schema=1\nproject='demo'\n[render]\nrender_schema=2\n\
     [checks.downstream-check]\nkind='commands'\ncommands=[['true']]\n\
     [jobs.downstream-check]\nscheduler='forgejo'\nruns_on='linux'\nchecks=['downstream-check']\nworkflow='downstream-check'\ncommand=['ccid:run-declared-checks']\nevents=['manual']\n";
-const DECLARATION: &str = "{\n  \"schema_version\": 1,\n  \"upstream\": {\"remote\": \"upstream\", \"branch\": \"main\", \"url\": \"https://forge.example/team/up.git\"},\n  \"allowed_paths\": [\"opportunities/\"]\n}\n";
+const DECLARATION: &str = "{\n  \"schema_version\": 1,\n  \"upstream\": {\"remote\": \"upstream\", \"branch\": \"main\", \"url\": \"https://forge.example/team/up.git\"},\n  \"allowed_paths\": [\"ccvl-downstream.json\", \"opportunities/\"]\n}\n";
 const SYNC: &str = ".forgejo/workflows/upstream-sync.yml";
 
 fn render(root: &Path, check: bool) -> ccid::Result<ccid::render::Report> {
@@ -167,6 +167,7 @@ impl Forge {
         );
         fs::create_dir_all(down_work.join("opportunities")).unwrap();
         fs::write(down_work.join("opportunities/job.txt"), "mine\n").unwrap();
+        fs::write(down_work.join("ccvl-downstream.json"), DECLARATION).unwrap();
         git(&down_work, &["add", "."]);
         git(
             &down_work,
@@ -234,6 +235,7 @@ impl Forge {
     }
 
     fn downstream_commit(&self, file: &str, text: &str) -> String {
+        fs::create_dir_all(self.down_work.join(file).parent().unwrap()).unwrap();
         fs::write(self.down_work.join(file), text).unwrap();
         git(&self.down_work, &["add", "."]);
         git(
@@ -668,4 +670,29 @@ fn the_job_token_only_goes_to_the_forge_that_runs_the_job() {
     {
         assert!(line.ends_with("auth=yes"), "{line}");
     }
+}
+
+#[test]
+fn a_change_outside_the_downstreams_own_paths_is_refused_by_git_alone() {
+    let forge = Forge::new();
+    // The downstream has altered a file it does not own; the upstream commit itself merges cleanly.
+    forge.downstream_commit("tampered.txt", "not mine\n");
+    let before = forge.down_main();
+    let commit = forge.upstream_commit("code.txt", "two\n", true);
+    let merged = forge.merge_step(&commit);
+    assert!(!merged.ok());
+    assert!(
+        merged.stderr().contains("outside the downstream's own")
+            && merged.stderr().contains("tampered.txt"),
+        "{}",
+        merged.stderr()
+    );
+    assert_eq!(merged.var("SYNC_PUSH"), None);
+    assert_eq!(forge.down_main(), before);
+    // A path the policy names (a directory prefix or an exact file) is the downstream's own.
+    let forge = Forge::new();
+    forge.downstream_commit("opportunities/deep/more.txt", "mine too\n");
+    let commit = forge.upstream_commit("code.txt", "two\n", true);
+    let merged = forge.merge_step(&commit);
+    assert!(merged.ok(), "{}", merged.stderr());
 }
