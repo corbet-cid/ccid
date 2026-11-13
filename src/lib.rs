@@ -40,6 +40,7 @@ pub mod float;
 #[cfg(unix)]
 pub mod job_run;
 pub mod jobs;
+pub mod lock_refresh;
 pub mod push;
 pub mod render;
 pub mod resolve_lock;

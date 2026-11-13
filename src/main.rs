@@ -241,6 +241,19 @@ enum Action {
         #[arg(long, default_value = ".ci/ccid.toml")]
         manifest: PathBuf,
     },
+    /// Move the committed Cargo.lock files in place (the one lock mover, started by events):
+    /// first-party branch pins always, the named registry packages, or with --third-party every
+    /// package. Prints one JSON line of what moved; never runs inside a ccid check.
+    LockRefresh {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// A registry package a release event names (repeatable).
+        #[arg(long = "package")]
+        packages: Vec<String>,
+        /// One plain `cargo update` per lock (release preflight, manual dispatch).
+        #[arg(long)]
+        third_party: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -757,6 +770,19 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid advisories: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::LockRefresh {
+            repo,
+            packages,
+            third_party,
+        } => {
+            return match ccid::lock_refresh::run(&repo, &packages, third_party) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid lock-refresh: {error}");
                     ExitCode::from(2)
                 }
             };

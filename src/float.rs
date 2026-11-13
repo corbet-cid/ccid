@@ -104,7 +104,7 @@ fn digest_of(
 }
 
 /// A repository-relative lock path as a plain relative path (no `..`, no root).
-fn relative(path: &str) -> Result<PathBuf> {
+pub(crate) fn relative(path: &str) -> Result<PathBuf> {
     let relative = PathBuf::from(path);
     if path.is_empty()
         || !relative
@@ -119,7 +119,7 @@ fn relative(path: &str) -> Result<PathBuf> {
 }
 
 /// A path that exists as a symbolic link would redirect a write; refuse it.
-fn refuse_link(path: &Path) -> Result<()> {
+pub(crate) fn refuse_link(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(failure(format!(
             "{} is a symbolic link; refusing to write through it",
@@ -145,7 +145,7 @@ fn head(root: &Path) -> Option<String> {
 
 /// The lock paths of the committed tree: from HEAD's tree in a repository, from the files
 /// otherwise (an export, or a repository without a commit, has no tree to ask).
-fn committed_lock_paths(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn committed_lock_paths(root: &Path) -> Result<Vec<String>> {
     match head(root) {
         Some(commit) => cached_verdict::lock_paths(root, &commit),
         None => cached_verdict::walked_lock_paths(root),
@@ -199,12 +199,12 @@ fn branch_tracking(lock: &str, text: &str) -> Result<Vec<Tracking>> {
 }
 
 /// The first-party specs to float, per lock path.
-type Selection = BTreeMap<String, BTreeSet<String>>;
+pub(crate) type Selection = BTreeMap<String, BTreeSet<String>>;
 
 /// The packages to float, per lock path: branch-tracking and first-party by the fleet data. The
 /// host of `CI_REPOSITORY_URL` is never consulted. Fleet data is loaded only when a lock tracks a
 /// branch, and its absence then is an error (never a silent "nothing to float").
-fn select(
+pub(crate) fn select(
     committed: &BTreeMap<String, Vec<u8>>,
     environment: &Environment,
 ) -> Result<Option<(Selection, fleet::Fleet)>> {
@@ -320,6 +320,17 @@ fn third_party_changes(
     after: &BTreeMap<String, Vec<u8>>,
     fleet: &fleet::Fleet,
 ) -> Result<Vec<serde_json::Value>> {
+    lock_changes(before, after, fleet, false)
+}
+
+/// The entries of every lock that differ between `before` and `after`, of the first-party
+/// sources (`first_party`) or of all others: added, removed, or changed.
+pub(crate) fn lock_changes(
+    before: &BTreeMap<String, Vec<u8>>,
+    after: &BTreeMap<String, Vec<u8>>,
+    fleet: &fleet::Fleet,
+    first_party: bool,
+) -> Result<Vec<serde_json::Value>> {
     type Entries = BTreeMap<(String, String, String), toml::Value>;
     let entries = |bytes: &[u8]| -> Result<Entries> {
         let value: toml::Value = toml::from_str(std::str::from_utf8(bytes)?)?;
@@ -341,7 +352,7 @@ fn third_party_changes(
             else {
                 continue;
             };
-            if fleet.classify(&source).is_some() {
+            if fleet.classify(&source).is_some() != first_party {
                 continue;
             }
             out.insert((name, version, source), package.clone());
