@@ -1,5 +1,4 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -10,17 +9,29 @@ struct Reporter {
 /// One shared, never-rewritten reporter script: writing an executable while
 /// parallel tests fork would race with `exec` (ETXTBSY). Each test gets its
 /// own directory holding a symlink to it, which is where the call log lives.
+/// The script is written through a child process, so this process never holds
+/// it open for writing across a concurrent fork.
 fn shared_script() -> &'static Path {
     static SCRIPT: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
     let (_, path) = SCRIPT.get_or_init(|| {
+        use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("status");
-        fs::write(
-            &script,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls.log\"\nexit $(cat \"$(dirname \"$0\")/exit\" 2>/dev/null || echo 0)\n",
-        )
-        .unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls.log\"\nexit $(cat \"$(dirname \"$0\")/exit\" 2>/dev/null || echo 0)\n",
+            )
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "stub {}", script.display());
         (dir, script)
     });
     path

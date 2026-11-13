@@ -1,6 +1,36 @@
 //! Pod-local mode: no root ssh, a mounted token and source store.
 use super::*;
-use std::os::unix::fs::PermissionsExt;
+
+/// One shared fake receiver, never rewritten (parallel tests would race with exec).
+/// The script is written through a child process: a script this process wrote
+/// itself would be held open for writing, for a moment, by any child a
+/// concurrent test forks then, and the exec would fail with ETXTBSY
+/// ("Text file busy") while that child has not exec'd yet.
+fn receiver() -> &'static Path {
+    static SCRIPT: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
+    let (_, path) = SCRIPT.get_or_init(|| {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("receiver");
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                b"#!/bin/sh\ntest \"$1 $2 $3\" = 'crow-ci receive --target'\nmkdir -p \"$(dirname \"$4\")\"\ncat > \"$4\"\n",
+            )
+            .unwrap();
+        assert!(child.wait().unwrap().success(), "stub {}", script.display());
+        (dir, script)
+    });
+    path
+}
 
 fn json_config(extra: &str) -> String {
     format!(
@@ -70,23 +100,6 @@ fn without_ssh_commands_run_locally() {
         b"piped"
     );
     assert!(config.ssh(&strings(&["false"]), None).is_err());
-}
-
-/// One shared fake receiver, never rewritten (parallel tests would race with exec).
-fn receiver() -> &'static Path {
-    static SCRIPT: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
-    let (_, path) = SCRIPT.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("receiver");
-        fs::write(
-            &script,
-            "#!/bin/sh\ntest \"$1 $2 $3\" = 'crow-ci receive --target'\nmkdir -p \"$(dirname \"$4\")\"\ncat > \"$4\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        (dir, script)
-    });
-    path
 }
 
 #[test]
