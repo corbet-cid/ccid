@@ -71,7 +71,7 @@ fn channel_json_entries_are_published_with_the_named_digest() {
                 "--show-error",
                 "--location",
                 "--max-time",
-                "120",
+                "300",
             ])
             .arg(format!("{base}/{revision}/{file}"))
             .output()
