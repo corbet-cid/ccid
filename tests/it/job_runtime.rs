@@ -154,7 +154,8 @@ esac"#,
     fn command(&self, extra: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ccid"));
         command.env_clear();
-        let path = format!("{}:/usr/bin:/bin", self.root.join("bin").display());
+        // The stubs first, then the test's own PATH (git, sh and coreutils live elsewhere on NixOS).
+        let path = format!("{}:{}", self.root.join("bin").display(), inherited_path());
         let root = |name: &str| self.root.join(name).display().to_string();
         let mut environment: BTreeMap<String, String> = [
             ("PATH", path),
@@ -215,6 +216,10 @@ esac"#,
             .map(|(key, value)| (key.to_owned(), value.to_owned()))
             .collect()
     }
+}
+
+fn inherited_path() -> String {
+    std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())
 }
 
 fn wait_for(path: &Path, child: &mut Child) {
@@ -442,7 +447,11 @@ fn without_the_runtime_a_job_runs_as_before() {
         .collect();
     assert_eq!(
         checked.join(":"),
-        format!("{}:/usr/bin:/bin", fixture.root.join("bin").display())
+        format!(
+            "{}:{}",
+            fixture.root.join("bin").display(),
+            inherited_path()
+        )
     );
     // stderr stays stderr.
     assert!(String::from_utf8_lossy(&output.stderr).contains("probe-on-stderr"));
