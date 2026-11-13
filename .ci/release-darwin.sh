@@ -51,6 +51,11 @@ cargo test --release --locked --no-fail-fast -- ${skips[@]+"${skips[@]}"} > "$sc
 rc=$?
 set -e
 tail -n 25 "$scratch/test.log"
+# A red suite names its failing tests (the tail above only shows the last test target): the names go into .ci/darwin-skipped-tests.txt
+# with a reason, or the test gets fixed.
+if [ "$rc" != 0 ]; then
+  grep -E '^test .+ \.\.\. FAILED$' "$scratch/test.log" | sed -e 's/^test //' -e 's/ \.\.\. FAILED$//' | sort -u | sed 's/^/release-darwin: FAILED /' || true
+fi
 [ "$rc" = 0 ] || { echo "release-darwin: the test suite failed on macOS (exit $rc)" >&2; exit 1; }
 
 # 3. the binary and its digest, into the draft darwin-<commit> (a rerun starts the draft again)
