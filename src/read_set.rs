@@ -493,6 +493,8 @@ pub(crate) fn generalise(
 
 #[cfg(unix)]
 pub use run::{run, Options};
+#[cfg(unix)]
+pub(crate) use run::{trace_check, tracer_works, Trace, Traced, CACHES};
 
 #[cfg(unix)]
 mod run {
@@ -504,7 +506,7 @@ mod run {
         ffi::OsStr,
         fs,
         path::{Path, PathBuf},
-        process::{Command, Stdio},
+        process::{Command, ExitStatus, Stdio},
     };
 
     /// `ccid measure-inputs`.
@@ -518,7 +520,7 @@ mod run {
     }
 
     /// Variables that would route the measured run through a cache or mark it as nested.
-    const CACHES: [&str; 8] = [
+    pub(crate) const CACHES: [&str; 8] = [
         "CCID_RESULT_CACHE",
         "CCID_REMOTE_CACHE",
         "CCID_COMPILE_CACHE_CONFIG",
@@ -528,6 +530,156 @@ mod run {
         "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
         "CCID_CACHE_CHILD",
     ];
+
+    /// One traced run of a check: which ccid runs it, where, and how the trace is taken.
+    pub(crate) struct Trace<'a> {
+        /// The ccid that runs `check` (the running binary).
+        pub exe: &'a Path,
+        pub root: &'a Path,
+        /// The manifest, relative to `root`.
+        pub manifest: &'a Path,
+        pub check: &'a str,
+        /// The check's whole environment, already without the caches (see [`CACHES`]).
+        pub environment: &'a Environment,
+        pub strace: &'a Path,
+        /// Stop only at the traced system calls (`strace --seccomp-bpf`): a tenth of the run's CPU
+        /// instead of a third, and the same observations.
+        pub seccomp_bpf: bool,
+        pub depth: usize,
+        /// The check's declared outputs: written by the check, never its inputs.
+        pub outputs: &'a [String],
+        /// An existing, empty directory for the per-process trace files.
+        pub scratch: &'a Path,
+    }
+
+    /// What a traced run yields.
+    pub(crate) enum Traced {
+        /// The check failed under the tracer; its reads say nothing about a passing run.
+        Failed(ExitStatus),
+        /// The check passed but none of its processes could be traced.
+        Unmeasured(String),
+        /// The check passed: what it touched, as `cache_inputs` globs. `globs` is empty when the
+        /// check lists the repository root (every top-level entry matters: no narrowing).
+        Measured {
+            observations: usize,
+            globs: Vec<String>,
+        },
+    }
+
+    /// `program` with the arguments that precede the traced command.
+    fn strace_command(program: &Path, prefix: &Path, seccomp_bpf: bool) -> Command {
+        let mut command = Command::new(program);
+        command.args(["-ff", "-qq", "-y", "-v", "-s", "65535"]);
+        if seccomp_bpf {
+            command.arg("--seccomp-bpf");
+        }
+        command.arg("-o").arg(prefix).args([
+            "-e",
+            "trace=%file,getdents,getdents64,fchdir,clone,clone3,fork,vfork",
+            "--",
+        ]);
+        command
+    }
+
+    /// Whether `strace` can trace a process here. A sandbox that forbids ptrace, or a missing
+    /// program, stops the check from starting for a reason that says nothing about the check, so
+    /// this is asked first: after it, a failed traced run is the check's own failure.
+    pub(crate) fn tracer_works(
+        strace: &Path,
+        seccomp_bpf: bool,
+        scratch: &Path,
+    ) -> std::result::Result<(), String> {
+        let output = strace_command(strace, &scratch.join("probe"), seccomp_bpf)
+            .arg("true")
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .stdin(Stdio::null())
+            .output();
+        match output {
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => Err(format!(
+                "{} cannot trace here: {}",
+                strace.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => Err(format!("cannot run {}: {error}", strace.display())),
+        }
+    }
+
+    /// Run `check` once under strace and generalise what its own processes touched.
+    pub(crate) fn trace_check(request: &Trace<'_>) -> Result<Traced> {
+        let traces = request.scratch.join("trace");
+        fs::create_dir(&traces)?;
+        let status = strace_command(request.strace, &traces.join("t"), request.seccomp_bpf)
+            .arg(request.exe)
+            .args(["check", "--repo"])
+            .arg(request.root)
+            .arg("--manifest")
+            .arg(request.manifest)
+            .args(["--check", request.check])
+            .current_dir(request.root)
+            .env_clear()
+            .envs(request.environment)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|error| {
+                failure(format!(
+                    "cannot run {} (strace is required to measure): {error}",
+                    request.strace.display()
+                ))
+            })?;
+        if !status.success() {
+            return Ok(Traced::Failed(status));
+        }
+        // The check has passed; whatever goes wrong from here says nothing about the check.
+        Ok(match generalise_trace(request, &traces) {
+            Ok(traced) => traced,
+            Err(error) => Traced::Unmeasured(error.to_string()),
+        })
+    }
+
+    /// The observations in the per-process traces of a passing check, as `cache_inputs` globs.
+    fn generalise_trace(request: &Trace<'_>, traces: &Path) -> Result<Traced> {
+        let mut parsed = BTreeMap::new();
+        for entry in fs::read_dir(traces)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(pid) = name
+                .strip_prefix("t.")
+                .and_then(|pid| pid.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&fs::read(entry.path())?).into_owned();
+            parsed.insert(pid, events(&text));
+        }
+        let (observations, stages) = check_observations(&parsed, request.root);
+        if observations.is_empty() {
+            return Ok(Traced::Unmeasured(format!(
+                "no process of check {} was traced (no {MARKER} in any execve environment)",
+                request.check
+            )));
+        }
+        let mut roots = vec![request.root.to_path_buf()];
+        roots.extend(stages.iter().cloned());
+        let globs: Vec<String> = match generalise(&observations, &roots, request.depth)? {
+            Inputs::Everything => Vec::new(),
+            Inputs::Globs(globs) => globs
+                .into_iter()
+                .filter(|glob| {
+                    !request
+                        .outputs
+                        .iter()
+                        .any(|output| glob.as_str() == output || *glob == format!("{output}/**"))
+                })
+                .collect(),
+        };
+        Ok(Traced::Measured {
+            observations: observations.len(),
+            globs,
+        })
+    }
 
     fn check_command(exe: &Path, repo: &Path, check: &str) -> Command {
         let mut command = Command::new(exe);
@@ -633,73 +785,31 @@ mod run {
         }
         let exe = std::env::current_exe()?;
         let scratch = crate::cache::quiet_scratch(&mut environment.clone())?;
-        let traces = scratch.path().join("trace");
-        fs::create_dir(&traces)?;
-        let status = Command::new(&options.strace)
-            .args(["-ff", "-qq", "-y", "-v", "-s", "65535", "-o"])
-            .arg(traces.join("t"))
-            .args([
-                "-e",
-                "trace=%file,getdents,getdents64,fchdir,clone,clone3,fork,vfork",
-                "--",
-            ])
-            .arg(&exe)
-            .args(["check", "--repo"])
-            .arg(&root)
-            .args(["--check", &options.check])
-            .current_dir(&root)
-            .env_clear()
-            .envs(&environment)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .map_err(|error| {
-                failure(format!(
-                    "cannot run {} (strace is required to measure): {error}",
-                    options.strace.display()
-                ))
-            })?;
-        if !status.success() {
-            println!(
-                "{}",
-                json!({"check": options.check, "measured": false, "reason": format!("the check fails on the full tree ({status}); measure a passing check")})
-            );
-            return Ok(1);
-        }
-        let mut parsed = BTreeMap::new();
-        for entry in fs::read_dir(&traces)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(pid) = name
-                .strip_prefix("t.")
-                .and_then(|pid| pid.parse::<u32>().ok())
-            else {
-                continue;
-            };
-            let text = String::from_utf8_lossy(&fs::read(entry.path())?).into_owned();
-            parsed.insert(pid, events(&text));
-        }
-        let (observations, stages) = check_observations(&parsed, &root);
-        if observations.is_empty() {
-            return Err(failure(format!(
-                "no process of check {} was traced (no {MARKER} in any execve environment)",
-                options.check
-            )));
-        }
-        let mut roots = vec![root.clone()];
-        roots.extend(stages.iter().cloned());
-        let inputs = generalise(&observations, &roots, options.depth)?;
-        let globs: Vec<String> = match &inputs {
-            Inputs::Everything => Vec::new(),
-            Inputs::Globs(globs) => globs
-                .iter()
-                .filter(|glob| {
-                    !outputs.iter().any(|output| {
-                        glob.as_str() == output || glob.as_str() == format!("{output}/**")
-                    })
-                })
-                .cloned()
-                .collect(),
+        let traced = trace_check(&Trace {
+            exe: &exe,
+            root: &root,
+            manifest: Path::new(".ci/ccid.toml"),
+            check: &options.check,
+            environment: &environment,
+            strace: &options.strace,
+            seccomp_bpf: false,
+            depth: options.depth,
+            outputs: &outputs,
+            scratch: scratch.path(),
+        })?;
+        let (observations, globs) = match traced {
+            Traced::Failed(status) => {
+                println!(
+                    "{}",
+                    json!({"check": options.check, "measured": false, "reason": format!("the check fails on the full tree ({status}); measure a passing check")})
+                );
+                return Ok(1);
+            }
+            Traced::Unmeasured(reason) => return Err(failure(reason)),
+            Traced::Measured {
+                observations,
+                globs,
+            } => (observations, globs),
         };
         let mut verified = None;
         let mut copied = None;
@@ -728,7 +838,7 @@ mod run {
         let line = json!({
             "check": options.check,
             "measured": true,
-            "observations": observations.len(),
+            "observations": observations,
             "narrowed": !globs.is_empty(),
             "cache_inputs": if globs.is_empty() { serde_json::Value::Null } else { json!(globs) },
             "cache_inputs_measured": json!(measured),

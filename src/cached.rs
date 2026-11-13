@@ -13,8 +13,12 @@
 //! the next producer. `--plan` prints the verdict and the bypass reason without
 //! running anything.
 use crate::{
-    cached_verdict, checks, event, failure, load_manifest, select_checks, value, Environment,
-    Result, Runner, SOURCE_REVISION,
+    cached_verdict::{
+        self,
+        read_sets::{Marker, SetProof, Slot, State},
+    },
+    checks, event, failure, load_manifest, select_checks, value, Environment, Result, Runner,
+    SOURCE_REVISION,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -417,18 +421,57 @@ pub(crate) fn run_cached_with_environment(
     // under it proves the claim on that run: the check executes in a copy that holds its
     // read-set and nothing else (`docs/verdicts.md#narrowed-keys`). A check that cannot be
     // proven runs on the whole tree below, and its pass is stored under the whole-tree key.
+    // A read-set the store already knows to be stale is not proven again: it is measured again
+    // by one traced whole-tree run (`docs/verdicts.md#re-measuring-a-stale-read-set`).
     let proofs = prove_runnable(
         &root,
-        &prepared,
+        &mut prepared,
         &runnable,
+        &parsed.checks,
         &executor_checks,
         &project,
         manifest_arg,
         &environment,
     );
     let executed = proofs.executed;
-    let remaining = proofs.remaining;
+    let mut remaining = proofs.remaining;
     hit_metrics.extend(proofs.metrics);
+    for (name, marker) in proofs.measure {
+        let Some(entry) = prepared.iter().find(|entry| entry.check == name) else {
+            remaining.push(name);
+            continue;
+        };
+        match measure_whole_tree(
+            &root,
+            entry,
+            &parsed.checks[&name],
+            &marker,
+            manifest_arg,
+            &environment,
+            producer.as_ref(),
+        ) {
+            Measure::Unavailable(reason) => {
+                event(json!({
+                    "event": "read-set-measure",
+                    "check": name,
+                    "status": "unavailable",
+                    "reason": reason,
+                }));
+                remaining.push(name);
+            }
+            // The traced run is the check's run: a failure is the check's failure, as for any
+            // check that runs outside the cached executor.
+            Measure::Ran(Err(error)) => return Err(error),
+            Measure::Ran(Ok(())) => hit_metrics.push(json!({
+                "event": "cache-check",
+                "check": entry.check,
+                "key": entry.key,
+                "status": "computed",
+                "computed": 1,
+            })),
+        }
+    }
+    let executor_ran = !remaining.is_empty();
     let outcome = if remaining.is_empty() {
         Ok(())
     } else {
@@ -448,7 +491,13 @@ pub(crate) fn run_cached_with_environment(
                 .collect::<cmnp::Environment>(),
         })
     };
-    let bypassed = cached_verdict::bypassed(&root);
+    // Only the executor's run decides what ran uncached: without one, the metrics file in the
+    // checkout is a previous invocation's.
+    let bypassed = if executor_ran {
+        cached_verdict::bypassed(&root)
+    } else {
+        BTreeSet::new()
+    };
     if outcome.is_ok() {
         if let Some(producer) = &producer {
             cached_verdict::record_success(
@@ -459,6 +508,9 @@ pub(crate) fn run_cached_with_environment(
                 started_at,
                 &environment,
             )?;
+            // The whole-tree runs passed: what the failed proofs found is now known to be
+            // staleness, and not a red check.
+            apply_follow_ups(&proofs.follow_up, producer);
         }
     }
     if use_verdicts {
@@ -474,15 +526,50 @@ pub(crate) struct Proofs {
     /// The checks still to run on the whole tree: every check that has no narrowed key, and
     /// every narrowed one that could not be proven.
     pub remaining: Vec<String>,
+    /// The checks whose read-set is known to be stale and not yet measured again: each runs once
+    /// on the whole tree under the tracer instead of in the executor, with the marker that says so.
+    pub measure: Vec<(String, Box<Marker>)>,
     /// The metrics lines of the checks the proving runs computed.
     pub metrics: Vec<serde_json::Value>,
+    /// What to put in the store once the whole-tree runs have passed.
+    pub follow_up: Vec<FollowUp>,
 }
 
-/// Run each narrowed check of `runnable` in its proving copy, in order (see [`prove_narrowed`]).
+/// A change of the store's read-set state that waits for the whole-tree run of the same check:
+/// only a pass there shows that the failed proof meant a stale read-set and not a red check.
+pub(crate) enum FollowUp {
+    /// The read-set with `inputs` failed its proof and the whole-tree run passed.
+    Stale {
+        slot: Slot,
+        inputs: String,
+        base: String,
+        since: String,
+    },
+    /// The traced read-set failed its proof as well.
+    Refuse { slot: Slot, marker: Box<Marker> },
+}
+
+/// How one proving run ended.
+enum Proof {
+    /// The check passed in the proving copy.
+    Proven,
+    /// The check failed there: the read-set is stale, or the check is red (the whole-tree run
+    /// tells which).
+    Failed,
+    /// No proof could be made (no copy, outputs that could not be moved): says nothing about the
+    /// read-set.
+    Unavailable,
+}
+
+/// Run each narrowed check of `runnable` that is not known to be stale in its proving copy, in
+/// order (see [`prove_narrowed`]). A key whose read-set is stale is not proven again: it waits for
+/// its traced measurement; the measurement that arrived is proven instead of the key's own.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prove_runnable(
     root: &Path,
-    prepared: &[cached_verdict::Prepared],
+    prepared: &mut [cached_verdict::Prepared],
     runnable: &[String],
+    declared: &BTreeMap<String, crate::Check>,
     executor_checks: &BTreeMap<String, cmnp::executor::Check>,
     project: &str,
     manifest_arg: &str,
@@ -491,46 +578,179 @@ pub(crate) fn prove_runnable(
     let mut proofs = Proofs {
         executed: BTreeMap::new(),
         remaining: Vec::new(),
+        measure: Vec::new(),
         metrics: Vec::new(),
+        follow_up: Vec::new(),
     };
     for name in runnable {
-        let Some(entry) = prepared
+        let Some(index) = prepared
             .iter()
-            .find(|entry| &entry.check == name && entry.is_narrowed())
+            .position(|entry| &entry.check == name && entry.is_narrowed())
         else {
             proofs.remaining.push(name.clone());
             continue;
         };
-        let proven = prove_narrowed(
-            root,
-            entry,
-            executor_checks,
-            project,
-            manifest_arg,
-            environment,
-        );
-        proofs.executed.insert(name.clone(), proven);
-        if proven {
-            proofs.metrics.push(json!({
+        let entry = prepared[index].clone();
+        let prove = |keyed: &cached_verdict::Prepared| {
+            prove_narrowed(
+                root,
+                keyed,
+                executor_checks,
+                project,
+                manifest_arg,
+                environment,
+            )
+        };
+        let computed = |keyed: &cached_verdict::Prepared| {
+            json!({
                 "event": "cache-check",
-                "check": entry.check,
-                "key": entry.key,
+                "check": keyed.check,
+                "key": keyed.key,
                 "status": "computed",
                 "computed": 1,
-            }));
-        } else {
-            proofs.remaining.push(name.clone());
+            })
+        };
+        let state = match (entry.slot(), entry.read_set_inputs()) {
+            (Some(slot), Some(inputs)) => slot.state(inputs, environment),
+            _ => State::Open,
+        };
+        // Every narrowed check that runs is recorded: under the narrowed key when its read-set
+        // was proven, under the whole-tree key otherwise.
+        proofs.executed.insert(name.clone(), false);
+        match state {
+            State::Open => match prove(&entry) {
+                Proof::Proven => {
+                    proofs.executed.insert(name.clone(), true);
+                    proofs.metrics.push(computed(&entry));
+                }
+                Proof::Failed => {
+                    proofs.remaining.push(name.clone());
+                    if let (Some(slot), Some(inputs), Some(base)) =
+                        (entry.slot(), entry.read_set_inputs(), entry.lineage())
+                    {
+                        proofs.follow_up.push(FollowUp::Stale {
+                            slot,
+                            inputs: inputs.to_owned(),
+                            base: base.to_owned(),
+                            since: entry.commit.clone(),
+                        });
+                    }
+                }
+                Proof::Unavailable => proofs.remaining.push(name.clone()),
+            },
+            State::Refused => {
+                event(json!({
+                    "event": "read-set-skip",
+                    "check": name,
+                    "state": "refused",
+                    "reason": "the read-set is stale and its automatic measurement did not prove; measure the check by hand",
+                }));
+                proofs.remaining.push(name.clone());
+            }
+            State::Stale {
+                marker,
+                candidate: None,
+            } => {
+                event(json!({
+                    "event": "read-set-skip",
+                    "check": name,
+                    "state": "stale",
+                    "since": marker.since,
+                    "reason": "the read-set is stale: no proving attempt, one traced whole-tree run measures it again",
+                }));
+                proofs.measure.push((name.clone(), marker));
+            }
+            State::Stale {
+                marker,
+                candidate: Some(candidate),
+            } => {
+                let Some(slot) = entry.slot() else {
+                    proofs.remaining.push(name.clone());
+                    continue;
+                };
+                let mut measured = declared[name].clone();
+                measured.cache_inputs = Some(candidate.cache_inputs.clone());
+                measured.cache_inputs_measured = Some(candidate.measured.clone());
+                match entry.rekeyed(&measured) {
+                    Err(reason) => {
+                        // The measurement no longer describes this tree (its layout moved on):
+                        // it cannot be proven, so it is measured again.
+                        event(json!({
+                            "event": "read-set-skip",
+                            "check": name,
+                            "state": "stale",
+                            "reason": format!("the measured candidate does not narrow this tree: {reason}"),
+                        }));
+                        if let Err(error) = slot.drop_candidate() {
+                            event(json!({
+                                "event": "verdict-store-error",
+                                "check": name,
+                                "reason": error.to_string(),
+                            }));
+                        }
+                        proofs.measure.push((name.clone(), marker));
+                    }
+                    Ok(proving) => match prove(&proving) {
+                        Proof::Proven => {
+                            let (files, of) = proving.size().unwrap_or((0, 0));
+                            let proof = SetProof {
+                                method: crate::narrowing::PROOF.to_owned(),
+                                files,
+                                of,
+                                commit: proving.commit.clone(),
+                            };
+                            if let Err(error) = slot.promote(&candidate, proof) {
+                                event(json!({
+                                    "event": "verdict-store-error",
+                                    "check": name,
+                                    "reason": error.to_string(),
+                                }));
+                            }
+                            proofs.executed.insert(name.clone(), true);
+                            proofs.metrics.push(computed(&proving));
+                            prepared[index] = proving;
+                        }
+                        Proof::Failed => {
+                            proofs.remaining.push(name.clone());
+                            proofs.follow_up.push(FollowUp::Refuse { slot, marker });
+                        }
+                        Proof::Unavailable => proofs.remaining.push(name.clone()),
+                    },
+                }
+            }
         }
     }
     proofs
 }
 
+/// Record what the failed proofs meant, now that the whole-tree runs passed.
+fn apply_follow_ups(follow_up: &[FollowUp], producer: &cached_verdict::Producer) {
+    for change in follow_up {
+        let (check, outcome) = match change {
+            FollowUp::Stale {
+                slot,
+                inputs,
+                base,
+                since,
+            } => (slot.check(), slot.mark_stale(inputs, base, since, producer)),
+            FollowUp::Refuse { slot, marker } => (slot.check(), slot.refuse(marker, producer)),
+        };
+        if let Err(error) = outcome {
+            event(json!({
+                "event": "verdict-store-error",
+                "check": check,
+                "reason": error.to_string(),
+            }));
+        }
+    }
+}
+
 /// Run one narrowed check in a copy of the tree that holds its read-set and nothing else
-/// (`Prepared::proving_copy`). `true`: it passed there, so the read-set suffices for this tree;
-/// its declared outputs and receipt are now in the checkout, where the store archives them from.
-/// `false`: it could not be proven, and the caller runs the check on the whole tree. A failure in
-/// the copy is not a failure of the check (the measurement may be stale): the reason is reported
-/// with `remeasure`, and the whole-tree run decides.
+/// (`Prepared::proving_copy`). `Proven`: it passed there, so the read-set suffices for this
+/// tree; its declared outputs and receipt are now in the checkout, where the store archives them
+/// from. `Failed`: it could not be proven, and the caller runs the check on the whole tree. A
+/// failure in the copy is not a failure of the check (the measurement may be stale): the reason
+/// is reported with `remeasure`, and the whole-tree run decides.
 ///
 /// The run is forced past the moon result cache on purpose: a replayed result executes nothing,
 /// so it would prove nothing on this run.
@@ -541,20 +761,22 @@ fn prove_narrowed(
     project: &str,
     manifest_arg: &str,
     environment: &Environment,
-) -> bool {
-    let unproven = |reason: String| {
+) -> Proof {
+    let unproven = |reason: String, outcome: Proof| {
         event(json!({
             "event": "verdict-narrowing",
             "check": entry.check,
             "scope": "tree",
-            "remeasure": true,
+            "remeasure": matches!(outcome, Proof::Failed),
             "reason": reason,
         }));
-        false
+        outcome
     };
     let copy = match entry.proving_copy() {
         Ok(copy) => copy,
-        Err(error) => return unproven(format!("no proving copy: {error}")),
+        Err(error) => {
+            return unproven(format!("no proving copy: {error}"), Proof::Unavailable);
+        }
     };
     event(json!({
         "event": "verdict-proof",
@@ -581,16 +803,165 @@ fn prove_narrowed(
         environment: proving.into_iter().collect::<cmnp::Environment>(),
     });
     if let Err(error) = outcome {
-        return unproven(format!(
-            "the check failed in a copy holding only its measured inputs, so the measurement may be stale: {error}"
-        ));
+        return unproven(
+            format!(
+                "the check failed in a copy holding only its measured inputs, so the measurement may be stale: {error}"
+            ),
+            Proof::Failed,
+        );
     }
     match copy_back(copy.path(), root, &entry.check, entry.outputs()) {
-        Ok(()) => true,
-        Err(error) => unproven(format!(
-            "the proving run's outputs could not be moved into the checkout: {error}"
-        )),
+        Ok(()) => Proof::Proven,
+        Err(error) => unproven(
+            format!("the proving run's outputs could not be moved into the checkout: {error}"),
+            Proof::Unavailable,
+        ),
     }
+}
+
+/// How the traced whole-tree run of a check with a stale read-set ended.
+#[cfg_attr(not(unix), allow(dead_code))]
+enum Measure {
+    /// The tracer cannot run here; the check runs as usual and the next executing run tries again.
+    Unavailable(String),
+    /// The check ran, traced. `Ok`: it passed.
+    Ran(Result<()>),
+}
+
+/// The one traced whole-tree run per staleness event: `check` runs once on the whole tree under
+/// the measure-inputs tracer (the seccomp-bpf variant, which stops only at the traced system
+/// calls) with every compile cache off, and the read-set it touched goes into the verdict store
+/// as the check's candidate set. It is the check's run: its pass is recorded under the whole-tree
+/// key by the caller. The next miss proves the candidate; nothing is written to the repository.
+#[cfg(unix)]
+fn measure_whole_tree(
+    root: &Path,
+    entry: &cached_verdict::Prepared,
+    declared: &crate::Check,
+    marker: &Marker,
+    manifest_arg: &str,
+    environment: &Environment,
+    producer: Option<&cached_verdict::Producer>,
+) -> Measure {
+    use crate::read_set::{trace_check, tracer_works, Trace, Traced, CACHES};
+    let (Some(slot), Some(producer)) = (entry.slot(), producer) else {
+        return Measure::Unavailable("the verdict store is not provisioned".into());
+    };
+    if !crate::narrowing::can_measure() {
+        return Measure::Unavailable(
+            "this ccid is a local build; a measurement names a released revision".into(),
+        );
+    }
+    if environment.contains_key(std::ffi::OsStr::new("CCID_TARGET_LOCK_HELD")) {
+        return Measure::Unavailable("it runs inside a ccid check, which cannot be traced".into());
+    }
+    let Some(strace) = crate::compile_cache::executable(environment, "strace") else {
+        return Measure::Unavailable("strace is not on PATH".into());
+    };
+    let scratch = match tempfile::Builder::new().prefix("ccid-measure-").tempdir() {
+        Ok(scratch) => scratch,
+        Err(error) => return Measure::Unavailable(format!("no scratch directory: {error}")),
+    };
+    if let Err(reason) = tracer_works(&strace, true, scratch.path()) {
+        return Measure::Unavailable(reason);
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => return Measure::Unavailable(format!("cannot locate ccid: {error}")),
+    };
+    // The traced run is the check as the executor would run it, minus the caches (a cache hit
+    // would hide the compiler's reads) and with the receipt the executor would declare.
+    let mut traced = environment.clone();
+    for name in CACHES {
+        traced.remove(std::ffi::OsStr::new(name));
+    }
+    let receipt = root
+        .join(".ccid/results")
+        .join(format!("{}.jsonl", entry.check));
+    let prepared_receipt = receipt
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::File::create(&receipt).map(drop));
+    if let Err(error) = prepared_receipt {
+        return Measure::Unavailable(format!("no receipt directory: {error}"));
+    }
+    traced.insert("CCID_RECEIPT".into(), receipt.into_os_string());
+    event(json!({
+        "event": "read-set-measure",
+        "check": entry.check,
+        "status": "tracing",
+        "since": marker.since,
+    }));
+    let outcome = trace_check(&Trace {
+        exe: &exe,
+        root,
+        manifest: Path::new(manifest_arg),
+        check: &entry.check,
+        environment: &traced,
+        strace: &strace,
+        seccomp_bpf: true,
+        depth: 1,
+        outputs: &declared.cache_outputs,
+        scratch: scratch.path(),
+    });
+    match outcome {
+        Err(error) => Measure::Unavailable(error.to_string()),
+        Ok(Traced::Failed(status)) => Measure::Ran(Err(failure(format!(
+            "Check {} failed under the read-set tracer ({status})",
+            entry.check
+        )))),
+        Ok(Traced::Unmeasured(reason)) => {
+            event(json!({
+                "event": "read-set-measure",
+                "check": entry.check,
+                "status": "unmeasured",
+                "reason": reason,
+            }));
+            Measure::Ran(Ok(()))
+        }
+        Ok(Traced::Measured {
+            observations,
+            globs,
+        }) => {
+            let stored = slot
+                .record(
+                    globs.clone(),
+                    entry.layout(),
+                    &marker.base,
+                    &entry.commit,
+                    observations,
+                    producer,
+                )
+                .and_then(|record| {
+                    if globs.is_empty() {
+                        slot.store_whole_tree(&record)
+                    } else {
+                        slot.store_candidate(&record)
+                    }
+                });
+            if let Err(error) = stored {
+                event(json!({
+                    "event": "verdict-store-error",
+                    "check": entry.check,
+                    "reason": error.to_string(),
+                }));
+            }
+            Measure::Ran(Ok(()))
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn measure_whole_tree(
+    _root: &Path,
+    _entry: &cached_verdict::Prepared,
+    _declared: &crate::Check,
+    _marker: &Marker,
+    _manifest_arg: &str,
+    _environment: &Environment,
+    _producer: Option<&cached_verdict::Producer>,
+) -> Measure {
+    Measure::Unavailable("a read-set is measured on unix hosts only".into())
 }
 
 /// Move what a proving run left to the checkout: the declared outputs and the check's receipt.

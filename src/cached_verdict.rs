@@ -321,6 +321,9 @@ pub struct Prepared {
     full_tree: String,
     /// For a narrowed key, the indices of `tree_entries` it covers.
     narrowed: Option<Vec<usize>>,
+    /// For a narrowed key, the `inputs` digest of the manifest measurement its read-set descends
+    /// from: the manifest's own, or the one a stored set replaced (see `read_sets`).
+    lineage: Option<String>,
     /// The git dependency commits of the checkout's own locks when the key was built. A floated
     /// key names the resolution's commits instead; the checkout's locks must still read the same
     /// after the run, because ccid never writes them.
@@ -360,7 +363,79 @@ impl Prepared {
         whole.components.read_set = None;
         whole.key = whole.components.key_hex()?;
         whole.narrowed = None;
+        whole.lineage = None;
         Ok(whole)
+    }
+
+    /// The same check keyed on the read-set that `check` (a declaration carrying a measured set)
+    /// selects in this tree: where a stored candidate is proven. `Err` says why that set does not
+    /// narrow this tree.
+    pub(crate) fn rekeyed(&self, check: &crate::Check) -> std::result::Result<Prepared, String> {
+        let paths: Vec<&str> = self
+            .tree_entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        match crate::narrowing::decide(check, &paths) {
+            crate::narrowing::Scope::ReadSet { key, selected } => {
+                let mut next = self.clone();
+                next.components.tree = digest_of(
+                    &self.root,
+                    selected.iter().map(|index| &self.tree_entries[*index]),
+                )
+                .map_err(|error| error.to_string())?;
+                next.components.read_set = Some(key);
+                next.key = next
+                    .components
+                    .key_hex()
+                    .map_err(|error| error.to_string())?;
+                next.narrowed = Some(selected);
+                next.lineage = check
+                    .cache_inputs_measured
+                    .as_ref()
+                    .map(|measured| measured.inputs.clone());
+                Ok(next)
+            }
+            crate::narrowing::Scope::Tree { reason } => {
+                Err(reason.unwrap_or_else(|| "the check declares no inputs".into()))
+            }
+        }
+    }
+
+    /// The stored files for this key's check definition, `None` for a whole-tree key or a run
+    /// without a store.
+    pub(crate) fn slot(&self) -> Option<read_sets::Slot> {
+        let read_set = self.components.read_set.as_ref()?;
+        Some(read_sets::Slot::new(
+            self.store.as_deref()?,
+            &self.repository,
+            &self.check,
+            &read_set.commands,
+        ))
+    }
+
+    /// The `inputs` digest of this key's read-set.
+    pub(crate) fn read_set_inputs(&self) -> Option<&str> {
+        self.components
+            .read_set
+            .as_ref()
+            .map(|read_set| read_set.inputs.as_str())
+    }
+
+    /// The manifest measurement this key's read-set descends from.
+    pub(crate) fn lineage(&self) -> Option<&str> {
+        self.lineage.as_deref()
+    }
+
+    /// The digest of the tree's top-level entry names (what a measurement classified).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn layout(&self) -> String {
+        crate::narrowing::layout_digest(self.tree_entries.iter().map(|entry| entry.path.as_str()))
+    }
+
+    /// How many files this narrowed key covers, and how many the tree holds.
+    pub(crate) fn size(&self) -> Option<(u64, u64)> {
+        self.read_set_size()
     }
 
     /// How many files a narrowed key covers, and how many the tree holds.
@@ -1644,28 +1719,63 @@ pub(crate) fn prepare_resolved(
     let entries = tree_entries(root, commit_id)?;
     let full_tree = entries_digest(root, &entries)?;
     let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
-    let (tree, read_set, narrowed) = match crate::narrowing::decide(check, &paths) {
+    let cache = store_root(environment);
+    let store = cache.as_ref().map(|root| root.join(STORE_DIR));
+    let repository = repository_identity(root, environment);
+    // The measured set the key narrows on: the newest the store holds for this check definition
+    // (a run that found the manifest's stale measured it again, see `read_sets`), else the
+    // manifest's own. The check's identity below is the declaration as written either way.
+    let stored = read_sets::overlay(
+        store.as_deref(),
+        &repository,
+        check_name,
+        check,
+        environment,
+    );
+    let deciding = stored.as_ref().map_or(check, |stored| &stored.check);
+    let source = if stored.is_some() {
+        "store"
+    } else {
+        "manifest"
+    };
+    let (tree, read_set, narrowed, lineage) = match crate::narrowing::decide(deciding, &paths) {
         crate::narrowing::Scope::ReadSet { key, selected } => {
             event(json!({
                 "event": "verdict-narrowing",
                 "check": check_name,
                 "scope": "read-set",
+                "measured": source,
                 "files": selected.len(),
                 "of": entries.len(),
             }));
             let tree = digest_of(root, selected.iter().map(|index| &entries[*index]))?;
-            (tree, Some(key), Some(selected))
+            let lineage = match &stored {
+                Some(stored) => stored.base.clone(),
+                None => deciding
+                    .cache_inputs_measured
+                    .as_ref()
+                    .map_or_else(String::new, |measured| measured.inputs.clone()),
+            };
+            (tree, Some(key), Some(selected), Some(lineage))
         }
         crate::narrowing::Scope::Tree { reason } => {
+            let reason = match (&stored, reason) {
+                (Some(stored), None) if stored.empty => Some(
+                    "the measured read-set is the whole tree (the check lists the repository root)"
+                        .to_owned(),
+                ),
+                (_, reason) => reason,
+            };
             if let Some(reason) = reason {
                 event(json!({
                     "event": "verdict-narrowing",
                     "check": check_name,
                     "scope": "tree",
+                    "measured": source,
                     "reason": reason,
                 }));
             }
-            (full_tree.clone(), None, None)
+            (full_tree.clone(), None, None, None)
         }
     };
     let identity = check_identity_payload(check, environment, root)?;
@@ -1697,19 +1807,18 @@ pub(crate) fn prepare_resolved(
             "toolchain": components.toolchain,
         }));
     }
-    let cache = store_root(environment);
-    let store = cache.as_ref().map(|root| root.join(STORE_DIR));
     Ok(Prepared {
         check: check_name.to_owned(),
         key,
         components,
         commit: commit_id.to_owned(),
-        repository: repository_identity(root, environment),
+        repository,
         branch: crate::cached_outputs::branch(root, environment),
         root: root.to_path_buf(),
         tree_entries: entries,
         full_tree,
         narrowed,
+        lineage,
         checkout_dependencies,
         cache,
         store,
@@ -2371,6 +2480,8 @@ pub fn plan_bypass(
     }
     cmnp::volatile_reason(cmnp_check, root).map(|reason| format!("observes live state: {reason}"))
 }
+
+pub(crate) mod read_sets;
 
 #[cfg(test)]
 mod tests;

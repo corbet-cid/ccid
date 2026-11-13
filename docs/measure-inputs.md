@@ -65,7 +65,11 @@ its own.
 - The measurement holds for the tree it was taken on, and a verdict never inherits it: the run
   that stores a narrowed verdict executes the check in a copy of the tree that holds only the
   read-set, and a failure there (a check that started reading a file the measurement never saw)
-  keys the pass on the whole tree and reports `remeasure`. Measure again after such a report or a
-  structural change (a new top-level entry changes `layout`, and keys the whole tree).
+  keys the pass on the whole tree and reports `remeasure`. The verdict store then
+  [measures the read-set again](verdicts.md#re-measuring-a-stale-read-set) by itself: one traced
+  run of the check (the tracer of this command, `--seccomp-bpf`) whose read-set the next proof
+  confirms; nothing is written to the repository. Measure by hand after a structural change
+  (a new top-level entry changes `layout`, and keys the whole tree), an edit of the check, or a
+  measurement the store refused.
 - A `kind = "nix"` check keys every file anyway.
 - strace slows the check down considerably: measure on a workstation, not in a job.
