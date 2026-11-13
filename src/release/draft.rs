@@ -42,7 +42,10 @@ pub fn tag_of(sha: &str) -> String {
 }
 
 pub fn valid_sha(sha: &str) -> bool {
-    sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    sha.len() == 40
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// SHA-256 of a file, streamed.
@@ -127,7 +130,11 @@ impl<'a> Draft<'a> {
         match forge.tag_commit(&tag)? {
             None => {}
             Some(commit) if commit == sha => {}
-            Some(_) => return Err(failure(format!("existing tag {tag} targets another commit"))),
+            Some(_) => {
+                return Err(failure(format!(
+                    "existing tag {tag} targets another commit"
+                )))
+            }
         }
         forge.create_draft(&tag, sha, title, notes)?;
         Draft::find(forge, sha)?
@@ -188,26 +195,37 @@ impl<'a> Draft<'a> {
             self.require_draft()?;
             match self.forge.upload(self.release.id, name, path, size) {
                 Ok(()) => {}
-                Err(error) => eprintln!("ccid release: upload of {name} failed (attempt {attempt} of 4): {error}"),
+                Err(error) => eprintln!(
+                    "ccid release: upload of {name} failed (attempt {attempt} of 4): {error}"
+                ),
             }
             if attempt < 4 {
                 std::thread::sleep(self.forge.retry_delay * attempt);
             }
             self.reload()?;
             self.drop_wrong_size(name, size)?;
-            if self.release.asset(name).is_some_and(|held| held.size == size) {
+            if self
+                .release
+                .asset(name)
+                .is_some_and(|held| held.size == size)
+            {
                 return Ok(());
             }
         }
-        Err(failure(format!("could not upload {name} to {}", self.release.tag_name)))
+        Err(failure(format!(
+            "could not upload {name} to {}",
+            self.release.tag_name
+        )))
     }
 
     /// Download one asset of the draft.
     pub fn fetch(&self, name: &str, destination: &Path) -> Result<()> {
-        let asset: &Asset = self
-            .release
-            .asset(name)
-            .ok_or_else(|| failure(format!("the release {} has no asset {name}", self.release.tag_name)))?;
+        let asset: &Asset = self.release.asset(name).ok_or_else(|| {
+            failure(format!(
+                "the release {} has no asset {name}",
+                self.release.tag_name
+            ))
+        })?;
         self.forge.download(asset, destination)
     }
 
@@ -238,7 +256,10 @@ impl<'a> Draft<'a> {
             let scratch = tempfile::tempdir()?;
             let copy = scratch.path().join("held");
             self.forge.download(&asset, &copy).map_err(|error| {
-                failure(format!("cannot compare the held asset {}: {error}", asset.name))
+                failure(format!(
+                    "cannot compare the held asset {}: {error}",
+                    asset.name
+                ))
             })?;
             if sha256_file(&copy)? != sha256_file(path)? {
                 return Err(failure(format!(
@@ -268,7 +289,12 @@ impl<'a> Draft<'a> {
             .file_name()
             .and_then(|n| n.to_str())
             .filter(|n| plain_asset_name(n))
-            .ok_or_else(|| failure(format!("{} is not a file an asset can come from", path.display())))?
+            .ok_or_else(|| {
+                failure(format!(
+                    "{} is not a file an asset can come from",
+                    path.display()
+                ))
+            })?
             .to_owned();
         let size = fs::metadata(path)
             .map_err(|error| failure(format!("cannot read {}: {error}", path.display())))?
@@ -279,7 +305,9 @@ impl<'a> Draft<'a> {
             if held.size == size {
                 let scratch = tempfile::tempdir()?;
                 let copy = scratch.path().join("held");
-                if self.forge.download(&held, &copy).is_ok() && sha256_file(&copy)? == sha256_file(path)? {
+                if self.forge.download(&held, &copy).is_ok()
+                    && sha256_file(&copy)? == sha256_file(path)?
+                {
                     return Ok(Put::Unchanged);
                 }
             }
@@ -320,7 +348,10 @@ mod tests {
         fs::write(dir.path().join("a.bin"), b"x").unwrap();
         assert_eq!(snapshot(dir.path()).unwrap().len(), 1);
         fs::create_dir(dir.path().join("sub")).unwrap();
-        assert!(snapshot(dir.path()).unwrap_err().to_string().contains("flat set"));
+        assert!(snapshot(dir.path())
+            .unwrap_err()
+            .to_string()
+            .contains("flat set"));
         fs::remove_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join(".hidden"), b"x").unwrap();
         assert!(snapshot(dir.path()).is_err());

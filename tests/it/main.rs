@@ -42,6 +42,8 @@ mod quality_cli;
 #[cfg(unix)]
 mod release;
 mod release_mirror;
+#[cfg(unix)]
+mod release_render;
 mod render;
 mod render_golden;
 mod resolve_lock;

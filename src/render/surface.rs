@@ -404,6 +404,43 @@ fn family(relative: &str, content: Option<&[u8]>) -> Option<&'static Family> {
     })
 }
 
+/// The release families once the manifest declares `[release]`: their replacement is live for that repository,
+/// so render deletes them (or replaces them where it renders its own file). Without the table they wait.
+const LIVE_RELEASE: &[Family] = &[
+    legacy(
+        "github-release",
+        &[".github/workflows/release.yml"],
+        "the rendered Forgejo release flow and the JSR publisher",
+        None,
+    ),
+    legacy(
+        "forgejo-release",
+        &[
+            ".forgejo/workflows/release.yml",
+            ".forgejo/workflows/release-macos.yml",
+        ],
+        "the rendered Forgejo release flow",
+        None,
+    ),
+    legacy(
+        "release-check",
+        &[".ci/release-check.py"],
+        "nothing: `render --check` of the rendered release files",
+        None,
+    ),
+];
+
+/// [`family`], with the release families live when the manifest declares `[release]`.
+fn family_for(relative: &str, content: Option<&[u8]>, release: bool) -> Option<&'static Family> {
+    let table = family(relative, content)?;
+    if release {
+        if let Some(live) = LIVE_RELEASE.iter().find(|live| live.id == table.id) {
+            return Some(live);
+        }
+    }
+    Some(table)
+}
+
 /// A hand-written file at a path ccid renders may be overwritten at `render_schema = 3` only when it is a live
 /// legacy family (the hand-written remote-scheduler pipeline where the release mirror's GitLab file goes).
 pub(super) fn replaceable(repo: &Path, relative: &str) -> Result<bool> {
@@ -850,7 +887,7 @@ pub(super) fn assess(
         let ours = content
             .as_deref()
             .is_some_and(|bytes| owned(Path::new(relative), &String::from_utf8_lossy(bytes)));
-        let table = family(relative, content.as_deref());
+        let table = family_for(relative, content.as_deref(), parsed.release.is_some());
         if rendered.contains_key(relative) {
             let item = if ours {
                 entry(

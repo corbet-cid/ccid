@@ -133,11 +133,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
             expect = true;
         }
         if lower.starts_with("authorization:") {
-            token = header
-                .split_whitespace()
-                .last()
-                .unwrap_or("")
-                .to_owned();
+            token = header.split_whitespace().last().unwrap_or("").to_owned();
         }
     }
     if expect {
@@ -196,7 +192,10 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<State>>, base: &str) -> std::i
         .push(format!("{} {}", request.method, request.path));
     let writer = request.token == JOB_TOKEN || request.token == READ_TOKEN;
     // Downloads of release assets: a draft's only with the read credential.
-    if let Some(rest) = request.path.strip_prefix(&format!("/{OWNER_REPO}/releases/download/")) {
+    if let Some(rest) = request
+        .path
+        .strip_prefix(&format!("/{OWNER_REPO}/releases/download/"))
+    {
         let (tag, name) = rest.split_once('/').unwrap_or((rest, ""));
         let found = state.releases.iter().find(|r| r.tag == tag);
         return match found {
@@ -229,7 +228,11 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<State>>, base: &str) -> std::i
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(1);
             let list: Vec<_> = if page == 1 {
-                state.releases.iter().map(|r| release_json(r, base)).collect()
+                state
+                    .releases
+                    .iter()
+                    .map(|r| release_json(r, base))
+                    .collect()
             } else {
                 Vec::new()
             };

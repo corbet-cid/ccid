@@ -340,6 +340,11 @@ pub fn is_self_checks_command(command: &[String]) -> bool {
 }
 
 impl Job {
+    /// The workflow the job belongs to.
+    pub(crate) fn workflow(&self) -> &str {
+        &self.workflow
+    }
+
     /// The job's strings that may name a repository file: its command and environment values.
     pub(crate) fn named_strings(&self) -> impl Iterator<Item = &str> {
         self.command
@@ -366,6 +371,10 @@ pub(crate) fn plan_parsed(
     name: &str,
     scheduler: Option<Scheduler>,
 ) -> Result<Plan> {
+    // The jobs of the release flow are planned from `[release]`, never declared.
+    if let Some(plan) = crate::release::job_plan(manifest, name)? {
+        return Ok(plan);
+    }
     let job = manifest
         .jobs
         .get(name)

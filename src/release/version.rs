@@ -156,7 +156,12 @@ pub fn read(repo: &Path, file: &str) -> Result<Version> {
 fn cargo_version(text: &str) -> Option<String> {
     let value: toml::Value = toml::from_str(text).ok()?;
     let literal = |value: Option<&toml::Value>| value.and_then(|v| v.as_str()).map(str::to_owned);
-    literal(value.get("package").and_then(|package| package.get("version"))).or_else(|| {
+    literal(
+        value
+            .get("package")
+            .and_then(|package| package.get("version")),
+    )
+    .or_else(|| {
         literal(
             value
                 .get("workspace")
@@ -190,8 +195,21 @@ mod tests {
     #[test]
     fn what_names_no_release_is_refused() {
         for bad in [
-            "", "1", "1.2", "1.2.3.4", "0.0.0", "1.2.3-rc.1", "1.2.3+build", "01.2.3", "1.02.3",
-            "1.2.x", "v1.2.3", " 1.2.3", "1.2.3 ", "-1.2.3", "1..3",
+            "",
+            "1",
+            "1.2",
+            "1.2.3.4",
+            "0.0.0",
+            "1.2.3-rc.1",
+            "1.2.3+build",
+            "01.2.3",
+            "1.02.3",
+            "1.2.x",
+            "v1.2.3",
+            " 1.2.3",
+            "1.2.3 ",
+            "-1.2.3",
+            "1..3",
         ] {
             let error = Version::parse(bad).unwrap_err().to_string();
             assert!(error.contains("names no release"), "{bad:?}: {error}");
@@ -200,10 +218,23 @@ mod tests {
 
     #[test]
     fn version_files_are_plain_relative_paths_of_a_known_kind() {
-        for good in ["Cargo.toml", "crates/x/Cargo.toml", "package.json", "pyproject.toml"] {
+        for good in [
+            "Cargo.toml",
+            "crates/x/Cargo.toml",
+            "package.json",
+            "pyproject.toml",
+        ] {
             assert!(check_file(good).is_ok(), "{good}");
         }
-        for bad in ["", "/Cargo.toml", "../Cargo.toml", "a/../Cargo.toml", "VERSION", "Cargo.lock", "a\\Cargo.toml"] {
+        for bad in [
+            "",
+            "/Cargo.toml",
+            "../Cargo.toml",
+            "a/../Cargo.toml",
+            "VERSION",
+            "Cargo.lock",
+            "a\\Cargo.toml",
+        ] {
             assert!(check_file(bad).is_err(), "{bad}");
         }
     }
@@ -220,10 +251,19 @@ mod tests {
         );
         assert_eq!(read(dir.path(), "Cargo.toml").unwrap().to_string(), "0.4.0");
         write("package.json", "{\"name\":\"a\",\"version\":\"3.0.0\"}");
-        assert_eq!(read(dir.path(), "package.json").unwrap().class(), Class::Major);
+        assert_eq!(
+            read(dir.path(), "package.json").unwrap().class(),
+            Class::Major
+        );
         write("pyproject.toml", "[project]\nname='a'\nversion='0.2.1'\n");
-        assert_eq!(read(dir.path(), "pyproject.toml").unwrap().class(), Class::Patch);
-        write("pyproject.toml", "[project]\nname='a'\ndynamic=['version']\n");
+        assert_eq!(
+            read(dir.path(), "pyproject.toml").unwrap().class(),
+            Class::Patch
+        );
+        write(
+            "pyproject.toml",
+            "[project]\nname='a'\ndynamic=['version']\n",
+        );
         assert!(read(dir.path(), "pyproject.toml").is_err());
         write("Cargo.toml", "[package]\nname='a'\nversion='1.0.0-rc.1'\n");
         assert!(read(dir.path(), "Cargo.toml").is_err());

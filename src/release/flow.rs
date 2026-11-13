@@ -47,7 +47,9 @@ fn git_head(repo: &Path) -> Result<String> {
         .output()
         .map_err(|error| failure(format!("cannot run git: {error}")))?;
     if !output.status.success() {
-        return Err(failure("git rev-parse HEAD failed: name the commit with --commit or CI_COMMIT_SHA"));
+        return Err(failure(
+            "git rev-parse HEAD failed: name the commit with --commit or CI_COMMIT_SHA",
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -64,7 +66,10 @@ impl Job {
         let version = super::version::read(repo, &config.version)?;
         let sha = match commit {
             Some(commit) => commit.to_owned(),
-            None => match std::env::var("CI_COMMIT_SHA").ok().filter(|v| !v.is_empty()) {
+            None => match std::env::var("CI_COMMIT_SHA")
+                .ok()
+                .filter(|v| !v.is_empty())
+            {
                 Some(sha) => sha,
                 None => git_head(repo)?,
             },
@@ -93,10 +98,13 @@ impl Job {
     pub fn notes(&self) -> Result<String> {
         match &self.config.notes {
             Some(file) => {
-                let text = fs::read_to_string(self.repo.join(file))
-                    .map_err(|error| failure(format!("cannot read the release notes {file}: {error}")))?;
+                let text = fs::read_to_string(self.repo.join(file)).map_err(|error| {
+                    failure(format!("cannot read the release notes {file}: {error}"))
+                })?;
                 if text.len() > 65_536 {
-                    return Err(failure(format!("the release notes {file} are longer than 64 KiB")));
+                    return Err(failure(format!(
+                        "the release notes {file} are longer than 64 KiB"
+                    )));
                 }
                 Ok(text)
             }
@@ -122,9 +130,15 @@ impl Job {
             ("CCID_RELEASE_CLASS".into(), self.plan.class.to_string()),
             ("CCID_RELEASE_KIND".into(), kind.into()),
             ("CCID_RELEASE_COMMIT".into(), self.sha.clone()),
-            ("CCID_RELEASE_PLATFORMS".into(), self.plan.platforms.join(" ")),
+            (
+                "CCID_RELEASE_PLATFORMS".into(),
+                self.plan.platforms.join(" "),
+            ),
             ("CCID_RELEASE_LEGS".into(), self.plan.legs.join(" ")),
-            ("CCID_RELEASE_MANIFESTS".into(), self.config.manifests.join(" ")),
+            (
+                "CCID_RELEASE_MANIFESTS".into(),
+                self.config.manifests.join(" "),
+            ),
             ("CCID_BIN".into(), exe),
         ]
     }
@@ -133,7 +147,9 @@ impl Job {
     fn run_checks(&self, checks: &[String], dir: &Path, credentials: bool) -> Result<bool> {
         let exe = std::env::current_exe()?;
         let mut command = Command::new(exe);
-        command.current_dir(&self.repo).args(["check", "--repo", "."]);
+        command
+            .current_dir(&self.repo)
+            .args(["check", "--repo", "."]);
         for check in checks {
             command.arg("--check").arg(check);
         }
@@ -170,7 +186,9 @@ pub fn version_is_free(forge: &Forge, tag: &str) -> Result<()> {
         )));
     }
     if forge.tag_commit(tag)?.is_some() {
-        return Err(failure(format!("a tag {tag} exists already: a version is released once")));
+        return Err(failure(format!(
+            "a tag {tag} exists already: a version is released once"
+        )));
     }
     Ok(())
 }
@@ -233,7 +251,12 @@ fn tracked_locks(repo: &Path) -> Result<bool> {
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").arg("-C").arg(repo).args(args).output().ok()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()?;
     output
         .status
         .success()
@@ -244,8 +267,10 @@ fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
 /// The identity a refresh commit carries: the one the environment names, else the repository's own.
 fn identity(repo: &Path) -> Result<(String, String)> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    let name = env("GIT_AUTHOR_NAME").or_else(|| git_output(repo, &["config", "--get", "user.name"]));
-    let email = env("GIT_AUTHOR_EMAIL").or_else(|| git_output(repo, &["config", "--get", "user.email"]));
+    let name =
+        env("GIT_AUTHOR_NAME").or_else(|| git_output(repo, &["config", "--get", "user.name"]));
+    let email =
+        env("GIT_AUTHOR_EMAIL").or_else(|| git_output(repo, &["config", "--get", "user.email"]));
     match (name, email) {
         (Some(name), Some(email)) => Ok((name, email)),
         _ => Err(failure(
@@ -271,7 +296,11 @@ fn changed_locks(report: &str) -> Result<Vec<String>> {
 }
 
 /// Commit the refreshed locks as one lock-only commit; returns the new commit.
-fn commit_locks(repo: &Path, changed: &[String], version: &super::version::Version) -> Result<String> {
+fn commit_locks(
+    repo: &Path,
+    changed: &[String],
+    version: &super::version::Version,
+) -> Result<String> {
     // A refresh that moves again right after a refresh would loop: stop instead.
     let last = git_output(repo, &["log", "-1", "--format=%B"]).unwrap_or_default();
     if last.lines().any(|line| line.trim() == REFRESH_TRAILER) {
@@ -286,12 +315,25 @@ fn commit_locks(repo: &Path, changed: &[String], version: &super::version::Versi
     if !add.status()?.success() {
         return Err(failure("git add of the refreshed locks failed"));
     }
-    let message = format!("lock-refresh: third-party dependencies for {version}\n\n{REFRESH_TRAILER}\n");
+    let message =
+        format!("lock-refresh: third-party dependencies for {version}\n\n{REFRESH_TRAILER}\n");
     let committed = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")])
-        .args(["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", &message])
+        .args([
+            "-c",
+            &format!("user.name={name}"),
+            "-c",
+            &format!("user.email={email}"),
+        ])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            &message,
+        ])
         .status()?;
     if !committed.success() {
         return Err(failure("git commit of the refreshed locks failed"));
@@ -309,7 +351,10 @@ fn push_head(repo: &Path, url: &str, token: &str) -> Result<()> {
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-        .env("GIT_CONFIG_VALUE_0", format!("Authorization: token {token}"))
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: token {token}"),
+        )
         .status()?;
     if pushed.success() {
         Ok(())
@@ -350,7 +395,11 @@ fn refresh_locks(job: &Job, forge: &Forge, server_url: &str) -> Result<Refresh> 
         .into_iter()
         .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
         .ok_or_else(|| failure("no job token to push the refreshed locks with"))?;
-    let url = format!("{}/{}.git", server_url.trim_end_matches('/'), forge.repository());
+    let url = format!(
+        "{}/{}.git",
+        server_url.trim_end_matches('/'),
+        forge.repository()
+    );
     push_head(&job.repo, &url, &token)?;
     forge.dispatch("release.yml", BRANCH)?;
     Ok(Refresh::Moved(new))
@@ -367,7 +416,9 @@ fn collect(dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
         )));
     }
     if names.contains_key(SUMS) {
-        return Err(failure(format!("the build left a {SUMS}: ccid writes that file itself")));
+        return Err(failure(format!(
+            "the build left a {SUMS}: ccid writes that file itself"
+        )));
     }
     Ok(names
         .into_keys()
@@ -403,14 +454,20 @@ pub fn build(repo: &Path) -> Result<ExitCode> {
     for (name, path) in &files {
         let size = fs::metadata(path)?.len();
         if draft.release().asset(name).map(|asset| asset.size) != Some(size) {
-            return Err(failure(format!("the draft does not hold {name} as it should")));
+            return Err(failure(format!(
+                "the draft does not hold {name} as it should"
+            )));
         }
     }
     eprintln!(
         "ccid release: {} files in the draft {}; platform legs: {}",
         files.len(),
         draft.release().tag_name,
-        if job.plan.legs.is_empty() { "none".to_owned() } else { job.plan.legs.join(", ") }
+        if job.plan.legs.is_empty() {
+            "none".to_owned()
+        } else {
+            job.plan.legs.join(", ")
+        }
     );
     outputs(&[
         ("released", "true".into()),
@@ -447,11 +504,16 @@ pub fn leg(repo: &Path, os: &str) -> Result<ExitCode> {
         )));
     };
     if !draft.is_draft() {
-        eprintln!("ccid release: build-{} is public already: nothing is left to run", &job.sha[..12]);
+        eprintln!(
+            "ccid release: build-{} is public already: nothing is left to run",
+            &job.sha[..12]
+        );
         return Ok(ExitCode::SUCCESS);
     }
     require_current(&forge, &job)?;
-    let dir = tempfile::Builder::new().prefix("ccid-release-leg-").tempdir()?;
+    let dir = tempfile::Builder::new()
+        .prefix("ccid-release-leg-")
+        .tempdir()?;
     Ok(if job.run_checks(&[check], dir.path(), true)? {
         ExitCode::SUCCESS
     } else {
@@ -504,7 +566,9 @@ pub fn promote(repo: &Path) -> Result<ExitCode> {
     if let Some(release) = forge.release(&public)? {
         // A repeat: it must be this commit's, public and complete.
         if release.draft {
-            return Err(failure(format!("release {public} is a draft of another run; nothing is promoted")));
+            return Err(failure(format!(
+                "release {public} is a draft of another run; nothing is promoted"
+            )));
         }
         check_public(&forge, &job, &public)?;
         let work = tempfile::tempdir()?;
@@ -515,7 +579,9 @@ pub fn promote(repo: &Path) -> Result<ExitCode> {
         let expected = draft::sums_text(&held);
         let sums = fs::read_to_string(work.path().join(SUMS)).unwrap_or_default();
         if sums != expected {
-            return Err(failure(format!("the {SUMS} of {public} does not cover its assets")));
+            return Err(failure(format!(
+                "the {SUMS} of {public} does not cover its assets"
+            )));
         }
         eprintln!("ccid release: {public} is public already");
         return Ok(ExitCode::SUCCESS);
@@ -523,7 +589,9 @@ pub fn promote(repo: &Path) -> Result<ExitCode> {
     let mut draft = Draft::find(&forge, &job.sha)?
         .ok_or_else(|| failure(format!("there is no release build-{} to promote", job.sha)))?;
     draft.require_draft()?;
-    let work = tempfile::Builder::new().prefix("ccid-release-seal-").tempdir()?;
+    let work = tempfile::Builder::new()
+        .prefix("ccid-release-seal-")
+        .tempdir()?;
     draft.fetch_all(work.path())?;
     let before = draft::snapshot(work.path())?;
     if !job.config.seal.is_empty() && !job.run_checks(&job.config.seal, work.path(), false)? {
@@ -534,7 +602,9 @@ pub fn promote(repo: &Path) -> Result<ExitCode> {
     verify_seal(&before, &after, &job.config.manifests)?;
     for name in &job.config.manifests {
         if after.contains_key(name) && before.get(name) != after.get(name) {
-            eprintln!("ccid release: the draft's {name} is not what its evidence says; replacing it");
+            eprintln!(
+                "ccid release: the draft's {name} is not what its evidence says; replacing it"
+            );
             draft.put(&work.path().join(name))?;
         }
     }
@@ -559,13 +629,23 @@ pub fn promote(repo: &Path) -> Result<ExitCode> {
         .map(|asset| (asset.name.clone(), asset.size))
         .collect();
     if held != expected {
-        return Err(failure("the draft does not hold exactly the sealed files; nothing is promoted"));
+        return Err(failure(
+            "the draft does not hold exactly the sealed files; nothing is promoted",
+        ));
     }
     version_is_free(&forge, &public)?;
     require_current(&forge, &job)?;
-    forge.publish(draft.release().id, &public, &job.plan.version.to_string(), &job.notes()?)?;
+    forge.publish(
+        draft.release().id,
+        &public,
+        &job.plan.version.to_string(),
+        &job.notes()?,
+    )?;
     check_public(&forge, &job, &public)?;
-    eprintln!("ccid release: promoted build-{} as {public}", &job.sha[..12]);
+    eprintln!(
+        "ccid release: promoted build-{} as {public}",
+        &job.sha[..12]
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -579,7 +659,10 @@ fn check_public(forge: &Forge, job: &Job, tag: &str) -> Result<()> {
     }
     match forge.tag_commit(tag)? {
         Some(commit) if commit == job.sha => Ok(()),
-        Some(commit) => Err(failure(format!("the tag {tag} names {commit}, not {}", job.sha))),
+        Some(commit) => Err(failure(format!(
+            "the tag {tag} names {commit}, not {}",
+            job.sha
+        ))),
         None => Err(failure(format!("the tag {tag} does not exist"))),
     }
 }
@@ -594,7 +677,11 @@ pub fn preflight_command(repo: &Path, commit: Option<&str>) -> Result<ExitCode> 
     println!(
         "{} may proceed. Platforms: {}.",
         describe(&job),
-        if job.plan.platforms.is_empty() { "none (a library)".to_owned() } else { job.plan.platforms.join(" ") }
+        if job.plan.platforms.is_empty() {
+            "none (a library)".to_owned()
+        } else {
+            job.plan.platforms.join(" ")
+        }
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -607,7 +694,9 @@ pub fn put(repo: &Path, commit: Option<&str>, files: &[PathBuf]) -> Result<ExitC
         .ok_or_else(|| failure(format!("there is no draft build-{}", job.sha)))?;
     for file in files {
         if file.file_name().and_then(|n| n.to_str()) == Some(SUMS) {
-            return Err(failure(format!("{SUMS} is written by ccid release promote")));
+            return Err(failure(format!(
+                "{SUMS} is written by ccid release promote"
+            )));
         }
         let outcome = draft.put(file)?;
         println!("{}: {outcome:?}", file.display());
@@ -678,20 +767,41 @@ mod tests {
     use super::*;
 
     fn map(items: &[(&str, &str)]) -> BTreeMap<String, String> {
-        items.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        items
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
     }
 
     #[test]
     fn a_seal_may_replace_a_declared_manifest_and_the_sums_only() {
         let manifests = vec!["manifest.json".to_owned()];
         let before = map(&[("a.bin", "1"), ("manifest.json", "2")]);
-        assert!(verify_seal(&before, &map(&[("a.bin", "1"), ("manifest.json", "3")]), &manifests).is_ok());
-        assert!(verify_seal(&before, &map(&[("a.bin", "1"), ("manifest.json", "2"), (SUMS, "9")]), &manifests).is_ok());
-        let changed = verify_seal(&before, &map(&[("a.bin", "9"), ("manifest.json", "2")]), &manifests);
+        assert!(verify_seal(
+            &before,
+            &map(&[("a.bin", "1"), ("manifest.json", "3")]),
+            &manifests
+        )
+        .is_ok());
+        assert!(verify_seal(
+            &before,
+            &map(&[("a.bin", "1"), ("manifest.json", "2"), (SUMS, "9")]),
+            &manifests
+        )
+        .is_ok());
+        let changed = verify_seal(
+            &before,
+            &map(&[("a.bin", "9"), ("manifest.json", "2")]),
+            &manifests,
+        );
         assert!(changed.unwrap_err().to_string().contains("changed a.bin"));
         let removed = verify_seal(&before, &map(&[("manifest.json", "2")]), &manifests);
         assert!(removed.unwrap_err().to_string().contains("removed a.bin"));
-        let added = verify_seal(&before, &map(&[("a.bin", "1"), ("manifest.json", "2"), ("x", "1")]), &manifests);
+        let added = verify_seal(
+            &before,
+            &map(&[("a.bin", "1"), ("manifest.json", "2"), ("x", "1")]),
+            &manifests,
+        );
         assert!(added.unwrap_err().to_string().contains("added x"));
     }
 
@@ -699,19 +809,33 @@ mod tests {
     fn a_manifest_the_draft_lacks_may_be_added_by_the_seal() {
         let manifests = vec!["manifest.json".to_owned()];
         let before = map(&[("a.bin", "1")]);
-        assert!(verify_seal(&before, &map(&[("a.bin", "1"), ("manifest.json", "2")]), &manifests).is_ok());
+        assert!(verify_seal(
+            &before,
+            &map(&[("a.bin", "1"), ("manifest.json", "2")]),
+            &manifests
+        )
+        .is_ok());
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .arg("-C")
             .arg(dir)
-            .args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
             .args(args)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
-        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
@@ -719,7 +843,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-q"]);
         git(dir.path(), &["config", "user.name", "Lock Test"]);
-        git(dir.path(), &["config", "user.email", "lock@example.invalid"]);
+        git(
+            dir.path(),
+            &["config", "user.email", "lock@example.invalid"],
+        );
         fs::write(dir.path().join("Cargo.lock"), "one\n").unwrap();
         fs::write(dir.path().join("other.txt"), "x\n").unwrap();
         git(dir.path(), &["add", "-A"]);
@@ -729,8 +856,12 @@ mod tests {
 
     #[test]
     fn the_report_line_names_the_changed_locks() {
-        let report = "noise\n{\"mode\":\"third-party\",\"changed\":[\"Cargo.lock\",\"x/Cargo.lock\"]}\n";
-        assert_eq!(changed_locks(report).unwrap(), vec!["Cargo.lock", "x/Cargo.lock"]);
+        let report =
+            "noise\n{\"mode\":\"third-party\",\"changed\":[\"Cargo.lock\",\"x/Cargo.lock\"]}\n";
+        assert_eq!(
+            changed_locks(report).unwrap(),
+            vec!["Cargo.lock", "x/Cargo.lock"]
+        );
         assert!(changed_locks("{\"changed\":[]}\n").unwrap().is_empty());
         assert!(changed_locks("not json\n").is_err());
     }
@@ -744,15 +875,29 @@ mod tests {
         let version = crate::release::version::Version::parse("1.2.0").unwrap();
         let new = commit_locks(repo.path(), &["Cargo.lock".to_owned()], &version).unwrap();
         assert_eq!(new, git(repo.path(), &["rev-parse", "HEAD"]));
-        assert_eq!(git(repo.path(), &["show", "--name-only", "--format=", "HEAD"]), "Cargo.lock");
+        assert_eq!(
+            git(repo.path(), &["show", "--name-only", "--format=", "HEAD"]),
+            "Cargo.lock"
+        );
         let message = git(repo.path(), &["log", "-1", "--format=%B"]);
-        assert!(message.contains(REFRESH_TRAILER) && message.contains("1.2.0"), "{message}");
-        push_head(repo.path(), &remote.path().display().to_string(), "token12345").unwrap();
+        assert!(
+            message.contains(REFRESH_TRAILER) && message.contains("1.2.0"),
+            "{message}"
+        );
+        push_head(
+            repo.path(),
+            &remote.path().display().to_string(),
+            "token12345",
+        )
+        .unwrap();
         assert_eq!(git(remote.path(), &["rev-parse", "main"]), new);
         // The lock moves again straight after a refresh: refused, nothing committed.
         fs::write(repo.path().join("Cargo.lock"), "three\n").unwrap();
         let again = commit_locks(repo.path(), &["Cargo.lock".to_owned()], &version);
-        assert!(again.unwrap_err().to_string().contains("lock refresh already"));
+        assert!(again
+            .unwrap_err()
+            .to_string()
+            .contains("lock refresh already"));
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), new);
     }
 

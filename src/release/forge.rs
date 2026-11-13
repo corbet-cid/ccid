@@ -118,9 +118,8 @@ impl Forge {
             .into_iter()
             .find_map(var)
             .ok_or_else(|| failure("the Forgejo job token (CCID_FORGE_TOKEN) is required"))?;
-        let read_file = var("CCID_FORGE_READ_TOKEN_FILE").or_else(|| {
-            var("CREDENTIALS_DIRECTORY").map(|dir| format!("{dir}/forgejo-ci-read"))
-        });
+        let read_file = var("CCID_FORGE_READ_TOKEN_FILE")
+            .or_else(|| var("CREDENTIALS_DIRECTORY").map(|dir| format!("{dir}/forgejo-ci-read")));
         let read_token = read_file
             .and_then(|path| fs::read_to_string(path).ok())
             .map(|text| text.trim().to_owned())
@@ -260,7 +259,13 @@ impl Forge {
     }
 
     /// The reply, or an error naming the request unless the forge answered 2xx.
-    fn expect(&self, method: &str, path: &str, body: Option<Body<'_>>, max_time: u64) -> Result<Reply> {
+    fn expect(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Body<'_>>,
+        max_time: u64,
+    ) -> Result<Reply> {
         let reply = self.call(method, path, body, max_time)?;
         if reply.ok() {
             Ok(reply)
@@ -273,7 +278,8 @@ impl Forge {
     }
 
     fn json(reply: &Reply) -> Result<serde_json::Value> {
-        serde_json::from_slice(&reply.body).map_err(|error| failure(format!("the forge answered with no JSON: {error}")))
+        serde_json::from_slice(&reply.body)
+            .map_err(|error| failure(format!("the forge answered with no JSON: {error}")))
     }
 
     /// The commit a branch points at.
@@ -297,7 +303,9 @@ impl Forge {
                 .filter(|item| item.get("tag_name").and_then(|t| t.as_str()) == Some(tag));
             if let Some(item) = found.next() {
                 if found.next().is_some() {
-                    return Err(failure(format!("more than one release carries the tag {tag}")));
+                    return Err(failure(format!(
+                        "more than one release carries the tag {tag}"
+                    )));
                 }
                 let release: Release = serde_json::from_value(item.clone())
                     .map_err(|error| failure(format!("release {tag} is malformed: {error}")))?;
@@ -322,7 +330,9 @@ impl Forge {
                 .pointer("/commit/sha")
                 .and_then(|sha| sha.as_str())
                 .map(str::to_owned)),
-            other => Err(failure(format!("the forge answered {other} to GET tags/{tag}"))),
+            other => Err(failure(format!(
+                "the forge answered {other} to GET tags/{tag}"
+            ))),
         }
     }
 
@@ -344,7 +354,9 @@ impl Forge {
                     .and_then(|state| state.as_str())
                     .map(str::to_owned))
             }
-            other => Err(failure(format!("the forge answered {other} to GET commits/{sha}/status"))),
+            other => Err(failure(format!(
+                "the forge answered {other} to GET commits/{sha}/status"
+            ))),
         }
     }
 
@@ -362,8 +374,13 @@ impl Forge {
         let body = serde_json::json!({
             "tag_name": tag, "name": name, "body": notes, "draft": false, "prerelease": false
         });
-        self.expect("PATCH", &format!("releases/{id}"), Some(Body::Json(&body)), 120)
-            .map(|_| ())
+        self.expect(
+            "PATCH",
+            &format!("releases/{id}"),
+            Some(Body::Json(&body)),
+            120,
+        )
+        .map(|_| ())
     }
 
     pub fn delete_release(&self, id: u64) -> Result<()> {
@@ -413,7 +430,14 @@ impl Forge {
         let part = destination.with_extension("ccid-part");
         let mut last = 0;
         for auth in &self.reads {
-            let status = self.curl(auth, "GET", &url, None, Self::upload_limit(asset.size), &part)?;
+            let status = self.curl(
+                auth,
+                "GET",
+                &url,
+                None,
+                Self::upload_limit(asset.size),
+                &part,
+            )?;
             if status == 200 {
                 let got = fs::metadata(&part)?.len();
                 if got != asset.size {

@@ -10,6 +10,7 @@ use std::{
 };
 
 mod mirror;
+mod release;
 pub mod surface;
 mod upstream_sync;
 
@@ -45,11 +46,13 @@ enum Template {
     UpstreamSync,
     UpstreamSyncMerge,
     UpstreamSyncPublish,
+    ReleaseWorkflow,
+    JsrPublish,
 }
 
 impl Template {
     #[cfg(test)]
-    const ALL: [Template; 18] = [
+    const ALL: [Template; 20] = [
         Template::Crow,
         Template::Push,
         Template::Consumer,
@@ -68,6 +71,8 @@ impl Template {
         Template::UpstreamSync,
         Template::UpstreamSyncMerge,
         Template::UpstreamSyncPublish,
+        Template::ReleaseWorkflow,
+        Template::JsrPublish,
     ];
 
     /// The template's file under `src/render/`.
@@ -91,6 +96,8 @@ impl Template {
             Template::UpstreamSync => "upstream-sync.yml",
             Template::UpstreamSyncMerge => "upstream-sync-merge.sh",
             Template::UpstreamSyncPublish => "upstream-sync-publish.sh",
+            Template::ReleaseWorkflow => "release-workflow.yml",
+            Template::JsrPublish => "release-jsr.yml",
         }
     }
 }
@@ -117,6 +124,8 @@ struct Templates {
     upstream_sync: &'static str,
     upstream_sync_merge: &'static str,
     upstream_sync_publish: &'static str,
+    release_workflow: &'static str,
+    jsr_publish: &'static str,
 }
 
 impl Templates {
@@ -139,6 +148,8 @@ impl Templates {
         upstream_sync: include_str!("render/upstream-sync.yml"),
         upstream_sync_merge: include_str!("render/upstream-sync-merge.sh"),
         upstream_sync_publish: include_str!("render/upstream-sync-publish.sh"),
+        release_workflow: include_str!("render/release-workflow.yml"),
+        jsr_publish: include_str!("render/release-jsr.yml"),
     };
 
     #[cfg(test)]
@@ -162,6 +173,8 @@ impl Templates {
             Template::UpstreamSync => self.upstream_sync,
             Template::UpstreamSyncMerge => self.upstream_sync_merge,
             Template::UpstreamSyncPublish => self.upstream_sync_publish,
+            Template::ReleaseWorkflow => self.release_workflow,
+            Template::JsrPublish => self.jsr_publish,
         }
     }
 
@@ -185,6 +198,8 @@ impl Templates {
             Template::UpstreamSync => &mut self.upstream_sync,
             Template::UpstreamSyncMerge => &mut self.upstream_sync_merge,
             Template::UpstreamSyncPublish => &mut self.upstream_sync_publish,
+            Template::ReleaseWorkflow => &mut self.release_workflow,
+            Template::JsrPublish => &mut self.jsr_publish,
         };
         *slot = body;
         self
@@ -962,6 +977,11 @@ fn render_outputs(
             },
         );
     }
+    if parsed.release.is_some() && schema != Schema::Surface {
+        return Err(failure(
+            "[release] belongs to render_schema = 3 (the whole CI surface)",
+        ));
+    }
     let mut forgejo: BTreeMap<&str, Vec<&jobs::Plan>> = BTreeMap::new();
     for plan in inventory.jobs.values() {
         if plan.scheduler == jobs::Scheduler::Forgejo {
@@ -1000,6 +1020,10 @@ fn render_outputs(
             },
         );
     }
+    // `[release]`: the jobs of the release workflow are planned, not declared; they belong to the inventory
+    // and their workflow is rendered by `release`, not by the generic grouping above.
+    inventory.jobs.extend(release::plans(parsed)?);
+    outputs.extend(release::outputs(parsed, templates)?);
     outputs.insert(
         PathBuf::from(INVENTORY),
         serde_json::to_string_pretty(&inventory)? + "\n",

@@ -42,9 +42,9 @@ pub mod job_run;
 pub mod jobs;
 pub mod lock_refresh;
 pub mod push;
-pub mod release;
 #[cfg(unix)]
 pub mod read_set;
+pub mod release;
 pub mod render;
 pub mod resolve_lock;
 pub mod resolver;

@@ -354,9 +354,12 @@ fn command_environment(
             ),
         );
     }
+    let release = crate::release::command_arguments(&plan.command, &plan.job).is_some();
     if !jobs::is_self_checks_command(&plan.command) {
         env.insert("CCID_BIN".into(), exe.display().to_string());
-        env.insert("CHECKS".into(), plan.checks.join(","));
+        if !release {
+            env.insert("CHECKS".into(), plan.checks.join(","));
+        }
     }
     env
 }
@@ -651,6 +654,11 @@ fn execute_job(
             argv.push("--check".into());
             argv.push(check.into());
         }
+    } else if let Some(words) = crate::release::command_arguments(&plan.command, &plan.job) {
+        // A job of the release flow: `ccid release build|leg <os>|promote`, which runs the declared checks itself.
+        argv.push(exe.into());
+        argv.extend(words.into_iter().map(std::ffi::OsString::from));
+        argv.extend(["--repo", "."].into_iter().map(std::ffi::OsString::from));
     } else {
         argv.extend(plan.command.iter().map(Into::into));
     }

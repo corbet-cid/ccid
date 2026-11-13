@@ -37,6 +37,94 @@ pub const LEGS: [&str; 2] = ["windows", "macos"];
 pub const SUMS: &str = "SHA256SUMS";
 /// The draft of a commit is `build-<commit>`; the public release is `v<version>`.
 pub const DRAFT_PREFIX: &str = "build-";
+/// The jobs of the rendered `release` workflow (planned from `[release]`, never declared).
+pub const JOB: &str = "release";
+pub const PROMOTE: &str = "release-promote";
+/// The workflow all of them belong to.
+pub const WORKFLOW: &str = "release";
+/// The commands of those jobs (`ccid job-run` turns them into `ccid release ...`).
+pub const BUILD_COMMAND: &str = "ccid:release-build";
+pub const LEG_COMMAND: &str = "ccid:release-leg";
+pub const PROMOTE_COMMAND: &str = "ccid:release-promote";
+
+/// The job that runs the leg of `os`.
+pub fn leg_job(os: &str) -> String {
+    format!("release-{os}")
+}
+
+/// Which release command a job command stands for: `["release", "build"]`, `["release", "leg", "windows"]`, ...
+/// `job` is the job's name (a leg's name carries its operating system).
+pub fn command_arguments(command: &[String], job: &str) -> Option<Vec<String>> {
+    let [only] = command else { return None };
+    let words: &[&str] = match only.as_str() {
+        BUILD_COMMAND => &["release", "build"],
+        PROMOTE_COMMAND => &["release", "promote"],
+        LEG_COMMAND => {
+            let os = job.strip_prefix("release-")?;
+            return LEGS
+                .contains(&os)
+                .then(|| vec!["release".to_owned(), "leg".to_owned(), os.to_owned()]);
+        }
+        _ => return None,
+    };
+    Some(words.iter().map(|word| (*word).to_owned()).collect())
+}
+
+/// The plan of a release job (`release`, `release-<os>`, `release-promote`) of a manifest with `[release]`.
+pub(crate) fn job_plan(
+    manifest: &crate::Manifest,
+    name: &str,
+) -> Result<Option<crate::jobs::Plan>> {
+    let Some(config) = &manifest.release else {
+        return Ok(None);
+    };
+    let (label, command, checks) = if name == JOB {
+        ("linux", BUILD_COMMAND, config.build.clone())
+    } else if name == PROMOTE {
+        ("linux", PROMOTE_COMMAND, config.seal.clone())
+    } else if let Some(os) = name
+        .strip_prefix("release-")
+        .filter(|os| LEGS.contains(os) && config.legs.contains_key(*os))
+    {
+        (
+            LEGS.into_iter().find(|leg| leg == &os).unwrap_or("linux"),
+            LEG_COMMAND,
+            vec![config.legs[os].clone()],
+        )
+    } else {
+        return Ok(None);
+    };
+    // The linux jobs run in the persistent job environment the manifest declares, like every verdict job.
+    let runtime = match &manifest.runtime {
+        Some(config) if label == "linux" => Some(crate::runtime::Runtime {
+            config: config.clone(),
+            toolchain: manifest.toolchain.clone(),
+        }),
+        _ => None,
+    };
+    Ok(Some(crate::jobs::Plan {
+        job: name.to_owned(),
+        scheduler: crate::jobs::Scheduler::Forgejo,
+        checks,
+        workflow: WORKFLOW.to_owned(),
+        command: vec![command.to_owned()],
+        push_branches: Vec::new(),
+        refresh: None,
+        environment: BTreeMap::new(),
+        secrets: Vec::new(),
+        runs_on: Some(label.to_owned()),
+        paths: Vec::new(),
+        events: vec!["manual".to_owned()],
+        archive_inputs: false,
+        siblings: BTreeMap::new(),
+        provider: None,
+        platform: None,
+        timeout_minutes: None,
+        withheld: Vec::new(),
+        runtime,
+        mirror_optout: None,
+    }))
+}
 
 /// What a release is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -129,6 +217,18 @@ impl Config {
     /// The table's own rules, against the manifest's declared checks.
     pub(crate) fn validate(&self, manifest: &crate::Manifest) -> Result<()> {
         version::check_file(&self.version)?;
+        for (name, job) in &manifest.jobs {
+            let planned = name == JOB
+                || name == PROMOTE
+                || name
+                    .strip_prefix("release-")
+                    .is_some_and(|os| LEGS.contains(&os));
+            if planned || job.workflow() == WORKFLOW {
+                return Err(failure(format!(
+                    "[release] plans the jobs release, release-windows, release-macos and release-promote and owns the workflow release: [jobs.{name}] cannot be declared (it goes into [release])"
+                )));
+            }
+        }
         let known = |names: &[String], what: &str| -> Result<()> {
             if names.is_empty() {
                 return Ok(());
@@ -314,8 +414,17 @@ pub fn run(command: &Command) -> Result<std::process::ExitCode> {
         Command::Preflight { repo, commit } => flow::preflight_command(repo, commit.as_deref()),
         Command::Build { repo } => flow::build(repo),
         Command::Leg { os, repo } => flow::leg(repo, os),
-        Command::Put { files, repo, commit } => flow::put(repo, commit.as_deref(), files),
-        Command::Fetch { names, into, repo, commit } => flow::fetch(repo, commit.as_deref(), names, into),
+        Command::Put {
+            files,
+            repo,
+            commit,
+        } => flow::put(repo, commit.as_deref(), files),
+        Command::Fetch {
+            names,
+            into,
+            repo,
+            commit,
+        } => flow::fetch(repo, commit.as_deref(), names, into),
         Command::Sums { dir } => flow::sums(dir),
         Command::Promote { repo } => flow::promote(repo),
         Command::Discard { repo, commit } => flow::discard(repo, commit.as_deref()),
@@ -362,13 +471,19 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_refused() {
-        assert!(toml::from_str::<Config>("kind = \"binary\"\nversion = \"Cargo.toml\"\nknob = 1\n").is_err());
+        assert!(toml::from_str::<Config>(
+            "kind = \"binary\"\nversion = \"Cargo.toml\"\nknob = 1\n"
+        )
+        .is_err());
     }
 
     #[test]
     fn registries_are_a_closed_set() {
         let ok = config("kind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"p\"]\nregistries = [\"crates\", \"jsr\"]\n");
         assert_eq!(ok.registries, vec![Registry::Crates, Registry::Jsr]);
-        assert!(toml::from_str::<Config>("kind = \"library\"\nversion = \"Cargo.toml\"\nregistries = [\"homebrew\"]\n").is_err());
+        assert!(toml::from_str::<Config>(
+            "kind = \"library\"\nversion = \"Cargo.toml\"\nregistries = [\"homebrew\"]\n"
+        )
+        .is_err());
     }
 }
