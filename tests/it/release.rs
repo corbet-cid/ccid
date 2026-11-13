@@ -90,6 +90,42 @@ impl Fixture {
         }
     }
 
+    /// The fixture with its CI files rendered and committed (what `ccid job-run` checks before it runs).
+    fn rendered(manifest: &str, version: &str) -> Fixture {
+        let mut fixture = Fixture::new(manifest, version);
+        ccid::render::render(fixture.repo.path(), Path::new(".ci/ccid.toml"), false).unwrap();
+        git(fixture.repo.path(), &["add", "-A"]);
+        git(fixture.repo.path(), &["commit", "-q", "-m", "rendered"]);
+        fixture.sha = git(fixture.repo.path(), &["rev-parse", "HEAD"]);
+        fixture.forge.state.lock().unwrap().head = fixture.sha.clone();
+        fixture
+    }
+
+    /// `ccid job-run --local` of one job, as the rendered workflow's shim starts it.
+    fn job_run(&self, job: &str) -> Output {
+        let source = self.repo.path().display().to_string();
+        let owner = OWNER_REPO.split('/').next().unwrap();
+        self.ccid(
+            &[
+                "job-run",
+                "--local",
+                "--source",
+                &source,
+                "--sha",
+                &self.sha,
+                "--job",
+                job,
+                "--repository",
+                OWNER_REPO,
+                "--server-url",
+                &self.forge.url,
+                "--owner",
+                owner,
+            ],
+            &[],
+        )
+    }
+
     fn ccid(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
         let outputs = self.state.path().join("github-output");
         let mut command = Command::new(env!("CARGO_BIN_EXE_ccid"));
@@ -476,4 +512,24 @@ fn a_leg_never_sees_a_published_release_and_a_public_draft_name_is_final() {
     fs::write(&file, "late").unwrap();
     let put = fixture.ccid(&["release", "put", file.to_str().unwrap()], &[]);
     assert!(!put.status.success());
+}
+
+#[test]
+fn the_release_jobs_of_a_rendered_workflow_run_as_ccid_release_commands() {
+    let fixture = Fixture::rendered(&binary(), "0.3.0");
+    let built = fixture.job_run("release");
+    assert!(built.status.success(), "{}", text(&built));
+    assert!(fixture.forge.release(&fixture.draft_tag()).is_some());
+    assert!(fixture.outputs().contains("legs=windows macos\n"), "{}", fixture.outputs());
+    for leg in ["release-windows", "release-macos"] {
+        let ran = fixture.job_run(leg);
+        assert!(ran.status.success(), "{leg}: {}", text(&ran));
+    }
+    let promoted = fixture.job_run("release-promote");
+    assert!(promoted.status.success(), "{}", text(&promoted));
+    assert!(fixture.forge.release("v0.3.0").is_some());
+    // A job the manifest does not plan is unknown, not a release job.
+    let unknown = fixture.job_run("release-linux");
+    assert!(!unknown.status.success());
+    assert!(text(&unknown).contains("Unknown job"), "{}", text(&unknown));
 }

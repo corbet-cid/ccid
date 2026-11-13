@@ -141,6 +141,13 @@ hand, labels are `linux`, `windows` or `macos`, retired CI files go once their r
 unknown ones are refused. `ccid surface report` and `ccid surface plan` show what a render does with each
 file. See [surface.md](surface.md). Schemas 1 and 2 render byte for byte as before.
 
+## The release flow
+
+A manifest with a `[release]` table (`render_schema = 3`) gets `.forgejo/workflows/release.yml`: the release
+job, the platform legs and the promotion in one run, ordered by `needs`; with `jsr` among its registries also
+`.github/workflows/jsr-publish.yml`. The jobs are planned from the table, never declared. See
+[release.md](release.md).
+
 ## Forgejo Actions
 
 A job with `scheduler = "forgejo"` renders to a native Forgejo Actions workflow,

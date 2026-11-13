@@ -82,6 +82,14 @@ deleted; one in a legacy or unknown path is refused. A refused render writes and
 surface root), or, in the same directory, its file name, as a whole word. The search reads tracked text
 files up to 1 MiB; the manifest counts through its parsed strings only.
 
+## The release families
+
+The hand-written release files (`.forgejo/workflows/release.yml`, `release-macos.yml`,
+`.github/workflows/release.yml`, `.ci/release-check.py`) are legacy files whose replacement is the rendered
+release flow ([release.md](release.md)). They are live legacy files (render replaces or deletes them) in a
+repository whose manifest declares `[release]`; in one that does not they are refused, so a repository keeps
+its release until it has the new one.
+
 ## Report and plan
 
 ```sh
