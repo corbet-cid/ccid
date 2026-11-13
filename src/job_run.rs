@@ -7,7 +7,8 @@
 //! 1. optionally claim a stable source directory (`CCID_SOURCE_ROOT`, slots per repository and job, claimed by a lock
 //!    directory that holds the pid and start time of this process; the process becomes the check by `exec`, so the pid
 //!    lives as long as the job and no file descriptor is inherited by daemons),
-//! 2. fetch the exact commit (a few attempts against the runner's local copy, then against the forge itself), Git LFS
+//! 2. fetch the exact commit (once through the runner's own routing, which may send it to a local copy; if that does not have it,
+//!    once from the forge itself), Git LFS
 //!    content through a credential helper, sibling repositories read-only,
 //! 3. check that the generated adapters match this binary (`render --check`),
 //! 4. run the declared command of the job.
@@ -49,8 +50,6 @@ pub struct Pace {
     pub git: std::ffi::OsString,
     /// A shared Git LFS object store (`CCID_LFS_STORAGE`, named by the runner): every slot and repository of that runner then fetches an object once.
     pub lfs_storage: Option<PathBuf>,
-    pub attempts: u32,
-    pub backoff: Duration,
     pub slot_poll: Duration,
     pub slot_timeout: Duration,
 }
@@ -62,8 +61,6 @@ impl Default for Pace {
             lfs_storage: std::env::var_os("CCID_LFS_STORAGE")
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from),
-            attempts: 3,
-            backoff: Duration::from_secs(5),
             slot_poll: Duration::from_secs(5),
             slot_timeout: Duration::from_secs(
                 std::env::var("CI_TIMEOUT")
@@ -153,8 +150,14 @@ fn run_ok(command: &mut Command, what: &str) -> Result<()> {
     }
 }
 
-/// Fetch `want` (a commit id or a ref) into `dir`: `attempts` against the runner's local copy, then `attempts` against the forge
-/// itself (the system and counted git configuration, which route a fetch to the local copy, are switched off).
+/// Fetch `want` (a commit id or a ref) into `dir`: once through the runner's own routing and, if that fails, once from the forge itself.
+///
+/// A runner may send a fetch of the forge's repositories to a local copy (its system git configuration rewrites the URL). That copy is
+/// a push mirror and lags a push by seconds, while the job a push starts is picked up within a fraction of a second, so the commit
+/// the event names is often not in the copy yet ("upload-pack: not our ref"). The forge is authoritative and has every commit a push
+/// event names: when the nearer copy cannot serve the fetch the system and counted git configuration that route it are switched off
+/// and the same fetch goes to the forge. There is no waiting and no repetition: a copy that is behind costs one failed local fetch,
+/// never a pause, and a failure of the forge itself is a failure of the job.
 pub fn fetch(dir: &Path, want: &str, token: &str, pace: &Pace) -> Result<()> {
     let header = format!("http.extraHeader=Authorization: token {token}");
     let attempt = |forge_itself: bool| {
@@ -172,22 +175,12 @@ pub fn fetch(dir: &Path, want: &str, token: &str, pace: &Pace) -> Result<()> {
             .map(|status| status.success())
             .unwrap_or(false)
     };
-    for round in 0..pace.attempts {
-        if attempt(false) {
-            return Ok(());
-        }
-        if round + 1 < pace.attempts {
-            sleep(pace.backoff);
-        }
+    if attempt(false) {
+        return Ok(());
     }
     eprintln!("local copy lacks {want}, fetching from the forge");
-    for round in 0..pace.attempts {
-        if attempt(true) {
-            return Ok(());
-        }
-        if round + 1 < pace.attempts {
-            sleep(pace.backoff);
-        }
+    if attempt(true) {
+        return Ok(());
     }
     Err(failure(format!("cannot fetch {want}")))
 }
@@ -542,8 +535,6 @@ mod tests {
         Pace {
             git: "git".into(),
             lfs_storage: None,
-            attempts: 2,
-            backoff: Duration::from_millis(1),
             slot_poll: Duration::from_millis(5),
             slot_timeout: Duration::from_millis(200),
         }
@@ -577,17 +568,83 @@ mod tests {
         assert!(claim_slot(base.path(), 1, std::process::id(), &quick()).is_err());
     }
 
-    /// A fake `git` first on PATH records its calls and fails `fail` times for `fetch`, before the forge fallback succeeds.
+    /// A fake `git` records the git configuration each call runs with; its `fetch` succeeds only when the routing rules are switched off
+    /// (the system configuration is /dev/null), the way a fetch the runner's local copy cannot serve is answered by the forge.
+    #[cfg(unix)]
+    fn fake_git(dir: &Path, fetch_succeeds_with_rules: bool) -> (PathBuf, PathBuf) {
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = dir.join("log");
+        let rule = if fetch_succeeds_with_rules {
+            "exit 0"
+        } else {
+            "[ \"$GIT_CONFIG_SYSTEM\" = /dev/null ] && exit 0 || exit 1"
+        };
+        let script = format!(
+            "#!/bin/sh\necho \"$GIT_CONFIG_SYSTEM|$GIT_CONFIG_COUNT|$*\" >> {}\n\
+             case \"$*\" in *fetch*) {rule};; esac\nexit 0\n",
+            log.display()
+        );
+        write_stub(&bin.join("git"), &script);
+        (bin.join("git"), log)
+    }
+
+    #[cfg(unix)]
+    fn fetch_calls(log: &Path) -> Vec<String> {
+        fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("fetch"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A copy that cannot serve the fetch costs one failed local fetch and one fetch from the forge with the rules switched off:
+    /// no second try on the copy, no pause between the two.
     #[cfg(unix)]
     #[test]
-    fn fetch_retries_the_copy_then_asks_the_forge_with_the_rules_switched_off() {
+    fn fetch_asks_the_copy_once_then_the_forge_once_with_the_rules_switched_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (git, log) = fake_git(dir.path(), false);
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        let mut pace = quick();
+        pace.git = git.into();
+        assert!(fetch(&work, "abc", "token", &pace).is_ok());
+        let fetches = fetch_calls(&log);
+        assert_eq!(
+            fetches.len(),
+            2,
+            "one failed fetch through the rules, one success on the forge: {fetches:?}"
+        );
+        assert!(!fetches[0].starts_with("/dev/null|"), "{fetches:?}");
+        assert!(fetches[1].starts_with("/dev/null|0|"), "{fetches:?}");
+    }
+
+    /// A copy that has the commit is the only place asked.
+    #[cfg(unix)]
+    #[test]
+    fn fetch_stops_at_the_copy_when_the_copy_has_the_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (git, log) = fake_git(dir.path(), true);
+        let work = dir.path().join("work");
+        fs::create_dir_all(&work).unwrap();
+        let mut pace = quick();
+        pace.git = git.into();
+        assert!(fetch(&work, "abc", "token", &pace).is_ok());
+        assert_eq!(fetch_calls(&log).len(), 1);
+    }
+
+    /// A forge that cannot serve the commit either is a failure after exactly two fetches: the forge is authoritative, so nothing is repeated.
+    #[cfg(unix)]
+    #[test]
+    fn fetch_fails_after_one_fetch_on_the_copy_and_one_on_the_forge() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let log = dir.path().join("log");
         let script = format!(
-            "#!/bin/sh\necho \"$GIT_CONFIG_SYSTEM|$*\" >> {}\n\
-             case \"$*\" in *fetch*) [ \"$GIT_CONFIG_SYSTEM\" = /dev/null ] && exit 0 || exit 1;; esac\nexit 0\n",
+            "#!/bin/sh\necho \"$GIT_CONFIG_SYSTEM|$GIT_CONFIG_COUNT|$*\" >> {}\ncase \"$*\" in *fetch*) exit 1;; esac\nexit 0\n",
             log.display()
         );
         write_stub(&bin.join("git"), &script);
@@ -595,20 +652,107 @@ mod tests {
         fs::create_dir_all(&work).unwrap();
         let mut pace = quick();
         pace.git = bin.join("git").into();
-        let result = fetch(&work, "abc", "token", &pace);
-        assert!(result.is_ok());
-        let calls = fs::read_to_string(&log).unwrap();
-        let fetches: Vec<&str> = calls
-            .lines()
-            .filter(|line| line.contains("fetch"))
-            .collect();
-        assert_eq!(
-            fetches.len(),
-            3,
-            "two failed attempts on the copy, one success on the forge: {calls}"
+        let error = fetch(&work, "abc", "token", &pace).unwrap_err();
+        assert!(error.to_string().contains("cannot fetch abc"), "{error}");
+        assert_eq!(fetch_calls(&log).len(), 2);
+    }
+
+    /// The real race, with real git: the runner's system configuration rewrites the forge's URL to a local copy (`insteadOf`, which has no
+    /// fallback of its own), the copy is a push behind, and the job asks for the commit the push created. The first fetch fails inside the
+    /// copy ("not our ref"); the second must reach the forge. `GIT_CONFIG_COUNT=0` alone would not leave the copy: the rewrite lives in
+    /// the system configuration the runner names with GIT_CONFIG_SYSTEM.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_lags_the_push_is_bypassed_by_one_fetch_from_the_forge() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |dir: &Path, args: &[&str]| -> String {
+            let output = Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        let forge = root.join("forge/o/r.git");
+        let copy = root.join("copy/o/r.git");
+        let source = root.join("source");
+        for bare in [&forge, &copy] {
+            fs::create_dir_all(bare).unwrap();
+            run(bare, &["init", "--quiet", "--bare"]);
+        }
+        fs::create_dir_all(&source).unwrap();
+        run(&source, &["init", "--quiet", "-b", "main"]);
+        fs::write(source.join("f"), "one").unwrap();
+        run(&source, &["add", "f"]);
+        run(&source, &["commit", "--quiet", "-m", "one"]);
+        let first = run(&source, &["rev-parse", "HEAD"]);
+        run(
+            &source,
+            &["push", "--quiet", copy.to_str().unwrap(), "main"],
         );
-        assert!(fetches[2].starts_with("/dev/null|"));
-        assert!(!fetches[0].starts_with("/dev/null|"));
+        fs::write(source.join("f"), "two").unwrap();
+        run(&source, &["commit", "--quiet", "-am", "two"]);
+        let pushed = run(&source, &["rev-parse", "HEAD"]);
+        run(
+            &source,
+            &["push", "--quiet", forge.to_str().unwrap(), "main"],
+        );
+        assert_ne!(first, pushed);
+        // The runner: the forge's URL is rewritten to the copy, which has the first commit and not the pushed one.
+        let system = root.join("runner-gitconfig");
+        fs::write(
+            &system,
+            format!(
+                "[url \"file://{copy}/\"]\n\tinsteadOf = file://{forge}/\n[uploadpack]\n\tallowReachableSHA1InWant = true\n",
+                copy = root.join("copy").display(),
+                forge = root.join("forge").display()
+            ),
+        )
+        .unwrap();
+        // The runner names its system configuration in the environment of every job, so the wrapper only sets it when the caller did not.
+        let wrapper = root.join("bin/git");
+        fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        write_stub(
+            &wrapper,
+            &format!(
+                "#!/bin/sh\n: \"${{GIT_CONFIG_SYSTEM:={}}}\"\nexport GIT_CONFIG_SYSTEM\nexec git \"$@\"\n",
+                system.display()
+            ),
+        );
+        let work = root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        run(&work, &["init", "--quiet"]);
+        run(
+            &work,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", forge.display()),
+            ],
+        );
+        let mut pace = quick();
+        pace.git = wrapper.into();
+        // The control: through the runner's rule the pushed commit is not there, so the test does exercise the copy.
+        let through_the_rule = Command::new(&pace.git)
+            .current_dir(&work)
+            .args(["fetch", "--quiet", "--depth", "1", "origin", &pushed])
+            .output()
+            .unwrap();
+        assert!(
+            !through_the_rule.status.success(),
+            "the copy must lack the pushed commit"
+        );
+        assert!(fetch(&work, &pushed, "token", &pace).is_ok());
+        assert_eq!(run(&work, &["rev-parse", "FETCH_HEAD"]), pushed);
     }
 
     /// A repository that tracks files with LFS gets the runner's shared object store configured before the pull, and none without one.
