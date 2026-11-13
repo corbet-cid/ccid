@@ -100,8 +100,10 @@ say "merged $commit into $SYNC_BRANCH: $merge"
 
 # 3b. Ownership, asked of git alone (not of any program in the merged tree, which could vouch for itself): outside the paths the
 # downstream declares as its own, the merge must equal the upstream commit exactly. A path git has to quote is refused.
+# --no-renames: with rename detection git lists a moved file by its NEW path only, so an upstream file deleted from outside the
+# downstream's paths and re-added byte for byte inside them would show only the owned side. Both sides must be listed.
 policy=$(git show "$tip:ccvl-downstream.json" 2>/dev/null) || fail "ccvl-downstream.json is missing on $SYNC_BRANCH: nothing is merged"
-stray=$(git -c core.quotepath=false diff --name-only "$commit" "$merge" | jq -Rrs --argjson policy "$policy" '
+stray=$(git -c core.quotepath=false diff --no-renames --name-only "$commit" "$merge" | jq -Rrs --argjson policy "$policy" '
   ($policy.allowed_paths // []) as $allowed
   | split("\n") | map(select(length > 0))
   | map(select(. as $path | ($allowed | any(. as $entry | if ($entry | endswith("/")) then ($path | startswith($entry)) else ($path == $entry) end)) | not))

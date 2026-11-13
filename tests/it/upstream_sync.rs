@@ -198,6 +198,7 @@ impl Forge {
 
     /// A commit on the upstream; returns its id. `green` records a successful ci run for it.
     fn upstream_commit(&self, file: &str, text: &str, green: bool) -> String {
+        fs::create_dir_all(self.up_work.join(file).parent().unwrap()).unwrap();
         fs::write(self.up_work.join(file), text).unwrap();
         git(&self.up_work, &["add", "."]);
         git(
@@ -730,4 +731,99 @@ fn a_change_outside_the_downstreams_own_paths_is_refused_by_git_alone() {
     let commit = forge.upstream_commit("code.txt", "two\n", true);
     let merged = forge.merge_step(&commit);
     assert!(merged.ok(), "{}", merged.stderr());
+}
+
+/// A forge whose upstream carries the file `.agent/guard.sh` and whose downstream holds the identical file: the upstream commit that
+/// brought it was merged and published once, cleanly, so a later change to it is the only difference between the two sides.
+fn forge_with_agent_file() -> Forge {
+    let forge = Forge::new();
+    let first = forge.upstream_commit(
+        ".agent/guard.sh",
+        "echo guard\necho more\necho lines\necho here\n",
+        true,
+    );
+    let merged = forge.merge_step(&first);
+    assert!(merged.ok(), "{}", merged.stderr());
+    let published = forge.publish_step(&merged);
+    assert!(published.ok(), "{}", published.stderr());
+    // The downstream's working clone follows its published main.
+    git(&forge.down_work, &["fetch", "--quiet", "origin"]);
+    git(
+        &forge.down_work,
+        &["reset", "--quiet", "--hard", "origin/main"],
+    );
+    forge
+}
+
+/// A new green upstream commit, merged: git alone must refuse it, naming `path`, and nothing may move.
+fn assert_refused_by_git(forge: &Forge, path: &str) {
+    let before = forge.down_main();
+    let commit = forge.upstream_commit("code.txt", "two\n", true);
+    let merged = forge.merge_step(&commit);
+    assert!(!merged.ok(), "the merge was accepted: {}", merged.stderr());
+    assert!(
+        merged.stderr().contains("outside the downstream's own") && merged.stderr().contains(path),
+        "{}",
+        merged.stderr()
+    );
+    assert_eq!(merged.var("SYNC_PUSH"), None);
+    assert_eq!(forge.down_main(), before);
+}
+
+fn down_push(forge: &Forge, message: &str) {
+    git(&forge.down_work, &["commit", "--quiet", "-m", message]);
+    git(
+        &forge.down_work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/main"],
+    );
+}
+
+#[test]
+fn a_tampered_agent_file_is_refused_by_git_alone() {
+    // The first check: an untouched `.agent/` file is no difference at all.
+    let forge = forge_with_agent_file();
+    let commit = forge.upstream_commit("code.txt", "two\n", true);
+    let merged = forge.merge_step(&commit);
+    assert!(merged.ok(), "{}", merged.stderr());
+
+    // Changed: the file the upstream gates on is rewritten in the downstream.
+    let forge = forge_with_agent_file();
+    forge.downstream_commit(".agent/guard.sh", "echo tampered\n");
+    assert_refused_by_git(&forge, ".agent/guard.sh");
+
+    // Added: a new file in the upstream's `.agent/` directory.
+    let forge = forge_with_agent_file();
+    forge.downstream_commit(".agent/extra.sh", "echo extra\n");
+    assert_refused_by_git(&forge, ".agent/extra.sh");
+
+    // Deleted: the guard is gone.
+    let forge = forge_with_agent_file();
+    git(&forge.down_work, &["rm", "--quiet", ".agent/guard.sh"]);
+    down_push(&forge, "downstream: drop the guard");
+    assert_refused_by_git(&forge, ".agent/guard.sh");
+
+    // Only its mode: the execute bit.
+    let forge = forge_with_agent_file();
+    git(
+        &forge.down_work,
+        &["update-index", "--chmod=+x", ".agent/guard.sh"],
+    );
+    down_push(&forge, "downstream: make the guard executable");
+    assert_refused_by_git(&forge, ".agent/guard.sh");
+}
+
+#[test]
+fn a_tampered_agent_file_moved_into_an_owned_directory_is_not_a_rename_git_overlooks() {
+    // The file leaves `.agent/` and its bytes appear unchanged under the owned `opportunities/`. Git's rename detection reports
+    // that as ONE path, the new one, which is the downstream's own: the guard must ask for both sides of a rename.
+    let forge = forge_with_agent_file();
+    git(
+        &forge.down_work,
+        &["mv", ".agent/guard.sh", "opportunities/guard.sh"],
+    );
+    down_push(
+        &forge,
+        "downstream: move the guard into the owned directory",
+    );
+    assert_refused_by_git(&forge, ".agent/guard.sh");
 }

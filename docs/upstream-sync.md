@@ -34,6 +34,9 @@ time per repository, the job runs on the label of `downstream-check`):
    pushes nothing**; the conflicting paths are in the log. Then git alone (no program of the
    merged tree, which could vouch for itself) compares the merge with the upstream commit:
    every path outside the branch's own `allowed_paths` must be identical, or the run is red.
+   A changed, added, deleted or mode-changed file (a tampered `.agent/` file, say) is named and refused; a file moved
+   out of the upstream's paths into the downstream's own is refused too (the diff is taken without rename detection,
+   which would list only the owned destination).
 2. **Check.** The checks run on a shallow, detached, single-commit export of the merge, the
    layout of every other job (Git LFS files materialised from the shared store, the upstream
    and the downstream, in that order). The central `ccid job-run --local` runs the declared

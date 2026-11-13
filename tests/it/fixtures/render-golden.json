@@ -9,7 +9,7 @@
     ".ci/jobs.json": "6ff3c07a1fc90e451e3762eeea7542674a9de3c1698f1efe4478d57410a082c8",
     ".forgejo/workflows/ci.yml": "f3ec1bd8f0b00f65f0d73c3d3366acb0919c82250df70ca2e3362103cc99977e",
     ".forgejo/workflows/downstream-check.yml": "7691f8d1d41f34317d076a2668ae6ef4bb75f7a48abcc27304424da1d020ad8b",
-    ".forgejo/workflows/upstream-sync.yml": "903ca35739ab21dd22dd77207875d66f7e4af611965d20c8ff0617290f4c9df7",
+    ".forgejo/workflows/upstream-sync.yml": "df830ee9d3096e7db0e7c3be2bb02ebb057e8317e8a0ca28e2a8e6a487c669dd",
     ".github/workflows/release-mirror.yml": "13903fcb53790b7f86e40f894a887d41e580115b40aa215aa38f7a26b057f216",
     ".gitlab-ci.yml": "c0fdfa496a958e820b9b3109065e7ea3e9e64ef3eae933bb3919f34edf978fb6"
   },
