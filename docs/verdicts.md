@@ -44,7 +44,7 @@ this holds.
 | `layout` equals the digest of the tree's top-level entry names now | a top-level entry the measurement never saw is an input outside the measured set: it invalidates the narrowing |
 | the kind is not `nix` | a nix check keys every file |
 | the declared inputs select at least one file | |
-| the run that stores the verdict **proves the read-set on that run** (below) | the pass is stored under the whole-tree key, and `verdict-narrowing` carries `remeasure` |
+| the run that stores the verdict **proves the read-set on that run** (below) | the pass is stored under the whole-tree key, `verdict-narrowing` carries `remeasure`, and the store [measures the read-set again](#re-measuring-a-stale-read-set) |
 
 The narrowed `tree` is the digest (same construction as the whole-tree digest) of the committed
 files that the `cache_inputs` globs select, matched by git's own pathspec matcher with `:(glob)`
@@ -83,8 +83,65 @@ on that run, that the read-set suffices:
 4. **Fail:** the measurement is stale (or the check is red, which only the next step can tell).
    `verdict-narrowing` is emitted with `scope = tree`, `remeasure = true` and the failure. The
    check then runs on the whole tree as it always did; its pass is stored under the **whole-tree**
-   key, and a red check stays red. Run `ccid measure-inputs` again and put the new lines on the
-   check. Until then each executing run pays the proving attempt before the whole-tree run.
+   key, and a red check stays red. A pass there shows that the read-set was stale and not the
+   check red, and the store then [measures the read-set again](#re-measuring-a-stale-read-set),
+   once; a person can also run `ccid measure-inputs` and put the new lines on the check.
+
+#### Re-measuring a stale read-set
+
+A failed proof means the measurement the key was narrowed from is stale. The run cannot correct
+the manifest (CI never commits), and proving a stale read-set on every miss would run every
+executing check twice, so the verdict store keeps the finding and the check measures itself
+again, **once per staleness event**, driven by events only (no timer, no schedule). The state is
+three small files per check definition below `verdicts/measured/` (the slot: a digest of the
+repository, the check's name and the digest of its definition, so an edited check starts over):
+
+| File | Meaning |
+|---|---|
+| `<slot>.stale.json` | The marker: *the read-set with these `inputs` is stale for this check definition since this commit.* `state` is `stale`, or `refused` |
+| `<slot>.candidate.json` | The read-set one traced run measured after the marker was set. Not trusted: it keys nothing until a run proves it |
+| `<slot>.proven.json` | A read-set a proving run passed with (`proof`): the check's current measured set |
+
+1. **Set.** A failed proof **followed by a passing whole-tree run** writes the marker. (A red
+   check fails both runs and says nothing about the read-set, so it never sets one.) The marker
+   names the digest of the read-set that failed, the digest of the check's definition and the
+   commit; `read-set-stale` reports it.
+2. **Skip.** While the marker applies to a key's read-set, a miss does **not** attempt the proof:
+   the check runs once on the whole tree, never twice (`read-set-skip`).
+3. **Trace once.** The next executing run of that check runs once on the whole tree under the
+   `ccid measure-inputs` tracer (`strace --seccomp-bpf`: it stops only at the traced system calls)
+   with every compile cache off, instead of in the cached executor. That run is the check's run
+   and its pass is stored under the whole-tree key like any whole-tree pass. The read-set it
+   touched becomes the check's **candidate** in the store, with its provenance (the same
+   `tool`, `commands`, `inputs`, `layout` and `date` a manifest carries, plus the commit, the
+   producer and the producing binary). Nothing is written to the repository. Cost: one traced run
+   per staleness event; a check that fails under the tracer is a failed check and leaves
+   no candidate. When the tracer cannot run here (no `strace` on `PATH`, ptrace refused, a local
+   build, a run inside a `ccid check`) the run is the ordinary one, `read-set-measure` reports
+   `unavailable`, and the next executing run tries again.
+4. **Prove and clear.** The next miss proves the candidate exactly as a manifest's read-set is
+   proven. A pass makes the candidate the check's proven set, stores the verdict under its
+   narrowed key with the proof, and clears the marker: **the passing proof is the clearing
+   rule** (`read-set-proven`). A failure refuses the measurement (`refused`, `read-set-refused`):
+   the tracer missed a read it cannot see, so measuring it again would only repeat itself, and
+   neither a proof nor a trace is attempted for that read-set again; a person measures the check
+   with `ccid measure-inputs`, whose new `inputs` digest ends the refusal. A traced check that
+   lists the repository root has no narrower read-set: the whole tree is stored as its measured
+   set, which ends the staleness.
+5. **Lookup.** A key's read-set is the newest proven set in the store for the check's definition,
+   else the manifest's own. A stored set applies only while the manifest still carries the
+   measurement it descends from (`base`), only to a check that declares both `cache_inputs` and
+   their provenance, and only while it validates as a manifest's would (the definition's digest,
+   the list's digest, the layout). A new measurement a person puts on the check, a hand edit of
+   the list and an edited check each start over. `verdict-narrowing` reports which set keyed the
+   check (`measured`: `manifest` or `store`).
+
+The files are read with the verdict record's discipline: a symlink, an oversized or malformed
+file, a file that describes another check definition or whose list is not the measured one, and a
+file written by a ccid the release channel does not name are ignored, never trusted. Ignoring a
+file costs a whole-tree key or a new measurement and cannot make a verdict answer for a tree that
+no run proved. Not staleness events, and so measured by a person as before: an edit of the check
+(its definition digest changes) and a new top-level entry (the layout changes).
 
 Why a copy and not a tracer: proving the read-set by tracing the run (`strace`, as
 `measure-inputs` does) sees every read, but it costs a tenth of the run's CPU and between

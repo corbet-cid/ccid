@@ -2054,6 +2054,59 @@ fn stub_ccid(directory: &Path) {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// A `strace` on PATH for the traced run. It is no tracer: it runs the check's script itself and
+/// writes the trace of what the test says the check read (`strace-reads`, one path per line;
+/// `LISTROOT` lists the repository root). `strace-mode` is `ok`, or `broken` (the tracer cannot
+/// run here). Every traced check run leaves a line in `strace-traced`, every call its arguments in
+/// `strace-log`. The probe (`... -- true`) succeeds in the `ok` mode and leaves no trace line.
+#[cfg(unix)]
+fn stub_strace(directory: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(directory).unwrap();
+    let path = directory.join("strace");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+here=$(dirname "$0")
+mode=$(cat "$here/strace-mode" 2>/dev/null || echo broken)
+echo "$*" >> "$here/strace-log"
+prefix=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) prefix=$2; shift 2 ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+if [ "$mode" = broken ]; then
+  echo "strace: ptrace(PTRACE_TRACEME): Operation not permitted" >&2
+  exit 1
+fi
+if [ "$1" = true ]; then
+  exit 0
+fi
+echo traced >> "$here/strace-traced"
+env > "$here/strace-env"
+sh .ci/check.sh
+code=$?
+root=$(pwd)
+{
+  printf 'execve("/bin/sh", ["sh", ".ci/check.sh"], ["PATH=/usr/bin", "CCID_TARGET_LOCK_HELD=/nonexistent/stage"]) = 0\n'
+  while read -r name; do
+    if [ "$name" = LISTROOT ]; then
+      printf 'getdents64(3<%s>, 0x7f0000 /* 3 entries */, 32768) = 80\n' "$root"
+    elif [ -n "$name" ]; then
+      printf 'openat(AT_FDCWD<%s>, "%s", O_RDONLY) = 3<%s/%s>\n' "$root" "$name" "$root" "$name"
+    fi
+  done < "$here/strace-reads"
+} > "$prefix.4242"
+exit $code
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[cfg(unix)]
 fn proof_run(root: &Path, env: &Environment) -> crate::Result<()> {
     crate::cached::run_cached_with_environment(
@@ -2087,7 +2140,13 @@ impl ProofRun {
         fs::create_dir_all(&store).unwrap();
         let counter = scratch.path().join("counter");
         stub_ccid(&scratch.path().join("bin"));
+        stub_strace(&scratch.path().join("bin"));
+        // Measurements made by this build name a released revision (a local build reports
+        // `unversioned`, which no key narrows on).
+        crate::narrowing::test_revision::set(Some(&"a".repeat(40)));
         let mut env = store_environment(&store);
+        // The suite itself may run inside a `ccid check`, whose marker a traced run refuses.
+        env.remove(OsStr::new("CCID_TARGET_LOCK_HELD"));
         env.insert("CI".into(), "true".into());
         env.insert("VK_COUNTER".into(), counter.as_os_str().to_owned());
         let path = std::env::join_paths(std::iter::once(scratch.path().join("bin")).chain(
@@ -2134,6 +2193,37 @@ impl ProofRun {
         self.fixture.path()
     }
 
+    /// What the tracer stub does from now on: its mode, and the paths the check "read".
+    fn tracer(&self, mode: &str, reads: &[&str]) {
+        let bin = self.scratch.path().join("bin");
+        fs::write(bin.join("strace-mode"), mode).unwrap();
+        fs::write(
+            bin.join("strace-reads"),
+            reads
+                .iter()
+                .map(|path| format!("{path}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+    }
+
+    /// How many times the check ran under the tracer.
+    fn traced(&self) -> usize {
+        fs::read_to_string(self.scratch.path().join("bin/strace-traced"))
+            .map_or(0, |text| text.lines().count())
+    }
+
+    /// The arguments of every call to the tracer stub.
+    fn tracer_calls(&self) -> Vec<String> {
+        fs::read_to_string(self.scratch.path().join("bin/strace-log"))
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    fn slot(&self) -> read_sets::Slot {
+        self.narrowed().slot().expect("a narrowed key has a slot")
+    }
+
     fn narrowed(&self) -> Prepared {
         prepared_for(self.root(), &self.env, &self.checks["verify"])
     }
@@ -2155,13 +2245,21 @@ impl ProofRun {
             .collect();
         crate::cached::prove_runnable(
             self.root(),
-            &[self.narrowed()],
+            &mut [self.narrowed()],
             &["verify".to_owned()],
+            &self.checks,
             &executor,
             "proof-run",
             ".ci/ccid.toml",
             &self.env,
         )
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProofRun {
+    fn drop(&mut self) {
+        crate::narrowing::test_revision::set(None);
     }
 }
 
@@ -2317,4 +2415,552 @@ fn an_optional_file_the_measurement_probed_for_changes_the_key_when_it_appears()
     fs::write(root.join("docs/optional.toml"), "level = 2\n").unwrap();
     commit_all(root, "and changes");
     assert_ne!(prepared_for(root, &env, &declared).key, present.key);
+}
+
+// ---- a stale read-set measures itself again, once (`read_sets`) ----
+
+/// A commit inside the read-set: the check reruns.
+#[cfg(unix)]
+fn touch_source(root: &Path, revision: u32) {
+    fs::write(
+        root.join("src/lib.rs"),
+        format!("pub fn value() -> u32 {{ {revision} }}\n"),
+    )
+    .unwrap();
+    commit_all(root, &format!("source {revision}"));
+}
+
+/// The check starts to read `docs/guide.md`, a file the manifest's measurement never saw.
+#[cfg(unix)]
+fn start_reading_docs(root: &Path) {
+    fs::write(
+        root.join(".ci/check.sh"),
+        script("grep -q '^# guide' docs/guide.md"),
+    )
+    .unwrap();
+    commit_all(root, "the check reads docs");
+}
+
+/// A proven run, then a check that reads a file the measurement never saw: the proof fails, the
+/// whole-tree run passes, and the store says the read-set is stale. Returns the number of runs.
+#[cfg(unix)]
+fn go_stale(run: &ProofRun) -> usize {
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(
+        run.runs(),
+        1,
+        "the first miss ran once, in the proving copy"
+    );
+    assert!(run.slot().marker().is_none());
+    start_reading_docs(run.root());
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.runs(), 3, "the failed proof and the whole-tree run");
+    run.runs()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_proof_followed_by_a_pass_on_the_whole_tree_marks_the_read_set_stale() {
+    let run = ProofRun::new("stale-marker");
+    let before = run.narrowed();
+    go_stale(&run);
+    let stale = run.narrowed();
+    let marker = run.slot().marker().expect("the staleness marker");
+    assert_eq!(marker.state, read_sets::MarkerState::Stale);
+    // It names the read-set that failed, the check definition, and the commit that found it.
+    assert_eq!(Some(marker.stale_inputs.as_str()), stale.read_set_inputs());
+    assert_eq!(stale.read_set_inputs(), before.read_set_inputs());
+    assert_eq!(marker.since, git_text(run.root(), &["rev-parse", "HEAD"]));
+    assert_eq!(
+        marker.commands,
+        stale.components.read_set.as_ref().unwrap().commands
+    );
+    assert_eq!(Some(marker.base.as_str()), stale.read_set_inputs());
+    assert_eq!(marker.check, "verify");
+    // Nothing measured yet, and nothing was stored under the narrowed key for the stale tree.
+    assert!(run.slot().candidate(&run.env).is_none());
+    assert!(read_record(&run.directory(), &stale.key).unwrap().is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_red_check_is_not_a_stale_read_set() {
+    let run = ProofRun::new("stale-red");
+    proof_run(run.root(), &run.env).unwrap();
+    fs::write(run.root().join(".ci/check.sh"), script("false")).unwrap();
+    commit_all(run.root(), "a red check");
+    // The proof fails and so does the whole-tree run: no evidence that anything is stale.
+    assert!(proof_run(run.root(), &run.env).is_err());
+    assert!(run.slot().marker().is_none());
+    assert_eq!(run.traced(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn while_the_marker_is_set_the_proof_is_skipped_and_the_check_runs_once() {
+    let run = ProofRun::new("stale-skip");
+    let runs = go_stale(&run);
+    // No tracer here: the run cannot measure, so it is the plain whole-tree run. The proof is
+    // not attempted again (one run, not two), and the marker stays for a run that can measure.
+    run.tracer("broken", &[]);
+    for revision in 1..=3 {
+        touch_source(run.root(), revision);
+        proof_run(run.root(), &run.env).unwrap();
+        assert_eq!(
+            run.runs(),
+            runs + revision as usize,
+            "each executing run is a single run while the read-set is stale"
+        );
+    }
+    assert_eq!(run.traced(), 0);
+    assert!(run.slot().marker().is_some());
+    assert!(run.slot().candidate(&run.env).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_next_executing_run_is_traced_once_and_the_next_miss_proves_what_it_measured() {
+    let run = ProofRun::new("stale-trace");
+    let runs = go_stale(&run);
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+
+    // The next executing run: one run, under the tracer (the bpf variant), no proving attempt.
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.runs(), runs + 1);
+    assert_eq!(run.traced(), 1);
+    // The probe and the traced run both ask for the bpf variant (the probe ends in `true`).
+    let calls = run.tracer_calls();
+    assert!(
+        calls
+            .iter()
+            .filter(|call| !call.ends_with("true"))
+            .all(|call| call.contains("--seccomp-bpf") && call.contains("check")),
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls.iter().filter(|call| !call.ends_with("true")).count(),
+        1
+    );
+    let candidate = run.slot().candidate(&run.env).expect("the measured set");
+    assert!(candidate.cache_inputs.contains(&"docs/**".to_owned()));
+    assert!(candidate.cache_inputs.contains(&"src/**".to_owned()));
+    assert!(candidate.cache_inputs.contains(&".ci/**".to_owned()));
+    assert_eq!(
+        candidate.commit,
+        git_text(run.root(), &["rev-parse", "HEAD"])
+    );
+    assert!(candidate.proof.is_none());
+    // It keys nothing yet: the marker is still set, the lookups still use the manifest's set, and
+    // the traced run's pass is stored under the whole-tree key (it did not prove the read-set).
+    assert!(run.slot().marker().is_some());
+    assert!(run.slot().proven(&run.env).is_none());
+    let traced_tree = run.narrowed();
+    assert!(read_record(&run.directory(), &traced_tree.key)
+        .unwrap()
+        .is_none());
+    assert!(
+        read_record(&run.directory(), &traced_tree.whole_tree().unwrap().key)
+            .unwrap()
+            .is_some(),
+        "the traced run's pass is a whole-tree verdict"
+    );
+
+    // The next miss proves the candidate: one run, in the proving copy, which holds docs now.
+    touch_source(run.root(), 2);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.runs(), runs + 2, "the proof is the run");
+    assert_eq!(run.traced(), 1, "no second trace");
+    // The proof event is the clearing rule: the marker and the candidate are gone, the set is the
+    // check's proven measurement, and the verdict is stored under its key with the proof.
+    assert!(run.slot().marker().is_none());
+    assert!(run.slot().candidate(&run.env).is_none());
+    let proven = run.slot().proven(&run.env).expect("the proven set");
+    assert_eq!(proven.cache_inputs, candidate.cache_inputs);
+    let proof = proven.proof.as_ref().expect("its proof");
+    assert_eq!(proof.method, crate::narrowing::PROOF);
+    assert_eq!(proof.commit.len(), 40);
+    let narrowed = run.narrowed();
+    assert_eq!(narrowed.scope(), "read-set");
+    assert_eq!(
+        narrowed.read_set_inputs(),
+        Some(proven.measured.inputs.as_str())
+    );
+    let record = read_record(&run.directory(), &narrowed.key)
+        .unwrap()
+        .expect("the narrowed pass");
+    assert!(record.proof.is_some());
+
+    // From here on lookups take the proven set: a commit outside it is answered from the store,
+    // one inside it (docs are in the set now) reruns.
+    fs::write(run.root().join("README.md"), "# readme, revised\n").unwrap();
+    commit_all(run.root(), "readme");
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(
+        run.runs(),
+        runs + 2,
+        "a commit outside the read-set reuses the verdict"
+    );
+    fs::write(run.root().join("docs/guide.md"), "# guide, revised\n").unwrap();
+    commit_all(run.root(), "guide");
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(
+        run.runs(),
+        runs + 3,
+        "docs are in the measured read-set now"
+    );
+    assert_eq!(run.traced(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_measurement_that_fails_its_proof_is_refused_and_nothing_measures_again() {
+    let run = ProofRun::new("stale-refused");
+    let runs = go_stale(&run);
+    // The tracer misses the file the check really reads (a read it cannot see).
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml"]);
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.traced(), 1);
+    let candidate = run.slot().candidate(&run.env).expect("the measured set");
+    assert!(!candidate.cache_inputs.contains(&"docs/**".to_owned()));
+
+    // The proof of that set fails in the copy, the whole tree passes: it is refused.
+    touch_source(run.root(), 2);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(
+        run.runs(),
+        runs + 3,
+        "the failed proof and the whole-tree run"
+    );
+    let marker = run.slot().marker().expect("the marker");
+    assert_eq!(marker.state, read_sets::MarkerState::Refused);
+    assert!(run.slot().candidate(&run.env).is_none());
+    assert!(run.slot().proven(&run.env).is_none());
+
+    // And that is the end of it: single runs, no trace, no proving attempt.
+    for revision in 3..=5 {
+        touch_source(run.root(), revision);
+        proof_run(run.root(), &run.env).unwrap();
+        assert_eq!(run.runs(), runs + 1 + revision as usize);
+    }
+    assert_eq!(run.traced(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_check_that_fails_under_the_tracer_leaves_nothing_and_the_next_pass_measures() {
+    let run = ProofRun::new("stale-traced-red");
+    let runs = go_stale(&run);
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+    fs::write(run.root().join(".ci/check.sh"), script("false")).unwrap();
+    commit_all(run.root(), "a red check");
+    assert!(proof_run(run.root(), &run.env).is_err());
+    assert_eq!(run.traced(), 1);
+    assert_eq!(run.runs(), runs + 1);
+    assert!(run.slot().candidate(&run.env).is_none());
+    assert!(run.slot().marker().is_some(), "still stale");
+
+    // Green again: the next executing run measures.
+    start_reading_docs(run.root());
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.traced(), 2);
+    assert!(run.slot().candidate(&run.env).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tracer_that_cannot_run_here_leaves_the_check_to_run_as_usual() {
+    let run = ProofRun::new("stale-no-tracer");
+    let runs = go_stale(&run);
+    run.tracer("broken", &[]);
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.runs(), runs + 1);
+    assert_eq!(run.traced(), 0);
+    assert!(run.slot().candidate(&run.env).is_none());
+    assert!(run.slot().marker().is_some());
+    // The probe was the only call.
+    assert!(run.tracer_calls().iter().all(|call| call.ends_with("true")));
+
+    // Once the tracer works, the very next executing run measures.
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+    touch_source(run.root(), 2);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.traced(), 1);
+    assert!(run.slot().candidate(&run.env).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_check_that_lists_the_repository_root_ends_the_staleness_with_the_whole_tree() {
+    let run = ProofRun::new("stale-whole-tree");
+    let runs = go_stale(&run);
+    let slot = run.slot();
+    run.tracer("ok", &["src/lib.rs", "LISTROOT"]);
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.traced(), 1);
+    // Nothing narrows: the whole tree is the measured set, and there is nothing left to prove.
+    assert!(slot.marker().is_none());
+    assert!(slot.candidate(&run.env).is_none());
+    let proven = slot.proven(&run.env).expect("the whole-tree set");
+    assert!(proven.cache_inputs.is_empty() && proven.proof.is_none());
+    assert_eq!(run.narrowed().scope(), "tree");
+
+    // From here on a miss is one plain run: no proof, no trace.
+    touch_source(run.root(), 2);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.runs(), runs + 2);
+    assert_eq!(run.traced(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_candidate_that_does_not_narrow_this_tree_is_dropped_and_measured_again() {
+    let run = ProofRun::new("stale-unusable-candidate");
+    let runs = go_stale(&run);
+    let slot = run.slot();
+    let marker = slot.marker().expect("the marker");
+    // A measurement made for another layout of the tree cannot be proven here.
+    let bogus = slot
+        .record(
+            vec!["src/**".into(), "Cargo.toml".into(), ".ci/**".into()],
+            "0".repeat(64),
+            &marker.base,
+            &marker.since,
+            3,
+            &lane(),
+        )
+        .unwrap();
+    slot.store_candidate(&bogus).unwrap();
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    // No proving attempt on it: one traced run, which replaces it with a measurement of this tree.
+    assert_eq!(run.runs(), runs + 1);
+    assert_eq!(run.traced(), 1);
+    let measured = slot.candidate(&run.env).expect("the new measurement");
+    assert_ne!(measured.measured.layout, bogus.measured.layout);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_marker_applies_to_exactly_the_read_set_it_declared_stale() {
+    let run = ProofRun::new("stale-exact");
+    go_stale(&run);
+    let slot = run.slot();
+    let stale = run.narrowed();
+    let inputs = stale.read_set_inputs().unwrap().to_owned();
+    assert!(matches!(
+        slot.state(&inputs, &run.env),
+        read_sets::State::Stale { .. }
+    ));
+    // A person measured again and put new lines on the check: another digest, another read-set.
+    assert_eq!(
+        slot.state(&"0".repeat(64), &run.env),
+        read_sets::State::Open
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stored_set_applies_only_while_the_manifest_is_the_measurement_it_replaced() {
+    let run = ProofRun::new("stale-lineage");
+    go_stale(&run);
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    touch_source(run.root(), 2);
+    proof_run(run.root(), &run.env).unwrap();
+    let proven = run.slot().proven(&run.env).expect("the proven set");
+    let with_store = run.narrowed();
+    assert_eq!(
+        with_store.read_set_inputs(),
+        Some(proven.measured.inputs.as_str())
+    );
+    assert_eq!(with_store.lineage(), Some(proven.base.as_str()));
+
+    // A person measures again: the check carries other lines. The store's lineage descends from
+    // the old measurement, so the manifest's own set is used.
+    let mut remeasured = run.checks["verify"].clone();
+    remeasured.cache_inputs = Some(vec![
+        "src/**".into(),
+        "Cargo.toml".into(),
+        "docs/**".into(),
+        "README.md".into(),
+        ".ci/**".into(),
+    ]);
+    let globs = remeasured.cache_inputs.clone().unwrap();
+    let mut provenance = measured_provenance(run.root(), &remeasured, &globs).unwrap();
+    provenance.tool = "b".repeat(40);
+    remeasured.cache_inputs_measured = Some(provenance.clone());
+    let manifest = prepared_for(run.root(), &run.env, &remeasured);
+    assert_eq!(manifest.scope(), "read-set");
+    assert_eq!(manifest.read_set_inputs(), Some(provenance.inputs.as_str()));
+    assert_ne!(manifest.read_set_inputs(), with_store.read_set_inputs());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stored_file_that_cannot_be_trusted_is_ignored() {
+    use std::os::unix::fs::symlink;
+    let run = ProofRun::new("stale-hygiene");
+    go_stale(&run);
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    touch_source(run.root(), 2);
+    proof_run(run.root(), &run.env).unwrap();
+    let slot = run.slot();
+    assert!(slot.proven(&run.env).is_some());
+    let measured = run.directory().join(read_sets::DIR);
+    let file = measured.join(format!("{}.proven.json", slot.id));
+
+    // Another binary than the release channel names: not trusted.
+    let mut other = run.env.clone();
+    let channel_file = run.scratch.path().join("other-channel.json");
+    channel(&channel_file, &"d".repeat(64));
+    other.insert(
+        "CCID_CHANNEL_FILE".into(),
+        channel_file.as_os_str().to_owned(),
+    );
+    assert!(slot.proven(&other).is_none());
+
+    // Garbage, an oversized file, a symlink: never parsed as a set.
+    let original = fs::read(&file).unwrap();
+    fs::write(&file, b"{").unwrap();
+    assert!(slot.proven(&run.env).is_none());
+    fs::write(&file, vec![b' '; (MAX_RECORD_BYTES + 1) as usize]).unwrap();
+    assert!(slot.proven(&run.env).is_none());
+    fs::remove_file(&file).unwrap();
+    let elsewhere = run.scratch.path().join("elsewhere.json");
+    fs::write(&elsewhere, &original).unwrap();
+    symlink(&elsewhere, &file).unwrap();
+    assert!(slot.proven(&run.env).is_none());
+    fs::remove_file(&file).unwrap();
+    fs::write(&file, &original).unwrap();
+    assert!(slot.proven(&run.env).is_some());
+
+    // A set whose list was edited after the measurement is not the measured list.
+    let mut edited: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    edited["cache_inputs"] = serde_json::json!(["**"]);
+    fs::write(&file, serde_json::to_vec(&edited).unwrap()).unwrap();
+    assert!(slot.proven(&run.env).is_none());
+    // A set that names another check definition is not this slot's.
+    let mut other_check: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    other_check["check"] = serde_json::json!("lint");
+    fs::write(&file, serde_json::to_vec(&other_check).unwrap()).unwrap();
+    assert!(slot.proven(&run.env).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_edited_check_starts_a_slot_of_its_own() {
+    let run = ProofRun::new("stale-edited");
+    go_stale(&run);
+    let slot = run.slot();
+    let mut edited = run.checks["verify"].clone();
+    edited.commands = vec![vec!["sh".into(), ".ci/other.sh".into()]];
+    let other = prepared_for(run.root(), &run.env, &edited);
+    // The measurement no longer matches the edited definition: the whole tree, and no slot.
+    assert_eq!(other.scope(), "tree");
+    assert!(other.slot().is_none());
+    assert!(slot.marker().is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_new_staleness_drops_the_candidate_measured_for_the_old_one() {
+    let run = ProofRun::new("stale-new-event");
+    go_stale(&run);
+    let slot = run.slot();
+    let marker = slot.marker().expect("the marker");
+    let candidate = slot
+        .record(
+            vec!["src/**".into(), "Cargo.toml".into(), ".ci/**".into()],
+            run.narrowed().layout(),
+            &marker.base,
+            &marker.since,
+            3,
+            &lane(),
+        )
+        .unwrap();
+    slot.store_candidate(&candidate).unwrap();
+    assert!(slot.candidate(&run.env).is_some());
+
+    // Another read-set is found stale (a person measured again in between): what was measured
+    // for the first staleness describes nothing the new marker is about.
+    let other = "1".repeat(64);
+    slot.mark_stale(&other, &marker.base, &marker.since, &lane())
+        .unwrap();
+    assert!(slot.candidate(&run.env).is_none());
+    assert!(matches!(
+        slot.state(&other, &run.env),
+        read_sets::State::Stale {
+            candidate: None,
+            ..
+        }
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_traced_run_has_no_compile_cache_and_writes_the_receipt_the_executor_would() {
+    let mut run = ProofRun::new("stale-traced-env");
+    run.env
+        .insert("RUSTC_WRAPPER".into(), "sccache-corbet".into());
+    run.env
+        .insert("CCID_COMPILE_CACHE_CONFIG".into(), "/nonexistent".into());
+    let runs = go_stale(&run);
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.traced(), 1);
+    assert_eq!(run.runs(), runs + 1);
+    let seen = fs::read_to_string(run.scratch.path().join("bin/strace-env")).unwrap();
+    // A cache hit would hide the compiler's reads: none of the cache variables reaches the check.
+    assert!(!seen.contains("RUSTC_WRAPPER="), "{seen}");
+    assert!(!seen.contains("CCID_COMPILE_CACHE_CONFIG="), "{seen}");
+    assert!(!seen.contains("CCID_RESULT_CACHE="), "{seen}");
+    // The receipt the cached executor declares as the task's output is the traced run's too.
+    assert!(
+        seen.contains(&format!(
+            "CCID_RECEIPT={}",
+            run.root().join(".ccid/results/verify.jsonl").display()
+        )),
+        "{seen}"
+    );
+    assert!(run.root().join(".ccid/results/verify.jsonl").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_run_inside_a_ccid_check_is_never_traced() {
+    let mut run = ProofRun::new("stale-inside-check");
+    let runs = go_stale(&run);
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+    // The nested ccid would wait for the target lock its parent holds.
+    run.env
+        .insert("CCID_TARGET_LOCK_HELD".into(), "/nonexistent".into());
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.runs(), runs + 1);
+    assert_eq!(run.traced(), 0);
+    assert!(run.tracer_calls().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_local_build_never_measures() {
+    let run = ProofRun::new("stale-local-build");
+    let runs = go_stale(&run);
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml", "docs/guide.md"]);
+    // `unversioned`: no key narrows on a measurement that names it.
+    crate::narrowing::test_revision::set(Some("unversioned"));
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.runs(), runs + 1);
+    assert_eq!(run.traced(), 0);
+    assert!(run.slot().candidate(&run.env).is_none());
 }

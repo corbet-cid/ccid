@@ -26,7 +26,9 @@
 //! suffices for the tree being judged; a failure means the measurement is stale, and the check
 //! runs again on the whole tree, whose verdict is stored under the whole-tree key with a
 //! `remeasure` flag. The key names its proof ([`PROOF`]), so only a verdict recorded by that proof
-//! can ever answer a narrowed lookup.
+//! can ever answer a narrowed lookup. A stale read-set measures itself again, once, through the
+//! verdict store (`cached_verdict::read_sets`): the measurement a traced run leaves there is what
+//! the next proof confirms, and what lookups then take before the manifest's.
 //!
 //! The key then names the selected files only. It always adds the locks and ecosystem manifests
 //! (the same set the moon result cache adds to a narrowed declaration) and everything under
@@ -75,10 +77,12 @@ pub(crate) const PROOF: &str = "stripped-copy-1";
 /// The content of every file outside the read-set in the proving copy: not valid UTF-8, not valid
 /// in any file format, and never empty, so a check that reads one fails instead of passing on
 /// content it did not have.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const PLACEHOLDER: &[u8] = b"\0\xffccid: outside the measured inputs\xff\0\n";
 
 /// Files git itself reads for the copy to be a repository; they are not the check's inputs and
 /// keep their real content in the proving copy.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn is_plumbing(path: &str) -> bool {
     matches!(
         path.rsplit('/').next(),
@@ -217,8 +221,43 @@ pub(crate) fn layout_digest<'a>(paths: impl IntoIterator<Item = &'a str>) -> Str
     format!("{:x}", hash.finalize())
 }
 
+/// The revision a measurement made by this build names in its provenance.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn measuring_revision() -> String {
+    #[cfg(test)]
+    if let Some(revision) = test_revision::get() {
+        return revision;
+    }
+    crate::SOURCE_REVISION.to_owned()
+}
+
+/// Whether this build can make a measurement a key accepts: a local build reports
+/// `unversioned`, which no key narrows on.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn can_measure() -> bool {
+    is_hex(&measuring_revision(), 40)
+}
+
+/// Tests build ccid locally (`unversioned`); they name a revision for the measurements they make.
+#[cfg(test)]
+pub(crate) mod test_revision {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static REVISION: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn set(revision: Option<&str>) {
+        REVISION.with(|cell| *cell.borrow_mut() = revision.map(str::to_owned));
+    }
+
+    pub(crate) fn get() -> Option<String> {
+        REVISION.with(|cell| cell.borrow().clone())
+    }
+}
+
 /// The day, `YYYY-MM-DD` in UTC, for the provenance a measurement prints.
-#[cfg(any(unix, test))]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn today() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -227,6 +266,7 @@ pub(crate) fn today() -> String {
 }
 
 /// Days since 1970-01-01 as a proleptic Gregorian date (Hinnant's civil-from-days).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn civil_date(days: i64) -> String {
     let shifted = days + 719_468;
     let era = shifted.div_euclid(146_097);

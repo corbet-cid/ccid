@@ -117,8 +117,10 @@ default still invalidates on documentation edits. The shared verdict store narro
 a check's key to these inputs only when they carry the provenance
 `ccid measure-inputs` prints (`cache_inputs_measured`) and it still holds, and
 the run that stores the verdict proves the read-set on that run by passing in a
-copy of the tree that holds only it; a hand-written list narrows the moon cache
-but never a verdict (see [narrowed keys](docs/verdicts.md#narrowed-keys)).
+copy of the tree that holds only it, and a read-set that fails that proof is measured
+again by one traced run, kept in the verdict store (see
+[re-measuring](docs/verdicts.md#re-measuring-a-stale-read-set)); a hand-written list narrows
+the moon cache but never a verdict (see [narrowed keys](docs/verdicts.md#narrowed-keys)).
 
 Declare produced files with
 `cache_outputs = ["app"]`; cache hits restore these along with the receipt. A
