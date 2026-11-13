@@ -43,6 +43,11 @@ jobs:
             curl --silent --show-error --fail-with-body --retry 3 -H "Authorization: Bearer $GH_TOKEN" \
               -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "$@"
           }
+          # A manual run must not make a tag this copy does not have: the release would create it.
+          if ! gh_api "$api/git/ref/tags/$MIRROR_TAG" > /dev/null 2>&1; then
+            mirror_log "the tag $MIRROR_TAG is not in this repository (yet)"
+            exit 1
+          fi
           id=
           page=1
           while [ -z "$id" ] && [ "$page" -le 10 ]; do

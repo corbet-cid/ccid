@@ -33,6 +33,10 @@ release-mirror:
         code=$(gl -o "$work/stored.bin" -w '%{http_code}' "$base/$1" || true)
         if [ "$code" = 200 ]; then sha256sum "$work/stored.bin" | awk '{ print $1 }'; fi
       }
+      if ! gl --fail "$api/repository/tags/$MIRROR_TAG" > /dev/null 2>&1; then
+        mirror_log "the tag $MIRROR_TAG is not in this project (yet)"
+        exit 1
+      fi
       while IFS= read -r name; do
         want=$(sha256sum "$work/files/$name" | awk '{ print $1 }')
         have=$(stored "$name")

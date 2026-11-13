@@ -47,6 +47,10 @@ case "$method $url" in
     if [ -f "$FIX/forge/files/$name" ]; then
       status=200; cp "$FIX/forge/files/$name" "$FIX/reply.bin"
     else status=404; : > "$FIX/reply.bin"; fi ;;
+  "GET https://api.github.test/repos/o/r/git/ref/tags/"*)
+    if [ -f "$FIX/gh/notag" ]; then status=404; reply='{}'; else reply='{}'; fi ;;
+  "GET https://gl.test/api/v4/projects/7/repository/tags/"*)
+    if [ -f "$FIX/gl/notag" ]; then status=404; reply='{}'; else reply='{}'; fi ;;
   "GET https://api.github.test/repos/o/r/releases?per_page=100&page=1") reply=$(cat "$FIX/gh/releases.json") ;;
   "GET https://api.github.test/repos/o/r/releases?per_page=100&page="*) reply='[]' ;;
   "POST https://api.github.test/repos/o/r/releases")

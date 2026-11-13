@@ -51,6 +51,10 @@ fn rendered(origin: &str) -> tempfile::TempDir {
 }
 
 /// The script of the first `run: |` / `- |` block of a rendered provider file, dedented.
+fn script_of(root: &Path, relative: &str) -> String {
+    script(root, relative)
+}
+
 fn script(root: &Path, relative: &str) -> String {
     let text = fs::read_to_string(root.join(relative)).unwrap();
     let mut lines = text.lines();
@@ -609,9 +613,7 @@ fn a_private_repository_reads_with_its_token_and_a_public_one_without() {
     assert_eq!(private.code, 0, "{}", private.stderr);
     let log = world.forge_auth();
     assert!(
-        log.contains(
-            "https://forge.example/api/v1/repos/team/demo/releases/tags/v0.1.0 token"
-        ),
+        log.contains("https://forge.example/api/v1/repos/team/demo/releases/tags/v0.1.0 token"),
         "{log}"
     );
     assert!(
@@ -620,10 +622,7 @@ fn a_private_repository_reads_with_its_token_and_a_public_one_without() {
     );
     assert!(!private.stderr.contains("read-only-secret"));
     // The pointer is asked without the token.
-    assert!(
-        log.contains("https://git.example/team/demo none"),
-        "{log}"
-    );
+    assert!(log.contains("https://git.example/team/demo none"), "{log}");
     // A repository the token cannot see answers like a missing release, with the reason named.
     let world = World::new();
     fs::write(world.fix().join("forge/status"), "404").unwrap();
@@ -654,9 +653,9 @@ fn the_pointer_names_the_forge_that_serves_the_api() {
     let outcome = world.run(GITHUB_SHELL, &script, GITHUB_ENV);
     assert_eq!(outcome.code, 0, "{}", outcome.stderr);
     assert!(
-        world.calls().contains(
-            "GET https://forge.example/api/v1/repos/team/demo/releases/tags/v0.1.0"
-        ),
+        world
+            .calls()
+            .contains("GET https://forge.example/api/v1/repos/team/demo/releases/tags/v0.1.0"),
         "{}",
         world.calls()
     );
@@ -676,6 +675,33 @@ fn the_pointer_names_the_forge_that_serves_the_api() {
         world.calls(),
         outcome.stderr
     );
+}
+
+#[test]
+fn a_tag_the_copy_does_not_have_is_never_created_by_a_release() {
+    let script = github_script();
+    let world = World::new();
+    world.release("v0.1.0", &[("demo-linux", BINARY)], &["demo-linux"], false);
+    fs::write(world.fix().join("gh/notag"), "").unwrap();
+    let outcome = world.run(GITHUB_SHELL, &script, GITHUB_ENV);
+    assert_eq!(outcome.code, 1, "{}", outcome.stderr);
+    assert!(
+        outcome.stderr.contains("not in this repository"),
+        "{}",
+        outcome.stderr
+    );
+    assert_eq!(world.written(), 0);
+    let root = rendered(SOURCE);
+    let gitlab = script_of(root.path(), ".gitlab-ci.yml");
+    fs::write(world.fix().join("gl/notag"), "").unwrap();
+    let outcome = world.run(&["sh", "-eu"], &gitlab, GITLAB_ENV);
+    assert_eq!(outcome.code, 1, "{}", outcome.stderr);
+    assert!(
+        outcome.stderr.contains("not in this project"),
+        "{}",
+        outcome.stderr
+    );
+    assert_eq!(world.written(), 0);
 }
 
 #[test]
