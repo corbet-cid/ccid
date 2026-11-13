@@ -716,18 +716,35 @@ mod run {
                 .status()?;
             verified = Some(status.success());
         }
+        // The provenance that lets the verdict key narrow to these inputs. It binds them to the
+        // check as declared now and to the tree's top-level layout, and names this ccid.
+        let measured = if globs.is_empty() {
+            None
+        } else {
+            Some(crate::cached_verdict::measured_provenance(
+                &root, declared, &globs,
+            )?)
+        };
         let line = json!({
             "check": options.check,
             "measured": true,
             "observations": observations.len(),
             "narrowed": !globs.is_empty(),
             "cache_inputs": if globs.is_empty() { serde_json::Value::Null } else { json!(globs) },
+            "cache_inputs_measured": json!(measured),
             "stripped_files": copied,
             "verified": verified,
-            "manifest": if globs.is_empty() {
-                "the check lists the repository root: keep the whole tree (no cache_inputs)".to_owned()
-            } else {
-                format!("cache_inputs = {}", serde_json::to_string(&globs)?)
+            "manifest": match &measured {
+                None => "the check lists the repository root: keep the whole tree (no cache_inputs)".to_owned(),
+                Some(measured) => format!(
+                    "cache_inputs = {}\ncache_inputs_measured = {{ tool = {}, commands = {}, inputs = {}, layout = {}, date = {} }}",
+                    serde_json::to_string(&globs)?,
+                    serde_json::to_string(&measured.tool)?,
+                    serde_json::to_string(&measured.commands)?,
+                    serde_json::to_string(&measured.inputs)?,
+                    serde_json::to_string(&measured.layout)?,
+                    serde_json::to_string(&measured.date)?,
+                ),
             },
         });
         println!("{line}");

@@ -113,7 +113,11 @@ declared outputs are always excluded. Explicit patterns must cover dependencies,
 scripts, tool pins and fixtures the command reads. The check's full declaration
 is always hashed, even when its manifest is outside those patterns. Narrow inputs
 allow a documentation-only commit to reuse code checks; the full-repository
-default still invalidates on documentation edits.
+default still invalidates on documentation edits. The shared verdict store narrows
+a check's key to these inputs only when they carry the provenance
+`ccid measure-inputs` prints (`cache_inputs_measured`) and it still holds; a
+hand-written list narrows the moon cache but never a verdict (see
+[narrowed keys](docs/verdicts.md#narrowed-keys)).
 
 Declare produced files with
 `cache_outputs = ["app"]`; cache hits restore these along with the receipt. A

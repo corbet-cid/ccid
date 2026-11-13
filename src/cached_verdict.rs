@@ -33,7 +33,7 @@ use std::{
 };
 
 /// Schema of the key and the record. Unknown schemas are refused, never guessed.
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 /// Namespace below `CCID_RESULT_CACHE` that holds the verdict records.
 pub const STORE_DIR: &str = "verdicts";
 /// An attempt-state or verdict record is tiny; anything larger is refused without parsing.
@@ -67,6 +67,11 @@ pub struct KeyComponents {
     pub epoch: u32,
     pub check: String,
     pub check_identity: String,
+    /// Present only on a narrowed key: `tree` then digests the measured read-set instead of the
+    /// whole tree (see `narrowing`). A whole-tree key omits it, so it is exactly the components
+    /// it was before narrowing existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_set: Option<crate::narrowing::ReadSetKey>,
 }
 
 fn is_hex(value: &str, length: usize) -> bool {
@@ -126,6 +131,14 @@ impl KeyComponents {
             return Err(failure(
                 "Verdict key check identity must be a sha256 digest",
             ));
+        }
+        if let Some(read_set) = &self.read_set {
+            if !is_hex(&read_set.inputs, 64)
+                || !is_hex(&read_set.layout, 64)
+                || !is_hex(&read_set.commands, 64)
+            {
+                return Err(failure("Verdict key read set must be sha256 digests"));
+            }
         }
         Ok(())
     }
@@ -271,6 +284,11 @@ pub struct Prepared {
     /// The exact tree list the key was built from, so the post-run check re-reads the same
     /// paths and ignores outputs the check wrote beside them.
     tree_entries: Vec<TreeEntry>,
+    /// The digest of the whole tree. A narrowed key's `tree` digests the read-set only; the
+    /// post-run check still requires the whole tree to be unmoved.
+    full_tree: String,
+    /// For a narrowed key, the indices of `tree_entries` it covers.
+    narrowed: Option<Vec<usize>>,
     /// The git dependency commits of the checkout's own locks when the key was built. A floated
     /// key names the resolution's commits instead; the checkout's locks must still read the same
     /// after the run, because ccid never writes them.
@@ -280,6 +298,17 @@ pub struct Prepared {
     store: Option<PathBuf>,
     /// The check's declared `cache_outputs`, normalized and validated.
     outputs: Vec<String>,
+}
+
+impl Prepared {
+    /// How the key covers the tree: `read-set` for a narrowed key, `tree` for the whole tree.
+    pub fn scope(&self) -> &'static str {
+        if self.narrowed.is_some() {
+            "read-set"
+        } else {
+            "tree"
+        }
+    }
 }
 
 /// One lookup result, with the reason a record was not accepted.
@@ -474,6 +503,12 @@ fn tree_entries(root: &Path, commit: &str) -> Result<Vec<TreeEntry>> {
 }
 
 fn entries_digest(root: &Path, entries: &[TreeEntry]) -> Result<String> {
+    digest_of(root, entries.iter())
+}
+
+/// The digest of the entries of a tree listing, in the order given: the whole tree, or the
+/// subset a narrowed key names.
+fn digest_of<'a>(root: &Path, entries: impl IntoIterator<Item = &'a TreeEntry>) -> Result<String> {
     let mut hash = Sha256::new();
     for entry in entries {
         let payload = if let Some(object) = &entry.submodule {
@@ -513,6 +548,35 @@ fn entries_digest(root: &Path, entries: &[TreeEntry]) -> Result<String> {
 #[cfg(test)]
 fn tree_digest(root: &Path, commit: &str) -> Result<String> {
     entries_digest(root, &tree_entries(root, commit)?)
+}
+
+/// The digest of the top-level entry names of a commit's tree: the layout a measurement
+/// classified (see `narrowing`).
+#[cfg(any(unix, test))]
+pub(crate) fn layout_of(root: &Path, commit: &str) -> Result<String> {
+    let entries = tree_entries(root, commit)?;
+    Ok(crate::narrowing::layout_digest(
+        entries.iter().map(|entry| entry.path.as_str()),
+    ))
+}
+
+/// The provenance `ccid measure-inputs` prints for `check` measured in the checkout at `root`:
+/// this ccid, the check's definition as declared now, the measured `inputs`, the committed
+/// tree's top-level layout at HEAD, and today's date.
+#[cfg(any(unix, test))]
+pub(crate) fn measured_provenance(
+    root: &Path,
+    check: &crate::Check,
+    inputs: &[String],
+) -> Result<crate::narrowing::Measured> {
+    let head = git(root, &["rev-parse", "HEAD"])?;
+    Ok(crate::narrowing::Measured {
+        tool: SOURCE_REVISION.to_owned(),
+        commands: crate::narrowing::commands_digest(check)?,
+        inputs: crate::narrowing::inputs_digest(inputs)?,
+        layout: layout_of(root, &head)?,
+        date: crate::narrowing::today(),
+    })
 }
 
 /// Directories whose committed locks never decide a build (fuzz harnesses, vendored trees,
@@ -1406,12 +1470,38 @@ pub(crate) fn prepare_resolved(
     ignore.extend(outputs.iter().cloned());
     applicable(root, &ignore)?;
     let entries = tree_entries(root, commit_id)?;
+    let full_tree = entries_digest(root, &entries)?;
+    let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+    let (tree, read_set, narrowed) = match crate::narrowing::decide(check, &paths) {
+        crate::narrowing::Scope::ReadSet { key, selected } => {
+            event(json!({
+                "event": "verdict-narrowing",
+                "check": check_name,
+                "scope": "read-set",
+                "files": selected.len(),
+                "of": entries.len(),
+            }));
+            let tree = digest_of(root, selected.iter().map(|index| &entries[*index]))?;
+            (tree, Some(key), Some(selected))
+        }
+        crate::narrowing::Scope::Tree { reason } => {
+            if let Some(reason) = reason {
+                event(json!({
+                    "event": "verdict-narrowing",
+                    "check": check_name,
+                    "scope": "tree",
+                    "reason": reason,
+                }));
+            }
+            (full_tree.clone(), None, None)
+        }
+    };
     let identity = check_identity_payload(check, environment, root)?;
     let check_identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&identity)?));
     let checkout_dependencies = git_dependencies(root, commit_id)?;
     let components = KeyComponents {
         schema: SCHEMA,
-        tree: entries_digest(root, &entries)?,
+        tree,
         git_dependencies: resolved
             .cloned()
             .unwrap_or_else(|| checkout_dependencies.clone()),
@@ -1420,6 +1510,7 @@ pub(crate) fn prepare_resolved(
         epoch: crate::cached::VERDICT_EPOCH,
         check: check_name.to_owned(),
         check_identity,
+        read_set,
     };
     let key = components.key_hex()?;
     if value(environment, "CCID_VERDICT_DEBUG").as_deref() == Some("1") {
@@ -1445,6 +1536,8 @@ pub(crate) fn prepare_resolved(
         branch: crate::cached_outputs::branch(root, environment),
         root: root.to_path_buf(),
         tree_entries: entries,
+        full_tree,
+        narrowed,
         checkout_dependencies,
         cache,
         store,
@@ -1877,16 +1970,24 @@ pub fn record_success(
         let Some(directory) = &entry.store else {
             continue;
         };
-        let current = (|| -> Result<(String, BTreeMap<String, String>)> {
-            Ok((
-                entries_digest(&entry.root, &entry.tree_entries)?,
-                git_dependencies(&entry.root, &entry.commit)?,
-            ))
+        // A narrowed key covers the read-set only, but the whole tree must still be unmoved: a
+        // check that wrote anywhere in it (including outside its measured inputs) leaves no pass.
+        let current = (|| -> Result<(String, String, BTreeMap<String, String>)> {
+            let full = entries_digest(&entry.root, &entry.tree_entries)?;
+            let tree = match &entry.narrowed {
+                Some(selected) => digest_of(
+                    &entry.root,
+                    selected.iter().map(|index| &entry.tree_entries[*index]),
+                )?,
+                None => full.clone(),
+            };
+            Ok((full, tree, git_dependencies(&entry.root, &entry.commit)?))
         })();
         match current {
-            Ok((tree, dependencies))
-                if tree == entry.components.tree && dependencies == entry.checkout_dependencies => {
-            }
+            Ok((full, tree, dependencies))
+                if full == entry.full_tree
+                    && tree == entry.components.tree
+                    && dependencies == entry.checkout_dependencies => {}
             Ok(_) => {
                 event(json!({
                     "event": "verdict-skipped",
@@ -1931,6 +2032,7 @@ pub fn record_success(
                 "producer": producer.kind.as_str(),
                 "tool": tool.sha256,
                 "result": "success",
+                "scope": entry.scope(),
                 "outputs": entry.outputs.len(),
             })),
             // The check itself passed; a store failure must not turn it red. CI will recompute,
@@ -2004,6 +2106,7 @@ pub fn plan_event(prepared: &Prepared, environment: &Environment) {
         "event": "verdict-plan",
         "check": prepared.check,
         "key": prepared.key,
+        "scope": prepared.scope(),
         "status": lookup.status.as_str(),
         "reason": lookup.reason,
     }));

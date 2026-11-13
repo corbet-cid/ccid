@@ -1297,3 +1297,463 @@ fn systemd_unit_directories_never_enter_the_semantic_environment() {
     assert!(!names.contains(&"STATE_DIRECTORY"));
     assert!(!names.contains(&"RUNTIME_DIRECTORY"));
 }
+
+// ---- narrowed keys: a check keyed on its MEASURED read-set (see `narrowing`) ----
+
+/// The ordinary fixture plus two top-level entries a measurement classifies as unread.
+fn narrow_fixture(name: &str) -> tempfile::TempDir {
+    let fixture = fixture(name);
+    let root = fixture.path();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/guide.md"), "# guide\n").unwrap();
+    fs::write(root.join("README.md"), "# readme\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", "docs"]);
+    fixture
+}
+
+fn commit_all(root: &Path, message: &str) {
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", message]);
+}
+
+/// The check as `ccid measure-inputs` would leave it for the tree at HEAD: inputs and provenance
+/// (a local test build reports `unversioned`, which a key refuses, so the tool is a revision).
+fn measured(root: &Path, _env: &Environment) -> crate::Check {
+    let mut check = check();
+    check.cache_inputs = Some(vec!["src/**".into(), "Cargo.toml".into(), ".ci/**".into()]);
+    let globs = check.cache_inputs.clone().unwrap();
+    let mut provenance = measured_provenance(root, &check, &globs).unwrap();
+    provenance.tool = "a".repeat(40);
+    check.cache_inputs_measured = Some(provenance);
+    check
+}
+
+#[test]
+fn measure_inputs_provenance_is_what_the_key_expects() {
+    let fixture = narrow_fixture("narrow-provenance");
+    let root = fixture.path();
+    let env = environment();
+    let mut declared = check();
+    declared.cache_inputs = Some(vec!["src/**".into()]);
+    let provenance = measured_provenance(root, &declared, &["src/**".to_owned()]).unwrap();
+    assert_eq!(provenance.tool, SOURCE_REVISION);
+    assert_eq!(
+        provenance.commands,
+        crate::narrowing::commands_digest(&declared).unwrap()
+    );
+    let head = commit(root, None, &env).unwrap();
+    assert_eq!(provenance.layout, layout_of(root, &head).unwrap());
+    // The printed line, put on the check, narrows the key (once the tool is a released ccid).
+    let mut released = provenance.clone();
+    released.tool = "a".repeat(40);
+    released.validate().unwrap();
+    declared.cache_inputs_measured = Some(released);
+    assert_eq!(prepared_for(root, &env, &declared).scope(), "read-set");
+    // A local build is refused when the key is computed: whole tree, with the reason reported.
+    declared.cache_inputs_measured = Some(provenance);
+    if SOURCE_REVISION == "unversioned" {
+        assert_eq!(prepared_for(root, &env, &declared).scope(), "tree");
+    }
+}
+
+fn prepared_for(root: &Path, env: &Environment, check: &crate::Check) -> Prepared {
+    let commit_id = commit(root, None, env).unwrap();
+    prepare(root, "verify", check, env, &commit_id, &[]).unwrap()
+}
+
+fn store_environment(store: &Path) -> Environment {
+    let mut env = environment();
+    env.insert(
+        "CI_REPOSITORY_URL".into(),
+        "https://example.invalid/checks/narrowed".into(),
+    );
+    env.insert("CCID_RESULT_CACHE".into(), store.as_os_str().to_owned());
+    env
+}
+
+fn record_for(prepared: &Prepared) -> Record {
+    Record {
+        schema: SCHEMA,
+        key: prepared.key.clone(),
+        components: prepared.components.clone(),
+        commit: prepared.commit.clone(),
+        repository: "example.invalid/checks/narrowed".into(),
+        result: ResultWord::Success,
+        producer: Producer {
+            kind: ProducerKind::Lane,
+            identity: None,
+        },
+        tool: own_tool().unwrap(),
+        started_at: 10,
+        finished_at: 20,
+        duration_seconds: 10,
+    }
+}
+
+#[test]
+fn a_commit_outside_the_read_set_reuses_the_verdict_and_one_inside_reruns() {
+    let fixture = narrow_fixture("narrow-reuse");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let env = store_environment(store.path());
+    let directory = store.path().join(STORE_DIR);
+    let narrowed = measured(root, &env);
+
+    let first = prepared_for(root, &env, &narrowed);
+    assert_eq!(first.scope(), "read-set");
+    assert!(first.components.read_set.is_some());
+    assert_eq!(lookup(&first, &env).status, Status::Miss);
+    write_record(&directory, &record_for(&first)).unwrap();
+    assert_eq!(lookup(&first, &env).status, Status::Hit);
+
+    // The same check without provenance keys the whole tree: the baseline this improves on.
+    let mut guessed = narrowed.clone();
+    guessed.cache_inputs_measured = None;
+    let whole_first = prepared_for(root, &env, &guessed);
+    assert_eq!(whole_first.scope(), "tree");
+    write_record(&directory, &record_for(&whole_first)).unwrap();
+
+    // A commit that touches only files the check does not read (a new page, a readme).
+    fs::write(root.join("docs/guide.md"), "# guide, revised\n").unwrap();
+    fs::write(root.join("docs/new.md"), "# new\n").unwrap();
+    fs::write(root.join("README.md"), "# readme, revised\n").unwrap();
+    commit_all(root, "docs only");
+    let second = prepared_for(root, &env, &narrowed);
+    assert_ne!(second.commit, first.commit);
+    assert_eq!(second.scope(), "read-set");
+    assert_eq!(second.key, first.key, "outside the read-set: the same key");
+    assert_eq!(lookup(&second, &env).status, Status::Hit);
+    let whole_second = prepared_for(root, &env, &guessed);
+    assert_ne!(whole_second.key, whole_first.key);
+    assert_eq!(lookup(&whole_second, &env).status, Status::Miss);
+
+    // A commit that touches a file the check reads.
+    fs::write(root.join("src/lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+    commit_all(root, "source");
+    let third = prepared_for(root, &env, &narrowed);
+    assert_eq!(third.scope(), "read-set");
+    assert_ne!(third.key, first.key, "inside the read-set: a new key");
+    assert_eq!(lookup(&third, &env).status, Status::Miss);
+
+    // So does one that touches a script under .ci/ or the declared manifest.
+    let before = third.key.clone();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='verdict-fixture'\nversion='0.0.1'\nedition='2021'\n",
+    )
+    .unwrap();
+    commit_all(root, "manifest");
+    assert_ne!(prepared_for(root, &env, &narrowed).key, before);
+}
+
+#[test]
+fn a_changed_check_toolchain_or_lock_is_never_reused() {
+    let fixture = narrow_fixture("narrow-rekey");
+    let root = fixture.path();
+    let env = environment();
+    let narrowed = measured(root, &env);
+    let base = prepared_for(root, &env, &narrowed);
+    assert_eq!(base.scope(), "read-set");
+
+    // The commands changed after the inputs were measured: the measurement no longer describes
+    // the check, so it is keyed on the whole tree (and differs from the narrowed key).
+    let mut edited = narrowed.clone();
+    edited.commands = vec![vec!["sh".into(), "-c".into(), "false".into()]];
+    let rekeyed = prepared_for(root, &env, &edited);
+    assert_eq!(rekeyed.scope(), "tree");
+    assert_ne!(rekeyed.key, base.key);
+    assert!(rekeyed.components.read_set.is_none());
+    // A list edited by hand after the measurement is not the measured list.
+    let mut hand_edited = narrowed.clone();
+    hand_edited.cache_inputs = Some(vec!["src/**".into(), ".ci/**".into()]);
+    assert_eq!(prepared_for(root, &env, &hand_edited).scope(), "tree");
+    // ... and a docs-only commit then reruns it, until it is measured again.
+    let docs_before = rekeyed.key.clone();
+    fs::write(root.join("README.md"), "# readme, again\n").unwrap();
+    commit_all(root, "docs");
+    assert_ne!(prepared_for(root, &env, &edited).key, docs_before);
+    let base = prepared_for(root, &env, &narrowed);
+    assert_eq!(base.scope(), "read-set");
+
+    // A different release of a tool the check uses is a different key, narrowed or not.
+    let tools = tempfile::tempdir().unwrap();
+    let script = tools.path().join("sh");
+    fs::write(&script, "#!/bin/sh\necho 'sh 9.9 (fixture one)'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut with_tool = env.clone();
+    with_tool.insert(
+        "PATH".into(),
+        tool_path_env(&env, tools.path())
+            .remove(OsStr::new("PATH"))
+            .unwrap(),
+    );
+    let one = prepared_for(root, &with_tool, &narrowed);
+    assert_eq!(one.scope(), "read-set");
+    assert_ne!(one.key, base.key);
+    fs::write(&script, "#!/bin/sh\necho 'sh 10.0 (fixture two)'\n").unwrap();
+    assert_ne!(prepared_for(root, &with_tool, &narrowed).key, one.key);
+
+    // A lock outside the declared globs is still keyed: no narrow declaration can leave it out.
+    fs::write(
+        root.join("Cargo.lock"),
+        "version = 4\n[[package]]\nname = \"verdict-fixture\"\nversion = \"0.0.1\"\n",
+    )
+    .unwrap();
+    commit_all(root, "lock");
+    let moved = prepared_for(root, &env, &narrowed);
+    assert_eq!(moved.scope(), "read-set");
+    assert_ne!(moved.key, base.key);
+}
+
+#[test]
+fn an_input_outside_the_measured_set_seen_when_the_check_runs_fails_closed() {
+    let fixture = narrow_fixture("narrow-closed");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let env = store_environment(store.path());
+    let directory = store.path().join(STORE_DIR);
+    let narrowed = measured(root, &env);
+    let base = prepared_for(root, &env, &narrowed);
+    assert_eq!(base.scope(), "read-set");
+
+    // A working tree that differs from the commit outside the read-set is still refused: the
+    // check could read it, and the key cannot name it.
+    fs::write(root.join("docs/guide.md"), "# edited, not committed\n").unwrap();
+    let commit_id = commit(root, None, &env).unwrap();
+    assert!(prepare(root, "verify", &narrowed, &env, &commit_id, &[]).is_err());
+    git(root, &["checkout", "--quiet", "--", "docs/guide.md"]);
+    fs::write(root.join("scratch.txt"), "untracked\n").unwrap();
+    assert!(prepare(root, "verify", &narrowed, &env, &commit_id, &[]).is_err());
+    fs::remove_file(root.join("scratch.txt")).unwrap();
+
+    // A check that wrote into the tree outside its read-set while it ran leaves no pass, even
+    // though the narrowed digest did not move.
+    let run = prepared_for(root, &env, &narrowed);
+    fs::write(root.join("docs/guide.md"), "# written by the check\n").unwrap();
+    let producer = Producer {
+        kind: ProducerKind::Lane,
+        identity: None,
+    };
+    record_success(&[run], &BTreeSet::new(), &producer, 0, &env).unwrap();
+    assert!(read_record(&directory, &base.key).unwrap().is_none());
+    git(root, &["checkout", "--quiet", "--", "docs/guide.md"]);
+    // The same run without the write is recorded.
+    let clean = prepared_for(root, &env, &narrowed);
+    record_success(&[clean], &BTreeSet::new(), &producer, 0, &env).unwrap();
+    assert!(read_record(&directory, &base.key).unwrap().is_some());
+
+    // A top-level entry the measurement never saw is an input outside the measured set: the
+    // narrowing is invalidated and the whole tree is keyed, so even a "docs" commit reruns.
+    fs::create_dir_all(root.join("fixtures")).unwrap();
+    fs::write(root.join("fixtures/data.json"), "{}\n").unwrap();
+    commit_all(root, "a new top-level directory");
+    let unknown = prepared_for(root, &env, &narrowed);
+    assert_eq!(unknown.scope(), "tree");
+    assert!(unknown.components.read_set.is_none());
+    assert_ne!(unknown.key, base.key);
+    assert_eq!(lookup(&unknown, &env).status, Status::Miss);
+    fs::write(root.join("fixtures/data.json"), "{\"a\":1}\n").unwrap();
+    commit_all(root, "edit the new directory");
+    let edited = prepared_for(root, &env, &narrowed);
+    assert_ne!(
+        edited.key, unknown.key,
+        "the new entry is keyed, not ignored"
+    );
+}
+
+#[test]
+fn unmeasured_checks_keep_the_whole_tree_key() {
+    let fixture = narrow_fixture("narrow-unmeasured");
+    let root = fixture.path();
+    let env = environment();
+    let commit_id = commit(root, None, &env).unwrap();
+    let whole = tree_digest(root, &commit_id).unwrap();
+
+    // No inputs declared.
+    let plain = prepared_for(root, &env, &check());
+    // Inputs declared without measure-inputs provenance (a guess, or a list from before).
+    let mut guessed = check();
+    guessed.cache_inputs = Some(vec!["src/**".into()]);
+    let guess = prepared_for(root, &env, &guessed);
+    // Inputs measured for a nix check, which keys every file anyway.
+    let mut nix = measured(root, &env);
+    nix.kind = "nix".into();
+    for entry in [&plain, &guess] {
+        assert_eq!(entry.scope(), "tree");
+        assert_eq!(
+            entry.components.tree, whole,
+            "the tree digest is the whole tree"
+        );
+        assert!(entry.components.read_set.is_none());
+        let bytes = String::from_utf8(entry.components.canonical_bytes().unwrap()).unwrap();
+        assert!(bytes.starts_with(&format!("{{\"schema\":{SCHEMA},\"tree\":\"{whole}\"")));
+        assert!(!bytes.contains("read_set"), "{bytes}");
+    }
+
+    // An edit outside the declared inputs changes an unmeasured check's key: it keys everything.
+    fs::write(root.join("README.md"), "# readme, revised\n").unwrap();
+    commit_all(root, "docs only");
+    assert_ne!(prepared_for(root, &env, &check()).key, plain.key);
+    assert_ne!(prepared_for(root, &env, &guessed).key, guess.key);
+}
+
+#[test]
+fn the_key_schema_and_a_golden_key_are_pinned() {
+    assert_eq!(SCHEMA, 3);
+    let whole = KeyComponents {
+        schema: SCHEMA,
+        tree: "1".repeat(64),
+        git_dependencies: BTreeMap::new(),
+        toolchain: BTreeMap::from([("sh".to_owned(), "2".repeat(64))]),
+        profile: "3".repeat(64),
+        epoch: crate::cached::VERDICT_EPOCH,
+        check: "verify".into(),
+        check_identity: "4".repeat(64),
+        read_set: None,
+    };
+    let bytes = String::from_utf8(whole.canonical_bytes().unwrap()).unwrap();
+    assert_eq!(
+        bytes,
+        format!(
+            "{{\"schema\":3,\"tree\":\"{}\",\"git_dependencies\":{{}},\"toolchain\":{{\"sh\":\"{}\"}},\"profile\":\"{}\",\"epoch\":{},\"check\":\"verify\",\"check_identity\":\"{}\"}}",
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            crate::cached::VERDICT_EPOCH,
+            "4".repeat(64),
+        )
+    );
+    let mut narrowed = whole.clone();
+    narrowed.read_set = Some(crate::narrowing::ReadSetKey {
+        inputs: "5".repeat(64),
+        layout: "6".repeat(64),
+        commands: "7".repeat(64),
+    });
+    assert_ne!(narrowed.key_hex().unwrap(), whole.key_hex().unwrap());
+    let narrowed_bytes = String::from_utf8(narrowed.canonical_bytes().unwrap()).unwrap();
+    assert!(narrowed_bytes.starts_with(&bytes[..bytes.len() - 1]));
+    assert!(narrowed_bytes.ends_with(&format!(
+        ",\"read_set\":{{\"inputs\":\"{}\",\"layout\":\"{}\",\"commands\":\"{}\"}}}}",
+        "5".repeat(64),
+        "6".repeat(64),
+        "7".repeat(64),
+    )));
+}
+
+#[test]
+fn a_narrowed_record_round_trips_and_a_malformed_read_set_is_refused() {
+    let fixture = narrow_fixture("narrow-record");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let env = store_environment(store.path());
+    let directory = store.path().join(STORE_DIR);
+    let first = prepared_for(root, &env, &measured(root, &env));
+    assert_eq!(first.scope(), "read-set");
+    let record = record_for(&first);
+    write_record(&directory, &record).unwrap();
+    assert_eq!(
+        read_record(&directory, &first.key).unwrap().unwrap(),
+        record
+    );
+
+    let mut broken = first.components.clone();
+    broken.read_set.as_mut().unwrap().layout = "not-a-digest".into();
+    assert!(broken.validate().is_err());
+    // A record of the previous key schema is refused, never read as a pass.
+    let mut old = record.clone();
+    old.schema = 2;
+    old.components.schema = 2;
+    assert!(old.validate(&old.key.clone()).is_err());
+}
+
+#[test]
+fn a_docs_only_commit_skips_a_measured_check_in_a_cached_run_from_its_manifest() {
+    let fixture = narrow_fixture("narrow-run");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let mut env = store_environment(store.path());
+    env.insert("CI".into(), "true".into());
+    let tool = Tool {
+        sha256: "c".repeat(64),
+        source_revision: "a".repeat(40),
+    };
+    let channel_path = store.path().join("channel.json");
+    channel(&channel_path, &tool.sha256);
+    env.insert(
+        "CCID_CHANNEL_FILE".into(),
+        channel_path.as_os_str().to_owned(),
+    );
+
+    // The manifest as `ccid measure-inputs` leaves it: inputs and provenance on the check.
+    let mut declared = check();
+    declared.commands = vec![vec![
+        "sh".into(),
+        "-c".into(),
+        "echo ran >> .ccid/counter".into(),
+    ]];
+    declared.cache_inputs = Some(vec!["src/**".into(), "Cargo.toml".into(), ".ci/**".into()]);
+    let globs = declared.cache_inputs.clone().unwrap();
+    let mut provenance = measured_provenance(root, &declared, &globs).unwrap();
+    provenance.tool = "a".repeat(40);
+    fs::write(
+        root.join(".ci/ccid.toml"),
+        format!(
+            "schema = 1\nproject = 'narrow-run'\n[checks.verify]\nkind = 'commands'\n\
+             commands = [['sh', '-c', 'echo ran >> .ccid/counter']]\n\
+             cache_tools = [['sh', '--version']]\n\
+             cache_inputs = ['src/**', 'Cargo.toml', '.ci/**']\n\
+             cache_inputs_measured = {{ tool = '{}', commands = '{}', inputs = '{}', layout = '{}', date = '{}' }}\n",
+            provenance.tool,
+            provenance.commands,
+            provenance.inputs,
+            provenance.layout,
+            provenance.date,
+        ),
+    )
+    .unwrap();
+    commit_all(root, "measured manifest");
+    let (parsed, _) = crate::load_manifest(root, Path::new(".ci/ccid.toml")).unwrap();
+    declared.cache_inputs_measured = Some(provenance);
+    assert_eq!(
+        parsed.checks["verify"].cache_inputs_measured,
+        declared.cache_inputs_measured
+    );
+
+    // The producer recorded a pass on this commit.
+    let first = prepared_for(root, &env, &parsed.checks["verify"]);
+    assert_eq!(first.scope(), "read-set");
+    write_record(
+        &store.path().join(STORE_DIR),
+        &Record {
+            tool,
+            ..record_for(&first)
+        },
+    )
+    .unwrap();
+
+    // The next commit changes only documentation: the cached run answers from the store.
+    fs::write(root.join("docs/guide.md"), "# guide, revised\n").unwrap();
+    commit_all(root, "docs only");
+    crate::cached::run_cached_with_environment(
+        root,
+        Path::new(".ci/ccid.toml"),
+        &["verify".to_owned()],
+        false,
+        false,
+        env.clone(),
+    )
+    .unwrap();
+    assert!(
+        !root.join(".ccid/counter").exists(),
+        "the check must not run for a commit outside its read-set"
+    );
+    let metrics: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join(".ccid/cache-metrics.json")).unwrap()).unwrap();
+    assert_eq!(metrics["checks"][0]["status"], "cached");
+    assert_eq!(metrics["checks"][0]["computed"], 0);
+}

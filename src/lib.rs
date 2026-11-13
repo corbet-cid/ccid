@@ -41,6 +41,7 @@ pub mod float;
 pub mod job_run;
 pub mod jobs;
 pub mod lock_refresh;
+mod narrowing;
 pub mod push;
 #[cfg(unix)]
 pub mod read_set;
@@ -250,6 +251,11 @@ pub struct Check {
     cache_env: Vec<String>,
     cache_commit: bool,
     cache_inputs: Option<Vec<String>>,
+    /// Provenance `ccid measure-inputs` prints with a measured `cache_inputs`. Only a check that
+    /// carries a valid one has its verdict keyed on that read-set (see `narrowing`). It is not
+    /// serialized: whether it holds decides the key's scope, it is not a key input itself.
+    #[serde(skip_serializing)]
+    cache_inputs_measured: Option<narrowing::Measured>,
     cache: Option<bool>,
     /// Deterministic checks are pure by default; `false` opts a check that
     /// observes the network or the clock out of result caching. It decides
