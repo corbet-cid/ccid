@@ -188,6 +188,29 @@ traces every read) remains the tool that finds the rest: measure again after a c
 the check a new dependency. On a host without `unix` the copy cannot be built and the whole tree
 is keyed.
 
+#### The standing fixture for narrowing
+
+The `narrow` check of the operator's `cx3-lfs-test` repository is the standing fixture for verdict
+narrowing; keep it as it is. It declares `cache_inputs` (`.ci/**`, `src/**`) and the
+`cache_inputs_measured` provenance, next to a `hello` check that stays whole-tree, and it runs on
+the same `linux` class as everything else. Its history is the end-to-end proof of each branch of
+this section, one `canary:` commit per branch:
+
+* `cache_inputs` without a measured read-set: whole-tree verdict key, and the moon result cache
+  narrows by `cache_inputs`;
+* a file touched outside `cache_inputs`: the verdict key changes, the moon hash does not;
+* the measured provenance plus a top-level entry the measurement never saw (`layout` differs):
+  whole-tree key again;
+* that entry removed (`layout` equals the measured one): a new narrowed key;
+* a file touched outside the read-set once more: the narrowed verdict answers and the check does
+  not run.
+
+A change to the key construction, the read-set proof or the layout rule is not done until the same
+sequence has been run against the release under test: push one `canary:` commit per branch and read
+the `verdict-narrowing` event of each run. The fixture is a probe, so a change to its check
+definition is a change to the evidence; make it deliberately and re-measure with
+`ccid measure-inputs`.
+
 ### Tool identity
 
 The toolchain is identified by what a tool **is**, not by how it was installed:
