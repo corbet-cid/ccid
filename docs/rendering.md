@@ -182,8 +182,9 @@ A Forgejo job whose checks read other repositories (a family of packages that
 verify each other) declares them in `siblings`: a key is a repository (`name`
 in the job's own owner, or `owner/name`), a value is `main` (the default-branch
 tip at run time) or an exact lowercase 40-hex commit. Before the checks, the
-workflow fetches each one read-only with the same discipline as the checkout (a
-few attempts against the runner's local copy, then against the forge itself) into
+workflow fetches each one read-only with the same discipline as the checkout (once
+through the runner's routing, which may send it to a local copy that lags a push
+by seconds; if that does not serve it, once from the forge itself, never a wait) into
 `<checkout>.siblings/<name>`, and exports `CCID_SIBLINGS_DIR` (that directory)
 and `CCID_SIBLINGS_REVISIONS` (`name=sha,...`, the resolved commits). A pinned
 commit that does not arrive fails the job. Because a `main` sibling moves
