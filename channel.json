@@ -8,6 +8,10 @@
     "linux": {
       "revision": "2fa90748702faa708af9dd27fd014cf51e723bbc",
       "sha256": "8f0d8cf05b2bc4a5a239bf4c739786885c96a71d58ceb800fe5b986c11a68891"
+    },
+    "macos": {
+      "revision": "3f8765322a9f4e679aed533d9cdfb49a35530606",
+      "sha256": "4c64ffd3fda3569f02d1f59512ee0e04388b91b149df1392cec30356b9450e64"
     }
   },
   "fleet": {
