@@ -2,8 +2,9 @@ set -eu
 # Upstream sync, step 1: merge one upstream commit into the downstream's default branch, locally. Nothing is pushed here.
 # Inputs (workflow environment): SYNC_SERVER, SYNC_REPOSITORY, SYNC_TOKEN, SYNC_UPSTREAM_COMMIT, SYNC_UPSTREAM_URL,
 # SYNC_UPSTREAM_BRANCH, SYNC_BRANCH. Optional runner settings: CCID_SOURCE_ROOT (stable work directory), CCID_LFS_STORAGE.
-# Result, in the file named by GITHUB_ENV: SYNC_WORK (the work tree), SYNC_MERGE (the commit to publish), SYNC_CHECK=1 when the
-# merge changed the branch and must be checked, SYNC_PUSH=1 when it must be pushed.
+# Result, in the file named by GITHUB_ENV: SYNC_REPO (the work tree, which holds the history), SYNC_WORK (a shallow export of the merge, the
+# checks run on it), SYNC_MERGE (the commit to publish), SYNC_CHECK=1 when the merge changed the branch and must be checked, SYNC_PUSH=1
+# when it must be pushed.
 env_out="${GITHUB_ENV:-/dev/null}"
 say() { printf 'upstream-sync: %s\n' "$*" >&2; }
 fail() { say "$*"; exit 1; }
@@ -17,13 +18,16 @@ case "$SYNC_UPSTREAM_URL" in https://*/*/*.git) ;; *) fail "the declared upstrea
 up_slug=${SYNC_UPSTREAM_URL#https://*/}
 up_slug=${up_slug%.git}
 served="${SYNC_SERVER%/}/$up_slug.git"
-api() { # url [curl arguments]: the body of a successful answer; the job token only ever goes to the forge that runs the job
-  url=$1; shift
-  curl --fail --silent --show-error --location --max-time 60 --retry 3 -H "Authorization: token $SYNC_TOKEN" "$@" "$url"
+api() { # url: the body of a successful answer, from the repository this job runs for (the job token reaches this repository only)
+  curl --fail --silent --show-error --location --max-time 60 --retry 3 -H "Authorization: token $SYNC_TOKEN" "$1"
+}
+up_api() { # url: the same for the upstream, which is another repository: anonymously first (a public upstream), then with the job token
+  curl --fail --silent --location --max-time 60 --retry 3 "$1" 2>/dev/null \
+    || curl --fail --silent --show-error --location --max-time 60 --retry 3 -H "Authorization: token $SYNC_TOKEN" "$1"
 }
 
 # 1. Only a commit whose own CI run is green may travel. The question goes to the forge that hosts the upstream.
-runs=$(api "${SYNC_SERVER%/}/api/v1/repos/$up_slug/actions/runs?head_sha=$commit&workflow_id=ci.yml&status=success&limit=1") \
+runs=$(up_api "${SYNC_SERVER%/}/api/v1/repos/$up_slug/actions/runs?head_sha=$commit&workflow_id=ci.yml&status=success&limit=1") \
   || fail "cannot read the upstream CI runs of $commit"
 [ "$(printf '%s' "$runs" | jq -r '(.total_count // (.workflow_runs | length) // 0)')" -ge 1 ] \
   || fail "the upstream commit $commit has no successful ci run: nothing is merged"
@@ -45,27 +49,28 @@ git config advice.detachedHead false
 git config gc.auto 0
 gitauth() { git -c "http.extraHeader=Authorization: token $SYNC_TOKEN" "$@"; }
 
-# The runner may route a fetch to a local copy that lags the push by seconds: compare with what the forge says the branch is.
+# The runner may route a fetch to a local copy of the repository (its own git configuration). That copy can lag a push by seconds, or not
+# have a new repository yet: every fetch goes through that route once, and what it did not bring is asked of the forge itself.
 tip=$(api "${SYNC_SERVER%/}/api/v1/repos/$SYNC_REPOSITORY/branches/$SYNC_BRANCH" | jq -r '.commit.id') \
   || fail "cannot read the branch $SYNC_BRANCH"
 case "$tip" in *[!0-9a-f]*|"") fail "the forge did not name the tip of $SYNC_BRANCH" ;; esac
-have=
-for attempt in 1 2 3; do
-  gitauth fetch --quiet --force --no-tags origin "+refs/heads/$SYNC_BRANCH:refs/remotes/origin/$SYNC_BRANCH" || true
-  if git cat-file -e "$tip^{commit}" 2>/dev/null; then have=1; break; fi
-  [ "$attempt" -lt 3 ] && sleep 5
-done
-if [ -z "$have" ]; then
+fetch_origin() { gitauth fetch --quiet --force --no-tags origin "+refs/heads/$SYNC_BRANCH:refs/remotes/origin/$SYNC_BRANCH"; }
+have_tip() { git cat-file -e "$tip^{commit}" 2>/dev/null; }
+direct() { GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 "$@"; } # without the runner's route to a local copy
+if ! { fetch_origin 2>/dev/null && have_tip; }; then
   say "the local copy lacks $tip: asking the forge itself"
-  if ! { GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 gitauth fetch --quiet --force --no-tags origin "+refs/heads/$SYNC_BRANCH:refs/remotes/origin/$SYNC_BRANCH" \
-      && git cat-file -e "$tip^{commit}" 2>/dev/null; }; then fail "cannot fetch $tip"; fi
+  if ! { direct fetch_origin && have_tip; }; then fail "cannot fetch $tip"; fi
 fi
 git update-ref "refs/remotes/origin/$SYNC_BRANCH" "$tip"
 
 # The upstream is public or readable by the job; its branch and its release tags travel, nothing else.
-if ! git fetch --quiet --force --no-tags upstream "+refs/heads/$SYNC_UPSTREAM_BRANCH:refs/remotes/upstream/$SYNC_UPSTREAM_BRANCH" "+refs/tags/v*:refs/upstream-tags/v*" 2>/dev/null; then
-  gitauth fetch --quiet --force --no-tags upstream "+refs/heads/$SYNC_UPSTREAM_BRANCH:refs/remotes/upstream/$SYNC_UPSTREAM_BRANCH" "+refs/tags/v*:refs/upstream-tags/v*" \
-    || fail "cannot fetch the upstream"
+# The optional arguments are extra git options, passed through direct().
+# shellcheck disable=SC2119,SC2120
+fetch_upstream() { git "$@" fetch --quiet --force --no-tags upstream "+refs/heads/$SYNC_UPSTREAM_BRANCH:refs/remotes/upstream/$SYNC_UPSTREAM_BRANCH" "+refs/tags/v*:refs/upstream-tags/v*"; }
+have_commit() { git cat-file -e "$commit^{commit}" 2>/dev/null; }
+if ! { fetch_upstream 2>/dev/null && have_commit; }; then
+  say "the local copy lacks the upstream: asking the forge itself"
+  if ! direct fetch_upstream 2>/dev/null && ! direct fetch_upstream -c "http.extraHeader=Authorization: token $SYNC_TOKEN"; then fail "cannot fetch the upstream"; fi
 fi
 git cat-file -e "$commit^{commit}" 2>/dev/null || fail "the upstream does not have $commit"
 git merge-base --is-ancestor "$commit" "refs/remotes/upstream/$SYNC_UPSTREAM_BRANCH" \
@@ -75,7 +80,7 @@ git merge-base --is-ancestor "$commit" "refs/remotes/upstream/$SYNC_UPSTREAM_BRA
 git checkout --quiet --force --detach "$tip"
 git clean --quiet -ffdx
 {
-  echo "SYNC_WORK=$work"
+  echo "SYNC_REPO=$work"
   echo "SYNC_TIP=$tip"
 } >> "$env_out"
 if git merge-base --is-ancestor "$commit" "$tip"; then
@@ -106,16 +111,30 @@ if [ -n "$stray" ]; then
   fail "paths outside the downstream's own, nothing is pushed: $stray"
 fi
 
-# 4. The checks need real files, not Git LFS pointers: objects come from the shared store, the upstream, then this repository.
+# 4. What the checks see is the layout of every other job: a shallow checkout of the one commit, detached. Real files, not Git LFS pointers:
+# the objects come from the shared store, the upstream's, then this repository's.
+export_dir="$work-check"
+if [ -d "$export_dir" ]; then find "$export_dir" -delete; fi
+mkdir -p "$export_dir"
 if git show "$merge:.gitattributes" 2>/dev/null | grep -q 'filter=lfs'; then
+  lfs_store="${CCID_LFS_STORAGE:-$work/.git/lfs}"
+  mkdir -p "$lfs_store"
   git lfs install --local --skip-smudge >/dev/null
-  if [ -n "${CCID_LFS_STORAGE:-}" ]; then mkdir -p "$CCID_LFS_STORAGE"; git config lfs.storage "$CCID_LFS_STORAGE"; fi
+  git config lfs.storage "$lfs_store"
+  ( [ -z "${CCID_LFS_STORAGE:-}" ] || umask 002; git lfs fetch "$served" "$commit" >/dev/null 2>&1 || true )
+fi
+git -C "$export_dir" init --quiet .
+git -C "$export_dir" remote add origin "${SYNC_SERVER%/}/$SYNC_REPOSITORY.git"
+git -C "$export_dir" fetch --quiet --depth 1 "file://$work" "$merge"
+GIT_LFS_SKIP_SMUDGE=1 git -C "$export_dir" checkout --quiet --force --detach FETCH_HEAD
+if git -C "$export_dir" show "FETCH_HEAD:.gitattributes" 2>/dev/null | grep -q 'filter=lfs'; then
+  git -C "$export_dir" lfs install --local --skip-smudge >/dev/null
+  git -C "$export_dir" config lfs.storage "$lfs_store"
+  # The helper runs in git's shell: $CCID_LFS_TOKEN must stay unexpanded here.
+  # shellcheck disable=SC2016
+  helper='!f() { echo username=x-access-token; echo "password=$CCID_LFS_TOKEN"; }; f'
   ( [ -z "${CCID_LFS_STORAGE:-}" ] || umask 002
-    git lfs fetch "$served" "$commit" >/dev/null 2>&1 || true
-    # The helper runs in git's shell: $CCID_LFS_TOKEN must stay unexpanded here.
-    # shellcheck disable=SC2016
-    helper='!f() { echo username=x-access-token; echo "password=$CCID_LFS_TOKEN"; }; f'
-    CCID_LFS_TOKEN=$SYNC_TOKEN git -c "credential.helper=$helper" lfs pull origin ) \
+    CCID_LFS_TOKEN=$SYNC_TOKEN git -C "$export_dir" -c "credential.helper=$helper" lfs pull origin ) \
     || fail "cannot materialise the Git LFS files of $merge"
 fi
-{ echo "SYNC_MERGE=$merge"; echo "SYNC_CHECK=1"; echo "SYNC_PUSH=1"; } >> "$env_out"
+{ echo "SYNC_WORK=$export_dir"; echo "SYNC_MERGE=$merge"; echo "SYNC_CHECK=1"; echo "SYNC_PUSH=1"; } >> "$env_out"

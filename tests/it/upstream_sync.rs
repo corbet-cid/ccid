@@ -327,7 +327,7 @@ impl Forge {
     /// Step 3 with what step 1 produced.
     fn publish_step(&self, merged: &Outcome) -> Outcome {
         let mut env = self.env("", "https://forge.example/team/up.git");
-        for name in ["SYNC_WORK", "SYNC_MERGE", "SYNC_PUSH"] {
+        for name in ["SYNC_REPO", "SYNC_MERGE", "SYNC_PUSH"] {
             env.push((name.into(), merged.var(name).unwrap_or_default()));
         }
         let env_file = self.dir.path().join("env-publish");
@@ -450,8 +450,20 @@ fn a_clean_merge_is_pushed_only_by_the_last_step() {
     assert_ne!(merge, before);
     // Nothing reached the forge yet: the checks run on the local merge first.
     assert_eq!(forge.down_main(), before);
+    // The checks see the layout of every other job: a shallow, detached checkout of the one commit.
     let work = PathBuf::from(merged.var("SYNC_WORK").unwrap());
     assert_eq!(git(&work, &["rev-parse", "HEAD"]), merge);
+    assert_eq!(
+        git(&work, &["rev-parse", "--is-shallow-repository"]),
+        "true"
+    );
+    assert_eq!(git(&work, &["rev-list", "--count", "HEAD"]), "1");
+    let repo = PathBuf::from(merged.var("SYNC_REPO").unwrap());
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), merge);
+    assert_eq!(
+        git(&repo, &["rev-parse", "--is-shallow-repository"]),
+        "false"
+    );
     assert_eq!(
         git(&work, &["show", "-s", "--format=%an <%ae>"],),
         "Test Author <author@example.test>"
@@ -659,12 +671,15 @@ fn the_declared_host_only_names_the_upstream_it_is_read_from_the_forge_that_runs
         requests.contains("GET https://forge.example/api/v1/repos/team/up/actions/runs?head_sha="),
         "{requests}"
     );
-    // Every request carries the job token, and only the forge that runs the job ever sees it.
+    // The job token reaches the downstream's own repository only; the upstream is read anonymously first, and only the
+    // forge that runs the job ever sees either.
     for line in requests.lines() {
-        assert!(
-            line.contains("https://forge.example/") && line.ends_with("auth=yes"),
-            "{line}"
-        );
+        assert!(line.contains("https://forge.example/"), "{line}");
+        if line.contains("/repos/team/down/") {
+            assert!(line.ends_with("auth=yes"), "{line}");
+        } else {
+            assert!(line.ends_with("auth=no"), "{line}");
+        }
     }
 }
 

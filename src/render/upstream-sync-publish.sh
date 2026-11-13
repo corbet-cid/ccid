@@ -2,16 +2,20 @@ set -eu
 # Upstream sync, step 3: runs only after the merge was clean and every check was green. Pushes the merge to the branch, gives the
 # downstream the upstream's release tags on the first of its commits that contains them, and records each upstream release as a
 # release of the downstream that carries no build of its own.
-# Inputs: SYNC_SERVER, SYNC_REPOSITORY, SYNC_TOKEN, SYNC_UPSTREAM_URL, SYNC_BRANCH, and from step 1: SYNC_WORK, SYNC_MERGE, SYNC_PUSH.
+# Inputs: SYNC_SERVER, SYNC_REPOSITORY, SYNC_TOKEN, SYNC_UPSTREAM_URL, SYNC_BRANCH, and from step 1: SYNC_REPO, SYNC_MERGE, SYNC_PUSH.
 say() { printf 'upstream-sync: %s\n' "$*" >&2; }
 fail() { say "$*"; exit 1; }
-cd "$SYNC_WORK"
+cd "$SYNC_REPO"
 gitauth() { git -c "http.extraHeader=Authorization: token $SYNC_TOKEN" "$@"; }
 server=${SYNC_SERVER%/}
 up_slug=${SYNC_UPSTREAM_URL#https://*/}
 up_slug=${up_slug%.git}
 down_api="$server/api/v1/repos/$SYNC_REPOSITORY"
 mine() { curl --silent --show-error --location --max-time 60 --retry 3 -H "Authorization: token $SYNC_TOKEN" "$@"; }
+theirs() { # url: the upstream is another repository: anonymously first (a public upstream), then with the job token
+  curl --fail --silent --location --max-time 60 --retry 3 "$1" 2>/dev/null \
+    || curl --fail --silent --show-error --location --max-time 60 --retry 3 -H "Authorization: token $SYNC_TOKEN" "$1"
+}
 
 # 1. The merge. A plain push: if the branch moved meanwhile the forge refuses and the run is red; the next sync merges again.
 if [ "${SYNC_PUSH:-0}" = 1 ]; then
@@ -47,7 +51,7 @@ git for-each-ref --format='%(refname:strip=2) %(objectname)' 'refs/upstream-tags
   fi
   # 3. The release of that tag: pointing at the upstream's assets, no build and no copy of its own.
   if [ "$(mine -o /dev/null -w '%{http_code}' "$down_api/releases/tags/$tag")" = 200 ]; then say "release $tag exists in the downstream"; continue; fi
-  release=$(mine --fail "$server/api/v1/repos/$up_slug/releases/tags/$tag" 2>/dev/null) || { say "the upstream has no release for $tag yet: a later sync carries it"; continue; }
+  release=$(theirs "$server/api/v1/repos/$up_slug/releases/tags/$tag" 2>/dev/null) || { say "the upstream has no release for $tag yet: a later sync carries it"; continue; }
   [ "$(printf '%s' "$release" | jq -r '.draft')" = false ] || { say "the upstream release $tag is still a draft"; continue; }
   version=${tag#v}
   body=$(printf '%s' "$release" | jq -r --arg tag "$tag" '
