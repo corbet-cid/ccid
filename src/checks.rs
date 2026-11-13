@@ -275,6 +275,13 @@ fn nix_mode(check: &Check) -> Result<&str> {
 
 pub(crate) fn validate_check(check: &Check) -> Result<()> {
     crate::narrowing::validate_declaration(check)?;
+    if check.kind != crate::pack::KIND
+        && (check.crates.is_some() || check.npm.is_some() || check.pypi.is_some())
+    {
+        return Err(failure(
+            "crates, npm and pypi are keys of kind = \"pack\" only",
+        ));
+    }
     let commands = match check.kind.as_str() {
         "cargo" => {
             if check.toolchain.as_deref() == Some("") {
@@ -293,6 +300,7 @@ pub(crate) fn validate_check(check: &Check) -> Result<()> {
             nix_mode(check)?;
             return Ok(());
         }
+        "pack" => return crate::pack::validate(check),
         "commands" if !check.commands.is_empty() => check.commands.clone(),
         "commands" => return Err(failure("Custom command selection is empty")),
         _ => return Err(failure(format!("Unknown check kind: {}", check.kind))),

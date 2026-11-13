@@ -241,6 +241,7 @@ impl Config {
         }
         known(&self.build, "build")?;
         known(&self.seal, "seal")?;
+        self.validate_pack(manifest)?;
         if self.seal.is_empty() != self.manifests.is_empty() {
             return Err(failure(
                 "[release] seal and manifests go together: seal derives the manifests, and the manifests are what seal may replace",
@@ -305,6 +306,54 @@ impl Config {
         }
         if let Some(notes) = &self.notes {
             version::check_relative(notes)?;
+        }
+        Ok(())
+    }
+
+    /// The pack check (`kind = "pack"`, [`crate::pack`]) belongs to `build`, is the only one, and packs for exactly the
+    /// registries the release publishes to (`aur` is not packed): nothing is packed that is never published, nothing is
+    /// published that was never packed.
+    fn validate_pack(&self, manifest: &crate::Manifest) -> Result<()> {
+        let is_pack = |name: &&String| {
+            manifest
+                .checks
+                .get(*name)
+                .is_some_and(|check| check.kind == crate::pack::KIND)
+        };
+        if let Some(name) = self.seal.iter().chain(self.legs.values()).find(is_pack) {
+            return Err(failure(format!(
+                "[release] the pack check {name} belongs to build: seal and the legs never pack"
+            )));
+        }
+        let packs: Vec<&String> = self.build.iter().filter(is_pack).collect();
+        let pack = match packs.as_slice() {
+            [] => return Ok(()),
+            [only] => *only,
+            _ => {
+                return Err(failure(
+                    "[release] build names more than one pack check: one pack check names every package",
+                ))
+            }
+        };
+        let name = |registry: &Registry| format!("{registry:?}").to_lowercase();
+        let packed = crate::pack::registries(&manifest.checks[pack]);
+        let published: Vec<Registry> = self
+            .registries
+            .iter()
+            .copied()
+            .filter(|registry| *registry != Registry::Aur)
+            .collect();
+        if let Some(registry) = packed.iter().find(|r| !published.contains(r)) {
+            return Err(failure(format!(
+                "[release] the pack check {pack} packs {} but registries does not publish to it (packed, never published)",
+                name(registry)
+            )));
+        }
+        if let Some(registry) = published.iter().find(|r| !packed.contains(r)) {
+            return Err(failure(format!(
+                "[release] registries names {} but the pack check {pack} has no key for it (published, never packed)",
+                name(registry)
+            )));
         }
         Ok(())
     }
@@ -485,6 +534,79 @@ mod tests {
             "kind = \"binary\"\nversion = \"Cargo.toml\"\nknob = 1\n"
         )
         .is_err());
+    }
+
+    fn library(registries: &str, pack: &str, extra: &str) -> crate::Manifest {
+        let text = format!(
+            "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.pack]\n{pack}\n{extra}\n\
+             [release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\"]\nregistries = {registries}\n"
+        );
+        crate::parse_manifest(text.as_bytes()).unwrap()
+    }
+
+    fn validated(manifest: &crate::Manifest) -> Result<()> {
+        manifest.release.as_ref().unwrap().validate(manifest)
+    }
+
+    #[test]
+    fn a_pack_check_packs_for_exactly_the_registries_published() {
+        let pack = "kind = \"pack\"\ncrates = \".\"\nnpm = \"js\"\npypi = \"py\"";
+        assert!(validated(&library("[\"crates\", \"npm\", \"pypi\"]", pack, "")).is_ok());
+        // aur is not packed: its recipe is not a library package.
+        assert!(validated(&library(
+            "[\"crates\", \"npm\", \"pypi\", \"aur\"]",
+            pack,
+            ""
+        ))
+        .is_ok());
+        let published_never_packed = validated(&library(
+            "[\"crates\", \"npm\", \"pypi\"]",
+            "kind = \"pack\"\ncrates = \".\"",
+            "",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            published_never_packed.contains("npm")
+                && published_never_packed.contains("never packed"),
+            "{published_never_packed}"
+        );
+        let packed_never_published = validated(&library("[\"crates\"]", pack, ""))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            packed_never_published.contains("never published"),
+            "{packed_never_published}"
+        );
+    }
+
+    #[test]
+    fn a_pack_check_belongs_to_build_and_is_alone() {
+        let pack = "kind = \"pack\"\ncrates = \".\"";
+        let sealed = crate::parse_manifest(
+            format!(
+                "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.pack]\n{pack}\n\n[checks.also]\n{pack}\n\
+                 [release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\", \"also\"]\nregistries = [\"crates\"]\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(validated(&sealed)
+            .unwrap_err()
+            .to_string()
+            .contains("more than one pack"));
+        let in_seal = crate::parse_manifest(
+            format!(
+                "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.pack]\n{pack}\n\n[checks.seal]\nkind = \"commands\"\ncommands = [[\"true\"]]\n\
+                 [checks.again]\n{pack}\n[release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\"]\nseal = [\"again\"]\nmanifests = [\"m.json\"]\nregistries = [\"crates\"]\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(validated(&in_seal)
+            .unwrap_err()
+            .to_string()
+            .contains("belongs to build"));
     }
 
     #[test]

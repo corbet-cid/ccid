@@ -104,6 +104,56 @@ The forge is `GITHUB_SERVER_URL` and `GITHUB_REPOSITORY` (the runner sets both) 
 (`CCID_FORGE_TOKEN`). The read credential is the file named by `CCID_FORGE_READ_TOKEN_FILE`, else
 `$CREDENTIALS_DIRECTORY/forgejo-ci-read`. Build and seal checks do not see any of these credentials.
 
+## Libraries: the `pack` check
+
+A library's release is its registry packages. They are made ONCE, by the release run, before anything is public
+(R23); the registries, the forge release and every copy then carry the same files (R8, R24, U6). A repository declares
+one check of `kind = "pack"` and names it in `[release] build`:
+
+```toml
+[checks.pack]
+kind = "pack"
+crates = "."                        # the directory of the published crate's Cargo.toml
+npm = "js/@corbet-labs/cgreet"      # the directory of its package.json
+pypi = "py"                         # the directory of its pyproject.toml
+
+[release]
+kind = "library"
+version = "Cargo.toml"
+registries = ["crates", "npm", "pypi"]
+build = ["pack"]
+```
+
+| key | file left in `$CCID_RELEASE_DIR` | how |
+|---|---|---|
+| `crates` | `<name>-<version>.crate` | `cargo fetch --locked`, then `cargo package --locked --offline` from the clean checkout (never `--allow-dirty`) |
+| `npm` | `<name>-<version>.tgz` (`@scope/name` as `scope-name-<version>.tgz`) | the commit's files (`git archive`), `bun install --frozen-lockfile` or `npm ci`, then `npm pack` (so `prepack` builds) |
+| `pypi` | `<norm>-<version>.tar.gz` and `<norm>-<version>-py3-none-any.whl` | the same files, `uv build --no-config --build-constraints build-constraints.txt --require-build-hashes` |
+
+The rules, all refused when the manifest is read (`render --check`, `release version`, `preflight`) or before any
+tool runs:
+
+- The keys name exactly the registries of `registries` without `aur`: a registry with no key is "published, never
+  packed", a key with no registry is "packed, never published". `jsr` is not a registry (R46). A native wheel is a
+  binary with platforms (R21), not a library pack: any file other than the two above is refused by name.
+- The pack check belongs to `build` and is the only one. It is never a check of a job: a commit's verify does not pack
+  (A8), and a pack is never cached, because the release run makes its files from the commit.
+- Every package carries the release version (`Cargo.toml` `[package].version`, `package.json` `version`,
+  `pyproject.toml` `[project].version`); a workspace-inherited or `dynamic` version cannot be released.
+- The Python build backend is pinned by hashes in `<pypi>/build-constraints.txt`, a lock file (`uv pip compile
+  --universal --generate-hashes`) refreshed with the other locks (R48), so no build input is resolved at release time.
+  `SOURCE_DATE_EPOCH` is the committer time of the commit: packing the same commit twice gives the same bytes.
+- A pack runs with the release build's environment, which has no credentials; the only network use is the fetch of what
+  a lock names (the crates, the npm packages, the pinned build backend).
+- bun, uv and npm work from caches of the pack's own (empty at the start, gone with its scratch directory), never from
+  a cache the runner shares with other jobs. uv fetches no Python interpreter (`UV_PYTHON_DOWNLOADS=never`) and uses none
+  of its own managed ones (`UV_PYTHON_PREFERENCE=only-system`): the Python is one the runner provides. The cargo home
+  and the tools' configuration files (`~/.npmrc`, a global bunfig) are not made private: they stay the runner's own.
+
+A pack that fails stops the release run before the draft exists, so nothing becomes public. The publisher on the
+datacenter side downloads the public release `v<version>` and uploads exactly these files, after checking them against
+its `SHA256SUMS`.
+
 ## The third-party lock refresh
 
 Every release run starts with `ccid lock-refresh --third-party` (when the repository tracks a `Cargo.lock`).
@@ -155,3 +205,5 @@ put on the channel, and what the clone's runner environment must provide: [darwi
 so a repository never loses its release before it has a new one). Check that `registries` names every
 registry the old workflows published to. The GitHub release workflow of a JSR library published both Cargo and
 JSR; JSR is now left out until it can be published from our side (see JSR above).
+A library's own packing code (a `release-check.py`, a `publish.py`, the packing steps of a GitHub release workflow)
+goes with them: `kind = "pack"` makes the files, the publisher uploads them.

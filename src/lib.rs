@@ -43,6 +43,7 @@ pub mod job_run;
 pub mod jobs;
 pub mod lock_refresh;
 mod narrowing;
+mod pack;
 pub mod push;
 #[cfg(unix)]
 pub mod read_set;
@@ -267,6 +268,14 @@ pub struct Check {
     /// The check reads the release channel's fleet data: its keys include the fleet digest and it refuses to run without fleet data.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     fleet: bool,
+    /// `kind = "pack"` only: the directory of the crate's `Cargo.toml`, of the npm package's `package.json` and of the
+    /// Python package's `pyproject.toml` that the release packs (see `pack`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crates: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    npm: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pypi: Option<String>,
 }
 /// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
 fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
@@ -783,6 +792,10 @@ fn run_checks_inner(
                 for command in &check.commands {
                     runner.run(command, false)?;
                 }
+            }
+            "pack" => {
+                runner.nix_inventory = None;
+                pack::run(check, &runner)?;
             }
             _ => return Err(failure(format!("Unknown check kind: {}", check.kind))),
         }

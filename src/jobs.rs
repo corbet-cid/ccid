@@ -374,6 +374,14 @@ pub(crate) fn plan_parsed(
         .get(name)
         .ok_or_else(|| failure(format!("Unknown job: {name}")))?;
     let checks = select_checks(manifest, &job.checks)?;
+    if let Some(pack) = checks
+        .iter()
+        .find(|name| manifest.checks[*name].kind == crate::pack::KIND)
+    {
+        return Err(failure(format!(
+            "[jobs.{name}] names the check {pack}, which is kind = \"pack\": a pack runs in the release run only ([release] build), never in a job (operating model A8)"
+        )));
+    }
     let effective = scheduler.unwrap_or(job.scheduler);
     // Remote jobs have no command: the provider workflow is the command.
     if effective != Scheduler::Remote {

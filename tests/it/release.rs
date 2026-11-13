@@ -66,6 +66,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 impl Fixture {
     fn new(manifest: &str, version: &str) -> Fixture {
+        Fixture::with_files(manifest, version, &[])
+    }
+
+    /// [`Fixture::new`] with more files in the one commit.
+    fn with_files(manifest: &str, version: &str, files: &[(&str, &str)]) -> Fixture {
         let repo = tempfile::tempdir().unwrap();
         git(repo.path(), &["init", "-q"]);
         fs::create_dir_all(repo.path().join(".ci")).unwrap();
@@ -75,6 +80,11 @@ impl Fixture {
             format!("[package]\nname = \"demo\"\nversion = \"{version}\"\n"),
         )
         .unwrap();
+        for (path, text) in files {
+            let full = repo.path().join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, text).unwrap();
+        }
         git(repo.path(), &["add", "-A"]);
         git(repo.path(), &["commit", "-q", "-m", "fixture"]);
         let sha = git(repo.path(), &["rev-parse", "HEAD"]);
@@ -552,4 +562,235 @@ fn a_successful_upload_is_never_followed_by_a_pause() {
         "the build paused after successful uploads: {:?}",
         started.elapsed()
     );
+}
+
+// ---- the pack check (kind = "pack"): one pack, before anything is public ----------------------------------------------
+// Unix only: the fake package tools are shell scripts (ccid's Windows coverage is a compile gate, not a test leg).
+#[cfg(unix)]
+mod pack_release {
+    use super::*;
+
+    const PACKED: &str = "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n\
+        [checks.pack]\nkind = \"pack\"\ncrates = \".\"\nnpm = \"js\"\npypi = \"py\"\n\n\
+        [checks.test]\nkind = \"commands\"\ncommands = [[\"true\"]]\n\n\
+        [jobs.verify]\nscheduler = \"forgejo\"\nchecks = [\"test\"]\nworkflow = \"ci\"\ncommand = [\"ccid:run-declared-checks\"]\n\n\
+        [release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\"]\nregistries = [\"crates\", \"npm\", \"pypi\"]\n";
+
+    /// The package files of the fixture: an npm package with a bun lock and a Python package with its hash-locked backend.
+    fn package_files(npm_version: &str) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "js/package.json",
+                format!("{{\"name\":\"@demo/demo\",\"version\":\"{npm_version}\"}}"),
+            ),
+            ("js/bun.lock", String::new()),
+            (
+                "py/pyproject.toml",
+                "[project]\nname = \"demo\"\nversion = \"1.2.0\"\n".to_owned(),
+            ),
+            (
+                "py/build-constraints.txt",
+                "hatchling==1.0.0 --hash=sha256:00\n".to_owned(),
+            ),
+        ]
+    }
+
+    /// Fake package tools that leave the files the real ones leave. `FAKE_FAIL=<tool>` makes one tool fail and
+    /// `FAKE_WHEEL` names the wheel the fake `uv` writes.
+    fn fake_tools(dir: &Path) -> String {
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            fs::write(
+                &path,
+                format!("#!/bin/sh\n[ \"${{FAKE_FAIL:-}}\" = {name} ] && exit 1\n{body}"),
+            )
+            .unwrap();
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+            fs::set_permissions(&path, permissions).unwrap();
+        };
+        script(
+            "cargo",
+            "case \"$1\" in fetch) exit 0;; package) mkdir -p \"$CARGO_TARGET_DIR/package\"; printf crate-bytes > \"$CARGO_TARGET_DIR/package/demo-1.2.0.crate\"; exit 0;; esac\nexit 3\n",
+        );
+        script(
+            "bun",
+            "printf '%s\\n' \"$BUN_INSTALL_CACHE_DIR\" >> \"$0.env\"\nexit 0\n",
+        );
+        script(
+            "npm",
+            "printf '%s\\n' \"$npm_config_cache\" >> \"$0.env\"\n\
+             dest=; while [ $# -gt 0 ]; do [ \"$1\" = --pack-destination ] && dest=$2; shift; done\n\
+             d=$(mktemp -d); mkdir \"$d/package\"; printf '{\"name\":\"@demo/demo\",\"version\":\"1.2.0\"}' > \"$d/package/package.json\"\n\
+             tar -czf \"$dest/demo-demo-1.2.0.tgz\" -C \"$d\" package\n",
+        );
+        script(
+            "uv",
+            "printf '%s %s %s\\n' \"$UV_CACHE_DIR\" \"$UV_PYTHON_DOWNLOADS\" \"$UV_PYTHON_PREFERENCE\" >> \"$0.env\"\n\
+             out=; while [ $# -gt 0 ]; do [ \"$1\" = --out-dir ] && out=$2; shift; done\n\
+             printf '*' > \"$out/.gitignore\"; printf sdist > \"$out/demo-1.2.0.tar.gz\"; printf wheel > \"$out/${FAKE_WHEEL:-demo-1.2.0-py3-none-any.whl}\"\n",
+        );
+        format!(
+            "{}:{}",
+            dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
+    /// A fixture, the extra environment of the build, and the text the refusal must name.
+    type Case<'a> = (Fixture, Vec<(&'a str, &'a str)>, &'a str);
+
+    fn packed_fixture(npm_version: &str, with_constraints: bool) -> Fixture {
+        let files = package_files(npm_version);
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .filter(|(path, _)| with_constraints || !path.ends_with("build-constraints.txt"))
+            .map(|(path, text)| (*path, text.as_str()))
+            .collect();
+        Fixture::with_files(PACKED, "1.2.0", &files)
+    }
+
+    #[test]
+    fn a_pack_release_drafts_exactly_the_packed_files_of_every_registry() {
+        let tools = tempfile::tempdir().unwrap();
+        let path = fake_tools(tools.path());
+        let fixture = packed_fixture("1.2.0", true);
+        // A runner that names shared package caches and lets uv fetch interpreters: the pack ignores both.
+        let built = fixture.ccid(
+            &["release", "build"],
+            &[
+                ("PATH", &path),
+                ("BUN_INSTALL_CACHE_DIR", "/shared/bun"),
+                ("UV_CACHE_DIR", "/shared/uv"),
+                ("npm_config_cache", "/shared/npm"),
+                ("UV_PYTHON_DOWNLOADS", "automatic"),
+                ("UV_PYTHON_PREFERENCE", "managed"),
+            ],
+        );
+        assert!(built.status.success(), "{}", text(&built));
+        let seen = |tool: &str| {
+            fs::read_to_string(tools.path().join(format!("{tool}.env")))
+                .unwrap_or_else(|error| panic!("the fake {tool} was not run: {error}"))
+        };
+        let private = |line: &str, directory: &str| {
+            let path = line.trim_end();
+            path.contains("/ccid-pack-") && path.ends_with(directory)
+        };
+        assert!(private(&seen("bun"), "/bun-cache"), "{}", seen("bun"));
+        assert!(private(&seen("npm"), "/npm-cache"), "{}", seen("npm"));
+        let uv = seen("uv");
+        let uv: Vec<&str> = uv.split_whitespace().collect();
+        assert!(
+            uv.len() == 3
+                && private(uv[0], "/uv-cache")
+                && uv[1] == "never"
+                && uv[2] == "only-system",
+            "{uv:?}"
+        );
+        let mut names = fixture.forge.names(&fixture.draft_tag());
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "demo-1.2.0-py3-none-any.whl",
+                "demo-1.2.0.crate",
+                "demo-1.2.0.tar.gz",
+                "demo-demo-1.2.0.tgz"
+            ]
+        );
+        assert_eq!(
+            fixture
+                .forge
+                .asset(&fixture.draft_tag(), "demo-1.2.0.crate")
+                .unwrap(),
+            b"crate-bytes"
+        );
+        // The scratch marker uv leaves is not a release file.
+        assert!(!names.iter().any(|name| name.starts_with('.')));
+    }
+
+    #[test]
+    fn a_pack_that_cannot_pack_stops_the_release_before_a_draft_exists() {
+        let tools = tempfile::tempdir().unwrap();
+        let path = fake_tools(tools.path());
+        let cases: Vec<Case> = vec![
+            // a bump forgotten in package.json
+            (
+                packed_fixture("1.1.0", true),
+                vec![("PATH", &path)],
+                "js/package.json says 1.1.0",
+            ),
+            // the hash-locked backend pins are missing
+            (
+                packed_fixture("1.2.0", false),
+                vec![("PATH", &path)],
+                "py/build-constraints.txt is missing",
+            ),
+            // a tool fails (a broken verify build of the crate)
+            (
+                packed_fixture("1.2.0", true),
+                vec![("PATH", &path), ("FAKE_FAIL", "cargo")],
+                "cargo",
+            ),
+            // a native wheel is a binary with platforms, not a library pack
+            (
+                packed_fixture("1.2.0", true),
+                vec![
+                    ("PATH", &path),
+                    ("FAKE_WHEEL", "demo-1.2.0-cp312-linux_x86_64.whl"),
+                ],
+                "cp312",
+            ),
+        ];
+        for (fixture, environment, named) in cases {
+            let built = fixture.ccid(&["release", "build"], &environment);
+            assert!(!built.status.success(), "{named}: {}", text(&built));
+            assert!(text(&built).contains(named), "{named}: {}", text(&built));
+            assert!(
+                fixture.forge.release(&fixture.draft_tag()).is_none(),
+                "{named}: a draft was created"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pack_check_is_refused_in_a_job_and_the_release_rules_hold() {
+        let in_job = PACKED.replace("checks = [\"test\"]", "checks = [\"test\", \"pack\"]");
+        let fixture = Fixture::new(&in_job, "1.2.0");
+        let refused = fixture.ccid(
+            &[
+                "job-run",
+                "--local",
+                "--source",
+                &fixture.repo.path().display().to_string(),
+                "--sha",
+                &fixture.sha,
+                "--job",
+                "verify",
+                "--repository",
+                OWNER_REPO,
+                "--server-url",
+                &fixture.forge.url,
+                "--owner",
+                "o",
+            ],
+            &[],
+        );
+        assert!(!refused.status.success());
+        assert!(
+            text(&refused).contains("a pack runs in the release run only"),
+            "{}",
+            text(&refused)
+        );
+        // registries and keys must match: pypi is published but has no key.
+        let unpacked = PACKED.replace("pypi = \"py\"\n", "");
+        let fixture = Fixture::new(&unpacked, "1.2.0");
+        let version = fixture.ccid(&["release", "version"], &[]);
+        assert!(!version.status.success());
+        assert!(
+            text(&version).contains("published, never packed"),
+            "{}",
+            text(&version)
+        );
+    }
 }
