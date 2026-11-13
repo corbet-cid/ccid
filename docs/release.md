@@ -137,6 +137,11 @@ ccid release put FILE... | fetch [NAME...] --into DIR | discard | sums DIR
 `discard` deletes the draft of the commit (never a public release); use it when a failed run left a draft
 whose bytes the next run will not match (a receipt that carries the run's identity).
 
+## The macOS leg needs a macOS ccid
+
+A job of the label `macos` starts by finding a ccid on the release channel. How the macOS binary is built, tested and
+put on the channel, and what the clone's runner environment must provide: [darwin.md](darwin.md).
+
 ## Moving a repository onto it
 
 `ccid surface plan` shows the files the table replaces. With `[release]` declared, the hand-written

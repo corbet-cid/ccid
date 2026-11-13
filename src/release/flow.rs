@@ -554,6 +554,8 @@ fn verify_seal(
                     "the seal checks changed {name}: they may replace the declared manifests only"
                 )))
             }
+            // The checksum file is derived again by ccid; any other file stays.
+            None if name == SUMS => {}
             None => {
                 return Err(failure(format!(
                     "the seal checks removed {name}: a release loses no file"
@@ -818,6 +820,23 @@ mod tests {
             &manifests,
         );
         assert!(added.unwrap_err().to_string().contains("added x"));
+    }
+
+    #[test]
+    fn a_seal_may_delete_the_checksum_file_it_will_not_see_again_but_no_other_file() {
+        let manifests = vec!["manifest.json".to_owned()];
+        let before = map(&[("a.bin", "1"), ("manifest.json", "2"), (SUMS, "9")]);
+        assert!(verify_seal(
+            &before,
+            &map(&[("a.bin", "1"), ("manifest.json", "2")]),
+            &manifests
+        )
+        .is_ok());
+        let manifest = verify_seal(&before, &map(&[("a.bin", "1"), (SUMS, "9")]), &manifests);
+        assert!(manifest
+            .unwrap_err()
+            .to_string()
+            .contains("removed manifest.json"));
     }
 
     #[test]

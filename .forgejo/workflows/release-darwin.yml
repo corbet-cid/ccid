@@ -1,0 +1,38 @@
+# Written by hand: ccid has no macOS binary yet, and the rendered shim of a job on the label `macos` starts by finding one.
+#
+# The macOS binary of ccid, for the tool channel: built natively and tested in the macOS build clone, left in the
+# draft release `darwin-<commit>` (.ci/release-darwin.sh). Dispatch it on the commit that is being released, then
+# run .ci/release-darwin-publish.sh where the registry credential lives. See docs/darwin.md.
+#
+# A job of the label `macos` runs INSIDE the clone as the user `ci`: bash 3.2, the BSD userland, the Command Line
+# Tools, the Rust toolchain and the compile cache of the cache disk (CI_SOURCE_ROOT, CI_CACHE_ROOT). There is no
+# node: run steps only. Steps run `bash -e`.
+name: release-darwin
+on:
+  workflow_dispatch:
+concurrency:
+  group: release-darwin-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release-darwin:
+    runs-on: macos
+    steps:
+      - name: Check out the exact commit
+        env:
+          CCID_COMMIT: ${{ github.sha }}
+        run: |
+          set -eu
+          root="$CI_SOURCE_ROOT/ccid"
+          mkdir -p "$CI_SOURCE_ROOT"
+          [ -d "$root/.git" ] || git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$root"
+          cd "$root"
+          git fetch --quiet origin main
+          git checkout --quiet --force "$CCID_COMMIT"
+          git reset --quiet --hard "$CCID_COMMIT"
+          test "$(git rev-parse HEAD)" = "$CCID_COMMIT"
+          git log --oneline -1
+      - name: Build, test and leave the binary in the draft
+        run: |
+          set -eu
+          cd "$CI_SOURCE_ROOT/ccid"
+          exec bash .ci/release-darwin.sh
