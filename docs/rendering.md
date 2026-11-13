@@ -206,3 +206,9 @@ repository (`bitbucket-pipelines.yml` and `.gitlab-ci.yml` for those providers,
 rendering fails. A host-side broker (`adapters/remote_ci.py`) dispatches the
 workflow and reports a commit status. A remote job never runs through
 `execute-job`.
+
+## Release mirror
+
+Besides the job adapters, `render` writes the thin provider files that copy a Forgejo release
+to GitHub and GitLab when its tag arrives there (and checks them like every adapter). See
+[release-mirror.md](release-mirror.md).

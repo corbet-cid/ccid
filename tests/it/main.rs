@@ -31,6 +31,7 @@ mod job_execution;
 mod native_compile_cache;
 mod prose_cli;
 mod quality_cli;
+mod release_mirror;
 mod render;
 mod resolve_lock;
 mod resolver_config;

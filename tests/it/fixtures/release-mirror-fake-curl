@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# A fake curl for the release-mirror tests: a small Forgejo, GitHub, GitLab and Bitbucket in files.
+# $FIX is the state directory; every request is appended to $FIX/calls.log as "METHOD URL".
+set -u
+method=''; out=''; fmt=''; data=''; upload=''; form=''; url=''; fail=''; auth=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -w) fmt="$2"; shift 2 ;;
+    -X) method="$2"; shift 2 ;;
+    -H) case "$2" in
+          Authorization:*) a="${2#*: }"; auth="${a%% *}" ;;
+          JOB-TOKEN:*) auth=job-token ;;
+        esac; shift 2 ;;
+    --data|--data-binary) data="$2"; shift 2 ;;
+    --upload-file) upload="$2"; shift 2 ;;
+    -F) form="$2"; shift 2 ;;
+    --max-time|--retry|--max-redirs) shift 2 ;;
+    --fail|--fail-with-body) fail="$1"; shift ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+[ -n "$method" ] || { if [ -n "$upload" ]; then method=PUT; elif [ -n "$data$form" ]; then method=POST; else method=GET; fi; }
+printf '%s %s\n' "$method" "$url" >> "$FIX/calls.log"
+case "$url" in
+  https://forge.example/*|https://git.example/*) printf '%s %s\n' "$url" "${auth:-none}" >> "$FIX/forge-auth.log" ;;
+esac
+body_of() { case "$1" in @*) cat "${1#@}" ;; *) printf '%s' "$1" ;; esac; }
+status=200; reply=''; location=''
+mkdir -p "$FIX/gh" "$FIX/gl" "$FIX/bb"
+[ -f "$FIX/gh/releases.json" ] || echo '[]' > "$FIX/gh/releases.json"
+[ -f "$FIX/gh/assets.json" ] || echo '[]' > "$FIX/gh/assets.json"
+[ -f "$FIX/bb/downloads.json" ] || echo '{"values":[]}' > "$FIX/bb/downloads.json"
+[ -f "$FIX/gl/links.json" ] || echo '[]' > "$FIX/gl/links.json"
+sha() { sha256sum "$1" | awk '{ print $1 }'; }
+case "$method $url" in
+  "GET https://git.example/"*)
+    if [ -f "$FIX/redirect" ]; then status=302; location=$(cat "$FIX/redirect"); fi ;;
+  "GET https://forge.example/api/v1/repos/"*/releases/tags/*)
+    tag="${url##*/}"
+    if [ -f "$FIX/forge/status" ]; then status=$(cat "$FIX/forge/status"); reply='{}'
+    elif [ -f "$FIX/forge/tags/$tag.json" ]; then reply=$(cat "$FIX/forge/tags/$tag.json")
+    else status=404; reply='{"message":"not found"}'; fi ;;
+  "GET https://forge.example/"*/releases/download/*)
+    name="${url##*/}"
+    if [ -f "$FIX/forge/files/$name" ]; then
+      status=200; cp "$FIX/forge/files/$name" "$FIX/reply.bin"
+    else status=404; : > "$FIX/reply.bin"; fi ;;
+  "GET https://api.github.test/repos/o/r/releases?per_page=100&page=1") reply=$(cat "$FIX/gh/releases.json") ;;
+  "GET https://api.github.test/repos/o/r/releases?per_page=100&page="*) reply='[]' ;;
+  "POST https://api.github.test/repos/o/r/releases")
+    body_of "$data" > "$FIX/gh/create.json"
+    jq '. + {id: 11, state: "draft"}' "$FIX/gh/create.json" > "$FIX/gh/release.json"
+    jq -s '.[0] + [.[1]]' "$FIX/gh/releases.json" "$FIX/gh/release.json" > "$FIX/gh/releases.tmp" && mv "$FIX/gh/releases.tmp" "$FIX/gh/releases.json"
+    status=201; reply=$(cat "$FIX/gh/release.json") ;;
+  "GET https://api.github.test/repos/o/r/releases/11/assets?per_page=100") reply=$(cat "$FIX/gh/assets.json") ;;
+  "GET https://api.github.test/repos/o/r/releases/11") reply=$(jq '.[0] | . + {draft: (.draft)}' "$FIX/gh/releases.json") ;;
+  "PATCH https://api.github.test/repos/o/r/releases/11")
+    jq '.[0].draft = false' "$FIX/gh/releases.json" > "$FIX/gh/releases.tmp" && mv "$FIX/gh/releases.tmp" "$FIX/gh/releases.json"
+    reply='{}' ;;
+  "DELETE https://api.github.test/repos/o/r/releases/assets/"*)
+    id="${url##*/}"
+    jq --argjson id "$id" 'map(select(.id != $id))' "$FIX/gh/assets.json" > "$FIX/gh/assets.tmp" && mv "$FIX/gh/assets.tmp" "$FIX/gh/assets.json"
+    status=204 ;;
+  "POST https://uploads.github.test/repos/o/r/releases/11/assets?name="*)
+    name="${url##*name=}"
+    file="${data#@}"
+    size=$(wc -c < "$file" | tr -d ' ')
+    digest="sha256:$(sha "$file")"
+    [ ! -f "$FIX/gh/corrupt" ] || size=$((size + 1))
+    if [ -f "$FIX/gh/nodigest" ]; then digest=''; fi
+    jq -n --arg n "$name" --argjson s "$size" --arg d "$digest" --argjson id "$((RANDOM + 100))" \
+      '{id: $id, name: $n, size: $s, state: "uploaded"} + (if $d == "" then {} else {digest: $d} end)' > "$FIX/gh/asset.json"
+    jq -s '.[0] + [.[1]]' "$FIX/gh/assets.json" "$FIX/gh/asset.json" > "$FIX/gh/assets.tmp" && mv "$FIX/gh/assets.tmp" "$FIX/gh/assets.json"
+    status=201; reply=$(cat "$FIX/gh/asset.json") ;;
+  "GET https://gl.test/api/v4/projects/7/packages/generic/demo/"*)
+    name="${url##*/}"
+    if [ -f "$FIX/gl/pkg-$name" ]; then cp "$FIX/gl/pkg-$name" "$FIX/reply.bin"; else status=404; : > "$FIX/reply.bin"; fi ;;
+  "PUT https://gl.test/api/v4/projects/7/packages/generic/demo/"*)
+    name="${url##*/}"; cp "$upload" "$FIX/gl/pkg-$name"; status=201; reply='{"message":"201 Created"}' ;;
+  "GET https://gl.test/api/v4/projects/7/releases/"*/assets/links) reply=$(cat "$FIX/gl/links.json") ;;
+  "POST https://gl.test/api/v4/projects/7/releases/"*/assets/links)
+    body_of "$data" > "$FIX/gl/link.json"
+    jq -s '.[0] + [.[1]]' "$FIX/gl/links.json" "$FIX/gl/link.json" > "$FIX/gl/links.tmp" && mv "$FIX/gl/links.tmp" "$FIX/gl/links.json"
+    status=201; reply='{}' ;;
+  "GET https://gl.test/api/v4/projects/7/releases/"*)
+    if [ -f "$FIX/gl/release.json" ]; then reply=$(cat "$FIX/gl/release.json"); else status=404; reply='{"message":"404 Not Found"}'; fi ;;
+  "POST https://gl.test/api/v4/projects/7/releases")
+    body_of "$data" > "$FIX/gl/release.json"
+    jq '.assets.links' "$FIX/gl/release.json" > "$FIX/gl/links.json"
+    status=201; reply='{}' ;;
+  "GET https://api.bitbucket.org/2.0/repositories/w/s/downloads?pagelen=100") reply=$(cat "$FIX/bb/downloads.json") ;;
+  "POST https://api.bitbucket.org/2.0/repositories/w/s/downloads")
+    file="${form#files=@}"
+    jq --arg n "$(basename "$file")" --argjson s "$(wc -c < "$file" | tr -d ' ')" '.values += [{name: $n, size: $s}]' "$FIX/bb/downloads.json" > "$FIX/bb/downloads.tmp" && mv "$FIX/bb/downloads.tmp" "$FIX/bb/downloads.json"
+    status=201; reply='' ;;
+  *) status=599; reply="fake curl: no route for $method $url" ;;
+esac
+if [ -f "$FIX/reply.bin" ]; then
+  # A binary reply (a file download): the body is the file.
+  if [ -n "$out" ]; then cp "$FIX/reply.bin" "$out"; else cat "$FIX/reply.bin"; fi
+  rm -f "$FIX/reply.bin"
+else
+  if [ -n "$out" ]; then printf '%s' "$reply" > "$out"; else printf '%s' "$reply"; fi
+fi
+if [ -n "$fmt" ]; then
+  printf '%s' "$fmt" | sed -e "s|%{http_code}|$status|g" -e "s|%{redirect_url}|$location|g"
+fi
+if [ -n "$fail" ] && [ "$status" -ge 400 ]; then exit 22; fi
+exit 0
