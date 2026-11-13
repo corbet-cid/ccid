@@ -520,7 +520,11 @@ fn the_release_jobs_of_a_rendered_workflow_run_as_ccid_release_commands() {
     let built = fixture.job_run("release");
     assert!(built.status.success(), "{}", text(&built));
     assert!(fixture.forge.release(&fixture.draft_tag()).is_some());
-    assert!(fixture.outputs().contains("legs=windows macos\n"), "{}", fixture.outputs());
+    assert!(
+        fixture.outputs().contains("legs=windows macos\n"),
+        "{}",
+        fixture.outputs()
+    );
     for leg in ["release-windows", "release-macos"] {
         let ran = fixture.job_run(leg);
         assert!(ran.status.success(), "{leg}: {}", text(&ran));
