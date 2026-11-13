@@ -564,6 +564,7 @@ fn a_failure_record_is_never_a_pass() {
 }
 
 #[test]
+#[cfg(unix)] // POSIX modes and symlinks; the Windows cross-compile gate builds this file too
 fn the_store_is_group_writable_when_the_root_is() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = fixture("mode");
@@ -607,6 +608,7 @@ fn the_store_is_group_writable_when_the_root_is() {
 }
 
 #[test]
+#[cfg(unix)] // POSIX modes and symlinks; the Windows cross-compile gate builds this file too
 fn a_symlinked_record_is_never_read() {
     let fixture = fixture("symlink");
     let root = fixture.path();

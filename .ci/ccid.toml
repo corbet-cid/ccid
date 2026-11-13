@@ -75,6 +75,20 @@ command = ["ccid:run-declared-checks"]
 kind = "commands"
 commands = [["cargo", "test", "--release", "--locked", "--test", "it", "--", "--ignored", "--nocapture", "native_compile_cache"]]
 
+# The Windows compile gate (operating model R22, U2): ccid must keep building for Windows, where outside contributors
+# work. A cross compile on linux, no Windows execution: the gnullvm standard library is in the runner's shared toolchain.
+# `--all-targets` also builds the unit tests, so unix-only test code needs `cfg(unix)`.
+[checks.windows-compile]
+kind = "commands"
+commands = [["cargo", "check", "--target", "x86_64-pc-windows-gnullvm", "--features", "windows-experimental", "--locked", "--all-targets"]]
+
+[jobs.windows-compile]
+scheduler = "forgejo"
+runs_on = "linux"
+checks = ["windows-compile"]
+workflow = "ci"
+command = ["ccid:run-declared-checks"]
+
 [jobs.build]
 scheduler = "forgejo"
 runs_on = "linux"

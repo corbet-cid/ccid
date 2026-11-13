@@ -222,6 +222,11 @@ scheduler is retired and the broker is gone. The Windows and macOS builds run on
   or replaced by a Forgejo job on the `windows` or `macos` label. The tolerance is dropped in a later release, once the
   fleet's manifests have moved.
 
+ccid's own Windows coverage is a compile gate, not a leg: the check `windows-compile` of ccid's manifest cross-checks the
+library, binary and tests for `x86_64-pc-windows-gnullvm` with `windows-experimental` on a `linux` runner (the standard
+library for the target is in the runner's shared toolchain), so the code keeps building where outside contributors work
+(R6, U2). Nothing runs on Windows; unix-only test code carries `cfg(unix)`.
+
 ## Mirror forges
 
 `render` writes no file for the CI of a mirror forge (GitHub, GitLab, Bitbucket), at any schema: no CI runs on a

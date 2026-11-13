@@ -2,7 +2,7 @@
   "schema": 1,
   "generator": "ccid render v1",
   "tool_revision": "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
-  "manifest_sha256": "704a527b61730955afc9e312c12657eea888c3b1c0c7f392da424894e0e41914",
+  "manifest_sha256": "abe8fc132493e3e955551a3b2ccc088d3331dada7f634af7955737cf38c55bcb",
   "jobs": {
     "build": {
       "job": "build",
@@ -81,6 +81,19 @@
       "checks": [
         "test",
         "registry-publisher"
+      ],
+      "workflow": "ci",
+      "command": [
+        "ccid:run-declared-checks"
+      ],
+      "runs_on": "linux",
+      "archive_inputs": true
+    },
+    "windows-compile": {
+      "job": "windows-compile",
+      "scheduler": "forgejo",
+      "checks": [
+        "windows-compile"
       ],
       "workflow": "ci",
       "command": [
