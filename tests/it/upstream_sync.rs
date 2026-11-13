@@ -256,8 +256,17 @@ impl Forge {
         )
     }
 
-    fn env(&self, upstream_commit: &str, upstream_url: &str) -> Vec<(String, String)> {
+    fn gitconfig(&self) -> PathBuf {
+        let file = self.dir.path().join("gitconfig");
         let rewrite = format!("file://{}/forge/", self.fix().display());
+        let config = format!(
+            "[url \"{rewrite}\"]\n\tinsteadOf = https://forge.example/\n\tinsteadOf = https://public.example/\n"
+        );
+        fs::write(&file, config).unwrap();
+        file
+    }
+
+    fn env(&self, upstream_commit: &str, upstream_url: &str) -> Vec<(String, String)> {
         vec![
             (
                 "PATH".into(),
@@ -270,22 +279,13 @@ impl Forge {
             ("FIX".into(), self.fix().display().to_string()),
             ("HOME".into(), self.dir.path().display().to_string()),
             ("TMPDIR".into(), self.dir.path().display().to_string()),
-            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            // The forge's https URLs are served by local bare repositories (a user-level rewrite, so that the scripts'
+            // own bypass of the runner's system-level route to a local copy leaves it in place).
+            (
+                "GIT_CONFIG_GLOBAL".into(),
+                self.gitconfig().display().to_string(),
+            ),
             ("GIT_CONFIG_SYSTEM".into(), "/dev/null".into()),
-            ("GIT_CONFIG_COUNT".into(), "2".into()),
-            (
-                "GIT_CONFIG_KEY_0".into(),
-                format!("url.{rewrite}.insteadOf"),
-            ),
-            ("GIT_CONFIG_VALUE_0".into(), "https://forge.example/".into()),
-            (
-                "GIT_CONFIG_KEY_1".into(),
-                format!("url.{rewrite}.insteadOf"),
-            ),
-            (
-                "GIT_CONFIG_VALUE_1".into(),
-                "https://public.example/".into(),
-            ),
             ("SYNC_SERVER".into(), "https://forge.example".into()),
             ("SYNC_REPOSITORY".into(), "team/down".into()),
             ("SYNC_TOKEN".into(), "job-token".into()),

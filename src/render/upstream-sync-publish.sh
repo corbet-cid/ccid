@@ -7,6 +7,7 @@ say() { printf 'upstream-sync: %s\n' "$*" >&2; }
 fail() { say "$*"; exit 1; }
 cd "$SYNC_REPO"
 gitauth() { git -c "http.extraHeader=Authorization: token $SYNC_TOKEN" "$@"; }
+direct() { GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0 "$@"; } # without the runner's route to a local copy that can lag
 server=${SYNC_SERVER%/}
 up_slug=${SYNC_UPSTREAM_URL#https://*/}
 up_slug=${up_slug%.git}
@@ -41,7 +42,7 @@ git for-each-ref --format='%(refname:strip=2) %(objectname)' 'refs/upstream-tags
   printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || { say "$tag is not a release tag: skipped"; continue; }
   target=$(git rev-parse --verify --quiet "$object^{commit}") || { say "$tag has no commit: skipped"; continue; }
   if ! git merge-base --is-ancestor "$target" "$SYNC_MERGE"; then say "$tag is not part of the downstream yet: the sync that merges it will carry it"; continue; fi
-  existing=$(gitauth ls-remote --tags origin "refs/tags/$tag" | cut -f1)
+  existing=$(direct gitauth ls-remote --tags origin "refs/tags/$tag" | cut -f1)
   if [ -n "$existing" ]; then say "$tag exists in the downstream ($existing): never replaced"
   else
     place=$(first_containing "$target")
