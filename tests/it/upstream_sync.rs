@@ -641,34 +641,30 @@ fn a_tag_the_merge_does_not_contain_and_a_draft_release_wait() {
 }
 
 #[test]
-fn the_job_token_only_goes_to_the_forge_that_runs_the_job() {
+fn the_declared_host_only_names_the_upstream_it_is_read_from_the_forge_that_runs_the_job() {
     let forge = Forge::new();
     let commit = forge.upstream_commit("code.txt", "two\n", true);
     let env_file = forge.dir.path().join("env-other");
     fs::write(&env_file, "").unwrap();
-    // The upstream lives on another host: its answers are read anonymously. (The fake answers by path, not host.)
+    // The declaration names the public home of the upstream; jobs have no route to it, so the forge that runs the job serves it.
     let outcome = forge.run(
         &forge.merge,
         forge.env(&commit, "https://public.example/team/up.git"),
         &env_file,
     );
+    assert!(outcome.ok(), "{}", outcome.stderr());
     let requests = forge.requests();
+    assert!(!requests.contains("public.example"), "{requests}");
     assert!(
-        requests.contains("GET https://public.example/api/v1/repos/team/up/actions/runs?head_sha="),
-        "{requests}\n{}",
-        outcome.stderr()
+        requests.contains("GET https://forge.example/api/v1/repos/team/up/actions/runs?head_sha="),
+        "{requests}"
     );
-    for line in requests
-        .lines()
-        .filter(|line| line.contains("public.example"))
-    {
-        assert!(line.ends_with("auth=no"), "{line}");
-    }
-    for line in requests
-        .lines()
-        .filter(|line| line.contains("https://forge.example/api/v1/repos/team/down"))
-    {
-        assert!(line.ends_with("auth=yes"), "{line}");
+    // Every request carries the job token, and only the forge that runs the job ever sees it.
+    for line in requests.lines() {
+        assert!(
+            line.contains("https://forge.example/") && line.ends_with("auth=yes"),
+            "{line}"
+        );
     }
 }
 

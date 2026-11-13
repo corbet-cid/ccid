@@ -13,21 +13,17 @@ esac
 [ "${#SYNC_UPSTREAM_COMMIT}" -eq 40 ] || fail "upstream_commit is not a full commit id"
 commit=$SYNC_UPSTREAM_COMMIT
 case "$SYNC_UPSTREAM_URL" in https://*/*/*.git) ;; *) fail "the declared upstream url is not an https clone url" ;; esac
-up_origin=${SYNC_UPSTREAM_URL%/*/*.git}
-up_slug=${SYNC_UPSTREAM_URL#"$up_origin"/}
+# The declared url identifies the upstream; it is read from the forge that runs the job (jobs have no route to a public host).
+up_slug=${SYNC_UPSTREAM_URL#https://*/}
 up_slug=${up_slug%.git}
-auth_for() { # forge origin -> extra header arguments (the job token only ever goes to the forge that runs the job)
-  case "$1" in "$SYNC_SERVER"|"${SYNC_SERVER%/}") printf 'Authorization: token %s' "$SYNC_TOKEN" ;; esac
-}
-api() { # url [curl arguments]: the body of a successful answer
+served="${SYNC_SERVER%/}/$up_slug.git"
+api() { # url [curl arguments]: the body of a successful answer; the job token only ever goes to the forge that runs the job
   url=$1; shift
-  header=$(auth_for "${url%%/api/*}")
-  if [ -n "$header" ]; then curl --fail --silent --show-error --location --max-time 60 --retry 3 -H "$header" "$@" "$url"
-  else curl --fail --silent --show-error --location --max-time 60 --retry 3 "$@" "$url"; fi
+  curl --fail --silent --show-error --location --max-time 60 --retry 3 -H "Authorization: token $SYNC_TOKEN" "$@" "$url"
 }
 
 # 1. Only a commit whose own CI run is green may travel. The question goes to the forge that hosts the upstream.
-runs=$(api "$up_origin/api/v1/repos/$up_slug/actions/runs?head_sha=$commit&workflow_id=ci.yml&status=success&limit=1") \
+runs=$(api "${SYNC_SERVER%/}/api/v1/repos/$up_slug/actions/runs?head_sha=$commit&workflow_id=ci.yml&status=success&limit=1") \
   || fail "cannot read the upstream CI runs of $commit"
 [ "$(printf '%s' "$runs" | jq -r '(.total_count // (.workflow_runs | length) // 0)')" -ge 1 ] \
   || fail "the upstream commit $commit has no successful ci run: nothing is merged"
@@ -44,7 +40,7 @@ cd "$work"
 git remote remove origin 2>/dev/null || true
 git remote remove upstream 2>/dev/null || true
 git remote add origin "${SYNC_SERVER%/}/$SYNC_REPOSITORY.git"
-git remote add upstream "$SYNC_UPSTREAM_URL"
+git remote add upstream "$served"
 git config advice.detachedHead false
 git config gc.auto 0
 gitauth() { git -c "http.extraHeader=Authorization: token $SYNC_TOKEN" "$@"; }
@@ -115,7 +111,7 @@ if git show "$merge:.gitattributes" 2>/dev/null | grep -q 'filter=lfs'; then
   git lfs install --local --skip-smudge >/dev/null
   if [ -n "${CCID_LFS_STORAGE:-}" ]; then mkdir -p "$CCID_LFS_STORAGE"; git config lfs.storage "$CCID_LFS_STORAGE"; fi
   ( [ -z "${CCID_LFS_STORAGE:-}" ] || umask 002
-    git lfs fetch "$SYNC_UPSTREAM_URL" "$commit" >/dev/null 2>&1 || true
+    git lfs fetch "$served" "$commit" >/dev/null 2>&1 || true
     # The helper runs in git's shell: $CCID_LFS_TOKEN must stay unexpanded here.
     # shellcheck disable=SC2016
     helper='!f() { echo username=x-access-token; echo "password=$CCID_LFS_TOKEN"; }; f'

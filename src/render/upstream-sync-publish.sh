@@ -8,12 +8,10 @@ fail() { say "$*"; exit 1; }
 cd "$SYNC_WORK"
 gitauth() { git -c "http.extraHeader=Authorization: token $SYNC_TOKEN" "$@"; }
 server=${SYNC_SERVER%/}
-up_origin=${SYNC_UPSTREAM_URL%/*/*.git}
-up_slug=${SYNC_UPSTREAM_URL#"$up_origin"/}
+up_slug=${SYNC_UPSTREAM_URL#https://*/}
 up_slug=${up_slug%.git}
 down_api="$server/api/v1/repos/$SYNC_REPOSITORY"
 mine() { curl --silent --show-error --location --max-time 60 --retry 3 -H "Authorization: token $SYNC_TOKEN" "$@"; }
-theirs() { curl --silent --show-error --location --max-time 60 --retry 3 "$@"; }
 
 # 1. The merge. A plain push: if the branch moved meanwhile the forge refuses and the run is red; the next sync merges again.
 if [ "${SYNC_PUSH:-0}" = 1 ]; then
@@ -49,10 +47,10 @@ git for-each-ref --format='%(refname:strip=2) %(objectname)' 'refs/upstream-tags
   fi
   # 3. The release of that tag: pointing at the upstream's assets, no build and no copy of its own.
   if [ "$(mine -o /dev/null -w '%{http_code}' "$down_api/releases/tags/$tag")" = 200 ]; then say "release $tag exists in the downstream"; continue; fi
-  release=$(theirs --fail "$up_origin/api/v1/repos/$up_slug/releases/tags/$tag" 2>/dev/null) || { say "the upstream has no release for $tag yet: a later sync carries it"; continue; }
+  release=$(mine --fail "$server/api/v1/repos/$up_slug/releases/tags/$tag" 2>/dev/null) || { say "the upstream has no release for $tag yet: a later sync carries it"; continue; }
   [ "$(printf '%s' "$release" | jq -r '.draft')" = false ] || { say "the upstream release $tag is still a draft"; continue; }
   version=${tag#v}
-  body=$(printf '%s' "$release" | jq -r --arg tag "$tag" --arg up "$up_origin/$up_slug" '
+  body=$(printf '%s' "$release" | jq -r --arg tag "$tag" '
     "This release has no build of its own: the program is the upstream release " + $tag + ", published at " + .html_url + ".\n\nAssets of the upstream release:\n" +
     ((.assets // []) | map("- [" + .name + "](" + .browser_download_url + ")") | join("\n"))')
   payload=$(printf '%s' "$release" | jq -n --arg tag "$tag" --arg name "$version" --arg body "$body" --argjson pre "$(printf '%s' "$release" | jq '.prerelease')" \
