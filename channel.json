@@ -6,8 +6,8 @@
   },
   "classes": {
     "linux": {
-      "revision": "7623f90684f3d43ae4b008baf1b9f49bc65e7b98",
-      "sha256": "4c2a57f28e752914e107521dab31ad5f6262211c5c8aec22cd13f91e14c2c3b0"
+      "revision": "2813826d69fb220c446ccc4c0b4b98c12e0e9832",
+      "sha256": "19add6524906a06326702c5685158daa0b8b1e8f5120101b7ffeb69088924bcb"
     }
   },
   "fleet": {
