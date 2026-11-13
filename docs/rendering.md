@@ -212,3 +212,7 @@ workflow and reports a commit status. A remote job never runs through
 Besides the job adapters, `render` writes the thin provider files that copy a Forgejo release
 to GitHub and GitLab when its tag arrives there (and checks them like every adapter). See
 [release-mirror.md](release-mirror.md).
+
+Repositories that declare an upstream in `ccvl-downstream.json` also get the dispatch-only
+workflow `.forgejo/workflows/upstream-sync.yml`, which merges, checks and pushes every green
+upstream commit and mirrors its release tags. See [upstream-sync.md](upstream-sync.md).

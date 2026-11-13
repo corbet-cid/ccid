@@ -37,3 +37,5 @@ mod resolve_lock;
 mod resolver_config;
 #[cfg(unix)]
 mod toolchain;
+#[cfg(unix)]
+mod upstream_sync;

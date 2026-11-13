@@ -1,0 +1,81 @@
+# Upstream sync
+
+A downstream repository follows its upstream. Every time the upstream's `ci` run on its
+default branch is green, the downstream merges that exact commit, checks the merge and
+pushes it, and mirrors the upstream's release tags and releases. Nothing polls: the forge
+tells the receiver (a system webhook on the upstream's successful runs), the receiver
+dispatches the downstream's `upstream-sync` workflow once per declaring repository, and the
+run does the rest.
+
+`ccid render` writes the workflow into every repository that carries a
+`ccvl-downstream.json` with an `upstream.url`:
+
+```json
+{ "schema_version": 1, "upstream": { "remote": "upstream", "branch": "main", "url": "https://forge.example/team/up.git" } }
+```
+
+Nothing else is declared. The repository's manifest only needs the job that checks the
+merge, named `downstream-check` (a Forgejo job); a declaration without that job is refused
+by `render`, because an unchecked merge must never be pushed.
+
+## The workflow
+
+`.forgejo/workflows/upstream-sync.yml` (dispatch only, input `upstream_commit`, one run at a
+time per repository, the job runs on the label of `downstream-check`):
+
+1. **Merge, locally.** The upstream commit must have a successful `ci.yml` run on the
+   upstream forge (read from its API), be on the upstream branch's history, and not be part
+   of the downstream branch yet; a repeated or superseded event finds it contained and
+   changes nothing. The merge is made in a work tree of the runner (stable per repository
+   when the runner names `CCID_SOURCE_ROOT`) with the identity of the branch tip.
+   **A conflict ends the run red and pushes nothing**; the conflicting paths are in the log.
+   Git LFS files the checks need are materialised from the shared store, the upstream and
+   the downstream, in that order.
+2. **Check.** The central `ccid job-run --local` runs the declared `downstream-check` job on
+   the merge commit (the land gate's entry point), so ccid's result ledger and the compile
+   caches are reused: only what the downstream's own tree changes runs again. A red check
+   ends the run red.
+3. **Push.** Only when both were clean: the merge is pushed to the branch the run was
+   dispatched on with the job's own token, a plain push (a branch that moved meanwhile
+   refuses it, the run is red, the next event merges again). Then:
+   * every upstream tag shaped `v<major>.<minor>.<patch>` whose commit the downstream now
+     contains is put on **the first commit of the downstream branch that contains it**
+     (binary search along the first-parent chain), never moved, never replaced. A tag the
+     merge does not contain yet waits for the sync that merges it.
+   * for each such tag with a published upstream release and no downstream release, a
+     release of the same tag is created whose notes name the upstream release and list its
+     assets. **No build and no asset copy**: the program is the upstream's, so there is
+     nothing to build or upload. A draft upstream release waits.
+
+The job token goes only to the forge that runs the job; the upstream is read anonymously
+(its API and its git remote) unless it is on the same forge.
+
+## Receiver contract
+
+The receiver (operator infrastructure, not part of ccid) dispatches
+`POST /repos/{owner}/{repo}/actions/workflows/upstream-sync.yml/dispatches` with
+`{"ref": "<branch>", "inputs": {"upstream_commit": "<40 hex>"}}` for every repository whose
+`ccvl-downstream.json` names the event's repository as `upstream.url`.
+
+## Rollout
+
+The file is *introduced*: `render --check` accepts its absence (transitional); `render`
+writes it. Its first line differs from the job adapters' marker on purpose, so a ccid that
+does not know the file does not take it for an obsolete adapter and a channel bump that
+precedes the render cannot turn a repository red. The downstream must list the file among
+its own paths in `ccvl-downstream.json` (`allowed_paths`), since the upstream does not
+carry it.
+
+## Failure modes
+
+| Situation | Result |
+|---|---|
+| Upstream commit without a green `ci` run | run red, nothing merged |
+| Merge conflict | run red, nothing pushed, paths in the log |
+| Check red | run red, nothing pushed |
+| Branch moved before the push | push refused, run red; the next event merges again |
+| Event lost (receiver down) | repaired by the next green upstream commit or a manual dispatch |
+| Tag or release not there yet | skipped; the next sync carries it |
+| Token cannot push to the branch | the push is refused and the run says so |
+
+Merge commits are made by the job and are not signed.

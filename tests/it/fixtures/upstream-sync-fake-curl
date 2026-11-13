@@ -1,0 +1,45 @@
+#!/bin/bash
+# A small Forgejo for the upstream-sync tests: answers the few API calls the rendered scripts make, from files under $FIX.
+# Every request is appended to $FIX/requests.log as "METHOD URL auth=yes|no".
+set -u
+method=GET; out=; wfmt=; data=; url=; fail=0; auth=no
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method=$2; shift 2 ;;
+    -o) out=$2; shift 2 ;;
+    -w) wfmt=$2; shift 2 ;;
+    -H) case "$2" in Authorization:*) auth=yes ;; esac; shift 2 ;;
+    --data-binary) data=$2; shift 2 ;;
+    --max-time|--retry) shift 2 ;;
+    --fail) fail=1; shift ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+[ -z "$data" ] || { if [ "$data" = "@-" ]; then data=$(cat); fi; }
+echo "$method $url auth=$auth" >> "$FIX/requests.log"
+path=${url#https://*/api/v1/repos/}
+status=200; reply='{}'
+case "$method $path" in
+  "GET team/up/actions/runs?"*)
+    sha=${path#*head_sha=}; sha=${sha%%&*}
+    if [ -f "$FIX/green/$sha" ]; then reply='{"workflow_runs":[{"id":1,"status":"success"}],"total_count":1}'
+    else reply='{"workflow_runs":[],"total_count":0}'; fi ;;
+  "GET team/down/branches/main")
+    reply=$(jq -n --arg id "$(git --git-dir "$FIX/forge/team/down.git" rev-parse refs/heads/main)" '{commit: {id: $id}}') ;;
+  "GET team/up/releases/tags/"*)
+    if [ -f "$FIX/up-releases/${path##*/}.json" ]; then reply=$(cat "$FIX/up-releases/${path##*/}.json"); else status=404; reply='{"message":"not found"}'; fi ;;
+  "GET team/down/releases/tags/"*)
+    if [ -f "$FIX/down-releases/${path##*/}.json" ]; then reply=$(cat "$FIX/down-releases/${path##*/}.json"); else status=404; reply='{"message":"not found"}'; fi ;;
+  "POST team/down/releases")
+    tag=$(printf '%s' "$data" | jq -r '.tag_name')
+    mkdir -p "$FIX/down-releases"
+    printf '%s' "$data" > "$FIX/down-releases/$tag.json"
+    echo "$tag" >> "$FIX/posts.log"
+    status=201; reply=$data ;;
+  *) status=404; reply='{"message":"unrouted"}' ;;
+esac
+if [ "$fail" = 1 ] && [ "$status" -ge 400 ]; then exit 22; fi
+if [ -n "$out" ]; then printf '%s' "$reply" > "$out"; else printf '%s' "$reply"; fi
+[ -z "$wfmt" ] || printf '%s' "${wfmt//%\{http_code\}/$status}"
+exit 0
