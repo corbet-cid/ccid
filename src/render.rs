@@ -678,7 +678,8 @@ pub struct Report {
     pub files: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
     /// `--check` only: files accepted as the previous body of a declared
-    /// template transition; the next render updates them.
+    /// template transition, or as a retired mirror CI file still present
+    /// (schemas 1 and 2); the next render updates or removes them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transitional: Vec<PathBuf>,
 }
@@ -1047,7 +1048,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             drift.push(relative.clone());
         }
     }
-    let obsolete = match &surface {
+    let mut obsolete = match &surface {
         None => obsolete(repo, &outputs)?,
         Some(entries) => entries
             .iter()
@@ -1056,22 +1057,32 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             .collect(),
     };
     // Legacy files a check names with what replaces them.
-    let mut legacy: BTreeMap<&Path, &str> = surface
+    let legacy: BTreeMap<&Path, &str> = surface
         .iter()
         .flatten()
         .filter(|item| item.class == surface::Class::Legacy)
         .filter_map(|item| Some((item.path.as_path(), item.replacement?)))
         .collect();
-    if surface.is_none() {
-        // Schemas 1 and 2 have no surface table; they name the retired mirror CI files the same way.
-        for path in &obsolete {
-            if retired::FILES.iter().any(|file| Path::new(file) == path) {
-                legacy.insert(path.as_path(), retired::REPLACEMENT);
-            }
+    let mut transitional = Vec::new();
+    // A check at schemas 1 and 2 accepts the PRESENCE of a retired mirror CI file (a declared transition, like a
+    // file this release introduced): a channel bump re-stales no repository, and the next render removes it.
+    // `render_schema = 3` has no such tolerance: its check names the file as retired. Remove this block (and the
+    // text of `retired::TRANSITION`) once the fleet's sweep has removed the files.
+    if check && surface.is_none() {
+        let (present, rest): (Vec<PathBuf>, Vec<PathBuf>) = obsolete
+            .into_iter()
+            .partition(|path| retired::FILES.iter().any(|file| Path::new(file) == path));
+        for relative in &present {
+            eprintln!(
+                "ccid render: {} is retired (a declared transition: {}); the next render removes it",
+                relative.display(),
+                retired::TRANSITION
+            );
         }
+        transitional.extend(present);
+        obsolete = rest;
     }
     // A check accepts the absence of a file this release introduced; the next render writes it.
-    let mut transitional = Vec::new();
     if check {
         let mut kept = Vec::new();
         for relative in drift {
@@ -1111,8 +1122,8 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         }
         drift.retain(|relative| !accepted.contains_key(relative));
         transitional.extend(accepted.into_keys());
-        transitional.sort();
     }
+    transitional.sort();
     if fs::read(repo.join(manifest))? != bytes {
         return Err(failure("Manifest changed during job rendering"));
     }

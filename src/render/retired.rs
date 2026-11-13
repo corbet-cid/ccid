@@ -11,8 +11,10 @@
 //! locally, and our CI runs it only after we took it in (R36).
 //!
 //! So ccid renders none of these files, for any class and any schema. A file it rendered earlier is retired:
-//! `render` removes it and `render --check` names it as drift ("retired, render removes it"). A hand-written file at
-//! one of these paths is not ours: `render_schema = 3` accounts for it as an unknown file, older schemas leave it.
+//! `render` removes it. At `render_schema = 3` `render --check` names it as drift ("retired, render removes it"); at
+//! schemas 1 and 2 it accepts the file's presence as a declared transition (a notice and the `transitional` list), so
+//! a channel bump re-stales no repository, until a later release drops the tolerance. A hand-written file at one of
+//! these paths is not ours: `render_schema = 3` accounts for it as an unknown file, older schemas leave it.
 
 use super::{metadata, CROW_MARKER};
 use crate::Result;
@@ -26,6 +28,11 @@ pub(super) const FILES: [&str; 5] = [
     ".gitlab-ci.yml",
     "bitbucket-pipelines.yml",
 ];
+
+/// Why a check at schemas 1 and 2 still accepts the presence of a retired file: the files stay until the next render
+/// removes them, so the channel bump that retires them re-stales no repository. The tolerance is dropped in a later
+/// batch, once the fleet has been swept.
+pub(super) const TRANSITION: &str = "a mirror forge runs no CI, R6 and R7";
 
 /// What replaces the files, as a retired file's report names it.
 pub(super) const REPLACEMENT: &str = "nothing: a mirror forge runs no CI (R6, R7); a release reaches a copy by the datacenter-side upload (R45), a registry by our own key (R46)";

@@ -232,8 +232,8 @@ remote jobs ([surface.md](surface.md)); schemas 1 and 2 still record them, and t
 
 `render` writes no file for the CI of a mirror forge (GitHub, GitLab, Bitbucket), at any schema: no CI runs on a
 copy (operating model R6, R7). The release mirror, the pull-request and merge-request checks and the JSR publisher
-that earlier releases rendered are retired; `render` removes them and `render --check` names them.
-See [mirror-forges.md](mirror-forges.md).
+that earlier releases rendered are retired; `render` removes them, and `render --check` names them at
+`render_schema = 3` (schemas 1 and 2 accept their presence for now). See [mirror-forges.md](mirror-forges.md).
 
 Repositories that declare an upstream in `ccvl-downstream.json` also get the dispatch-only
 workflow `.forgejo/workflows/upstream-sync.yml`, which merges, checks and pushes every green

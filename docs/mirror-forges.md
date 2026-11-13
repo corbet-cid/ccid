@@ -24,9 +24,16 @@ Earlier releases rendered these files. They are retired:
 | `.github/workflows/jsr-publish.yml` | the GitHub publisher for JSR, started by a pushed `v*` tag |
 | `bitbucket-pipelines.yml` (a file with the render marker) | the Bitbucket release mirror (never rendered in practice: Downloads need a paid plan) |
 
-`ccid render` removes each of them from a repository, at every `render_schema`, and `ccid render --check` names
-them as drift: `<file> (retired, render removes it: nothing: ...)`. A repository gets rid of them with one normal
-render and its commit.
+`ccid render` removes each of them from a repository, at every `render_schema`. A repository gets rid of them with
+one normal render and its commit. What `ccid render --check` says depends on the schema:
+
+| `render_schema` | `render --check` with a retired file present |
+|---|---|
+| 1 and 2 | accepts it as a declared transition: a notice (`<file> is retired (a declared transition ...); the next render removes it`) and the file in the report's `transitional` list. A channel bump therefore re-stales no repository that still carries the files. |
+| 3 | red: `<file> (retired, render removes it: nothing: ...)` |
+
+The tolerance at schemas 1 and 2 is temporary. It is dropped in a later release, once the fleet has been swept and
+no repository carries the files any more; from then on a check at every schema names them as drift.
 
 - Only a file that carries the render marker is ours. A hand-written file at one of these paths is left alone at
   `render_schema` 1 and 2; at `render_schema = 3` it is an unknown file ([surface.md](surface.md)) and the person
