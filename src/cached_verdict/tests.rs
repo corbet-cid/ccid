@@ -105,6 +105,26 @@ fn channel(path: &Path, sha256: &str) {
     .unwrap();
 }
 
+/// A channel file that names THIS binary as it is: the digest and the revision it carries (a CI or
+/// release build embeds its commit, a local one reports `unversioned` and gets a stand-in).
+fn channel_of_this_binary(path: &Path) {
+    let tool = own_tool().unwrap();
+    let revision = if is_hex(&tool.source_revision, 40) {
+        tool.source_revision.clone()
+    } else {
+        "a".repeat(40)
+    };
+    fs::write(
+        path,
+        serde_json::to_vec(&json!({
+            "default": {"revision": revision, "sha256": tool.sha256},
+            "classes": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn prepared(root: &Path, env: &Environment, name: &str) -> Prepared {
     let commit = commit(root, None, env).unwrap();
     prepare(root, name, &check(), env, &commit, &[]).unwrap()
@@ -2149,13 +2169,18 @@ impl ProofRun {
         env.remove(OsStr::new("CCID_TARGET_LOCK_HELD"));
         env.insert("CI".into(), "true".into());
         env.insert("VK_COUNTER".into(), counter.as_os_str().to_owned());
-        let path = std::env::join_paths(std::iter::once(scratch.path().join("bin")).chain(
-            std::env::split_paths(&env.get(OsStr::new("PATH")).cloned().unwrap_or_default()),
-        ))
+        // A runner has a `moon` on its PATH, and a whole-tree run would go through it: in a
+        // fixture without a moon workspace that fails where the tests expect the plain run.
+        let path = std::env::join_paths(
+            std::iter::once(scratch.path().join("bin")).chain(
+                std::env::split_paths(&env.get(OsStr::new("PATH")).cloned().unwrap_or_default())
+                    .filter(|directory| !directory.join("moon").exists()),
+            ),
+        )
         .unwrap();
         env.insert("PATH".into(), path);
         let channel_file = scratch.path().join("channel.json");
-        channel(&channel_file, &own_tool().unwrap().sha256);
+        channel_of_this_binary(&channel_file);
         env.insert(
             "CCID_CHANNEL_FILE".into(),
             channel_file.as_os_str().to_owned(),
