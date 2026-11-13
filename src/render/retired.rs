@@ -34,6 +34,13 @@ pub(super) const FILES: [&str; 5] = [
 /// batch, once the fleet has been swept.
 pub(super) const TRANSITION: &str = "a mirror forge runs no CI, R6 and R7";
 
+/// Why a check at schemas 1 and 2 still accepts `scheduler = "remote"`: the broker that dispatched a provider workflow
+/// on a mirror forge is gone, so a remote job runs nowhere. The render no longer records the job in `.ci/jobs.json`;
+/// a manifest that still declares it, and an inventory that still records it, are accepted until the manifests have
+/// moved their jobs to Forgejo jobs on the `windows` or `macos` label (R22) or dropped them. `render_schema = 3` refuses
+/// the scheduler outright. The tolerance is dropped in a later batch, like the one for the files above.
+pub(super) const REMOTE_TRANSITION: &str = "a mirror forge runs no CI, R6 and R7; move the job to a Forgejo job on the windows or macos label, or delete it";
+
 /// What replaces the files, as a retired file's report names it.
 pub(super) const REPLACEMENT: &str = "nothing: a mirror forge runs no CI (R6, R7); a release reaches a copy by the datacenter-side upload (R45), a registry by our own key (R46)";
 

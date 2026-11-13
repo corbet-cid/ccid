@@ -1,0 +1,40 @@
+# Written by hand, like release-darwin.yml: ccid's own manifest pins the tool revision of its rendered shim, and a
+# rendered job on the label `macos` needs a ccid macOS binary of that revision, which does not exist.
+#
+# The macOS leg of ccid's own checks: the test suite on the commit that is dispatched, in the macOS build clone
+# (.ci/darwin-test.sh; the tests that do not pass on macOS are in .ci/darwin-skipped-tests.txt). It replaces the
+# remote macOS job that a broker dispatched to the GitHub copy: no CI runs on a mirror forge. Run it by hand when a
+# change touches platform-specific code; the release of a minor version builds this platform anyway (release-darwin.yml).
+#
+# A job of the label `macos` runs INSIDE the clone as the user `ci`: bash 3.2, the BSD userland, the Command Line
+# Tools, the Rust toolchain and the compile cache of the cache disk (CI_SOURCE_ROOT, CI_CACHE_ROOT). There is no
+# node: run steps only. Steps run `bash -e`.
+name: native-macos
+on:
+  workflow_dispatch:
+concurrency:
+  group: native-macos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-macos:
+    runs-on: macos
+    steps:
+      - name: Check out the exact commit
+        env:
+          CCID_COMMIT: ${{ github.sha }}
+        run: |
+          set -eu
+          root="$CI_SOURCE_ROOT/ccid"
+          mkdir -p "$CI_SOURCE_ROOT"
+          [ -d "$root/.git" ] || git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$root"
+          cd "$root"
+          git fetch --quiet origin main
+          git checkout --quiet --force "$CCID_COMMIT"
+          git reset --quiet --hard "$CCID_COMMIT"
+          test "$(git rev-parse HEAD)" = "$CCID_COMMIT"
+          git log --oneline -1
+      - name: Test on macOS
+        run: |
+          set -eu
+          cd "$CI_SOURCE_ROOT/ccid"
+          exec bash .ci/darwin-test.sh

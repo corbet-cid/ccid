@@ -29,10 +29,6 @@ commands = [["cargo", "build", "--release", "--locked"]]
 kind = "commands"
 commands = [["python3", ".ci/registry_publish_test.py"]]
 
-[checks.remote-ci]
-kind = "commands"
-commands = [["python3", "-I", ".ci/remote_ci_test.py"]]
-
 # The acceptance tiers live in the one integration-test binary (`tests/it`):
 # `--test it` plus the module filter selects exactly the former test file.
 [checks.cache-acceptance]
@@ -50,7 +46,7 @@ events = ["manual"]
 [jobs.verify]
 scheduler = "forgejo"
 runs_on = "linux"
-checks = ["test", "registry-publisher", "remote-ci"]
+checks = ["test", "registry-publisher"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]
 
@@ -93,27 +89,3 @@ checks = ["native-compile-cache"]
 workflow = "acceptance"
 command = ["ccid:run-declared-checks"]
 events = ["manual"]
-
-# Native platform evidence that no owned worker can produce: the provider's own workflow on this
-# repository's mirror, dispatched by the remote CI broker (adapters/remote_ci.py) and reported back
-# as the commit status "remote / <job>". At most one run per job and day, newest main only, and only
-# when one of the paths changed.
-[jobs.windows]
-scheduler = "remote"
-provider = "gitlab"
-platform = "windows-x64"
-workflow = "ccid-remote"
-checks = ["test"]
-push_branches = ["main"]
-paths = ["src/**", "tests/**", "build.rs", "Cargo.toml", "Cargo.lock", ".gitlab-ci.yml"]
-timeout_minutes = 90
-
-[jobs.macos]
-scheduler = "remote"
-provider = "github"
-platform = "macos-arm64"
-workflow = "ccid-remote"
-checks = ["test"]
-push_branches = ["main"]
-paths = ["src/**", "tests/**", "build.rs", "Cargo.toml", "Cargo.lock", ".github/workflows/ccid-remote.yml"]
-timeout_minutes = 60

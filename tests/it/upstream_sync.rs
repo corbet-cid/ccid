@@ -365,6 +365,9 @@ fn only_a_declared_downstream_gets_the_workflow() {
     assert!(!workflow.contains("cron:") && !workflow.contains("schedule:"));
     assert!(workflow.contains("runs-on: linux"));
     assert!(workflow.contains("'https://forge.example/team/up.git'"));
+    // R54: the rendered merge step makes an unsigned merge commit that names the automation and the upstream commit.
+    assert!(workflow.contains("-m \"Upstream-Sync: $up_slug@$commit\""));
+    assert!(workflow.contains("commit.gpgsign=false"));
     // The checks run on the merge before anything is pushed, through the central ccid.
     assert!(workflow.contains("job-run --job 'downstream-check'"));
     assert!(
@@ -489,6 +492,26 @@ fn a_clean_merge_is_pushed_only_by_the_last_step() {
         git(&repo, &["rev-parse", "--is-shallow-repository"]),
         "false"
     );
+    // R54: a machine merge commit is unsigned and names the automation and the upstream commit in its last paragraph.
+    let message = git(&repo, &["log", "-1", "--format=%B", "HEAD"]);
+    assert_eq!(
+        message.lines().last(),
+        Some(format!("Upstream-Sync: team/up@{commit}").as_str()),
+        "{message}"
+    );
+    assert_eq!(
+        git(
+            &repo,
+            &[
+                "log",
+                "-1",
+                "--format=%(trailers:key=Upstream-Sync,valueonly)",
+                "HEAD"
+            ]
+        ),
+        format!("team/up@{commit}")
+    );
+    assert_eq!(git(&repo, &["log", "-1", "--format=%G?", "HEAD"]), "N");
     assert_eq!(
         git(&work, &["show", "-s", "--format=%an <%ae>"],),
         "Test Author <author@example.test>"

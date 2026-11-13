@@ -86,4 +86,6 @@ carry it.
 | Tag or release not there yet | skipped; the next sync carries it |
 | Token cannot push to the branch | the push is refused and the run says so |
 
-Merge commits are made by the job and are not signed.
+Merge commits are made by the job and are not signed (R54): the runner holds no signing key. The last paragraph of the
+message is a trailer, `Upstream-Sync: <upstream org>/<repo>@<full commit id>`, that names the automation and the upstream commit
+that was merged.

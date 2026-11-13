@@ -195,7 +195,7 @@ by seconds; if that does not serve it, once from the forge itself, never a wait)
 and `CCID_SIBLINGS_REVISIONS` (`name=sha,...`, the resolved commits). A pinned
 commit that does not arrive fails the job. Because a `main` sibling moves
 without the repository changing, a cached check that reads siblings lists
-`CCID_SIBLINGS_REVISIONS` in `cache_env`. Remote and non-Forgejo jobs take no
+`CCID_SIBLINGS_REVISIONS` in `cache_env`. Non-Forgejo jobs take no
 `siblings`.
 
 ## Crow is retired
@@ -206,27 +206,21 @@ From this renderer on, `ccid render` refuses jobs that still select Crow (the de
 repository that has not moved yet; it is the only way to render a Crow adapter and is meant to
 disappear. Argo jobs are untouched. There is no Forgejo equivalent of `push_consumer` yet.
 
-## Remote providers
+## Remote providers (retired)
 
-A job with `scheduler = "remote"` declares an external CI provider's own
-workflow that lives in the repository's mirror. It names `provider` (`github`,
-`gitlab`, `circleci` or `bitbucket`), a plain lowercase `platform` such as
-`windows-x64`, the provider `workflow` name, the `checks` it proves, and
-optionally `push_branches`, `paths` and `timeout_minutes` (default 60, allowed
-5..=360). A remote job takes no command, secrets, environment, runner label,
-events or flake-input archive.
+`scheduler = "remote"` declared an external CI provider's own workflow in the repository's mirror, dispatched by a
+host-side broker. That starts CI on a copy of the repository, which the operating model rules out (R6, R7), so the
+scheduler is retired and the broker is gone. The Windows and macOS builds run on our own build VMs through the
+`windows` and `macos` runner labels (R22).
 
-ccid only validates the declaration and records it in `.ci/jobs.json`; it never
-contacts a provider. The provider workflow file must already exist in the
-repository (`bitbucket-pipelines.yml` and `.gitlab-ci.yml` for those providers,
-`.circleci/config.yml`, or `.github/workflows/<workflow>.yml`), otherwise
-rendering fails. A host-side broker (`adapters/remote_ci.py`) dispatches the
-workflow and reports a commit status. A remote job never runs through
-`execute-job`.
-
-A remote job starts CI on a copy of the repository, which the operating model rules out (R6, R7): the Windows and
-macOS builds run on our own build VMs through the `windows` and `macos` runner labels. `render_schema = 3` refuses
-remote jobs ([surface.md](surface.md)); schemas 1 and 2 still record them, and the declaration is to be replaced.
+- `render_schema = 3` refuses the scheduler ([surface.md](surface.md)).
+- Schemas 1 and 2 still accept the declaration, as a transition (the shape follows [mirror-forges.md](mirror-forges.md)):
+  `render` no longer records the job in `.ci/jobs.json` and no longer requires the provider workflow file, and says so on
+  standard error; `render --check` accepts the declaration and an inventory that still records the job (the report lists
+  `.ci/jobs.json` as `transitional`), and the next `render` writes the inventory without it. The manifest is the
+  repository's own: its remote jobs, their provider workflow files and the checks that tested them are removed by hand,
+  or replaced by a Forgejo job on the `windows` or `macos` label. The tolerance is dropped in a later release, once the
+  fleet's manifests have moved.
 
 ## Mirror forges
 

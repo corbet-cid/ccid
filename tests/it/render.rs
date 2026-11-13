@@ -921,28 +921,19 @@ fn remote_manifest() -> String {
 }
 
 #[test]
-fn remote_jobs_are_recorded_and_require_their_provider_workflow_file() {
+fn a_retired_remote_job_gets_no_workflow_and_no_inventory_entry() {
+    // `scheduler = "remote"` is retired (tests/it/retired_mirror.rs): no provider workflow file is required and the job
+    // is not recorded; the other jobs render as before.
     let root = forgejo_repository(&remote_manifest());
-    // Without the provider workflow file the declaration is refused.
-    let error = render(root.path(), false).unwrap_err().to_string();
-    assert!(error.contains("provider workflow file"), "{error}");
-    assert!(!root.path().join(".ci/jobs.json").exists());
-    fs::write(
-        root.path().join(".gitlab-ci.yml"),
-        "stages: [test]\ntest:\n  script: [echo]\n",
-    )
-    .unwrap();
     render(root.path(), false).unwrap();
-    // Remote jobs get no Crow adapter and no Forgejo workflow of their own.
     assert!(!root.path().join(".crow").exists());
+    assert!(!root.path().join(".gitlab-ci.yml").exists());
     let workflow = fs::read_to_string(root.path().join(".forgejo/workflows/ci.yml")).unwrap();
     assert!(!workflow.contains("windows"));
     let inventory: serde_json::Value =
         serde_json::from_slice(&fs::read(root.path().join(".ci/jobs.json")).unwrap()).unwrap();
-    assert_eq!(inventory["jobs"]["windows"]["scheduler"], "remote");
-    assert_eq!(inventory["jobs"]["windows"]["provider"], "gitlab");
-    assert_eq!(inventory["jobs"]["windows"]["platform"], "windows-x64");
-    assert_eq!(inventory["jobs"]["windows"]["timeout_minutes"], 60);
+    assert!(inventory["jobs"]["windows"].is_null());
+    assert_eq!(inventory["jobs"]["verify"]["scheduler"], "forgejo");
     render(root.path(), true).unwrap();
 }
 

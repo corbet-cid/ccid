@@ -90,6 +90,9 @@ struct Templates {
     upstream_sync_merge: &'static str,
     upstream_sync_publish: &'static str,
     release_workflow: &'static str,
+    /// The inventory as releases before the retirement of `scheduler = "remote"` wrote it: remote jobs recorded.
+    /// Only a check at schemas 1 and 2 renders it, to recognise a committed inventory of that kind.
+    remote_inventory: bool,
 }
 
 impl Templates {
@@ -105,7 +108,14 @@ impl Templates {
         upstream_sync_merge: include_str!("render/upstream-sync-merge.sh"),
         upstream_sync_publish: include_str!("render/upstream-sync-publish.sh"),
         release_workflow: include_str!("render/release-workflow.yml"),
+        remote_inventory: false,
     };
+
+    /// These bodies with the remote jobs recorded in the inventory, as before their retirement.
+    fn with_remote_inventory(mut self) -> Templates {
+        self.remote_inventory = true;
+        self
+    }
 
     #[cfg(test)]
     fn body(&self, template: Template) -> &'static str {
@@ -174,6 +184,12 @@ const TRANSITIONS: &[Transition] = &[
         template: Template::ForgejoShim,
         since: "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
         previous: include_str!("render/previous/forgejo-shim.yml"),
+    },
+    // R54: the merge commit of an upstream sync carries the `Upstream-Sync:` trailer.
+    Transition {
+        template: Template::UpstreamSyncMerge,
+        since: "376f6066ac2e3e071cf110d39b43a6a75f425090",
+        previous: include_str!("render/previous/upstream-sync-merge.sh"),
     },
 ];
 
@@ -678,8 +694,9 @@ pub struct Report {
     pub files: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
     /// `--check` only: files accepted as the previous body of a declared
-    /// template transition, or as a retired mirror CI file still present
-    /// (schemas 1 and 2); the next render updates or removes them.
+    /// template transition, as a retired mirror CI file still present
+    /// (schemas 1 and 2), or as an inventory that still records retired
+    /// remote jobs (schemas 1 and 2); the next render updates or removes them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transitional: Vec<PathBuf>,
 }
@@ -697,15 +714,24 @@ struct Inventory<'a> {
     push_consumers: BTreeMap<String, ConsumerPlan>,
 }
 
-/// The provider workflow file a remote declaration refers to inside the
-/// repository mirror. The broker runs it; ccid only requires that it exists.
-fn remote_workflow_path(provider: jobs::Provider, workflow: &str) -> String {
-    match provider {
-        jobs::Provider::Github => format!(".github/workflows/{workflow}.yml"),
-        jobs::Provider::Gitlab => ".gitlab-ci.yml".to_owned(),
-        jobs::Provider::Circleci => ".circleci/config.yml".to_owned(),
-        jobs::Provider::Bitbucket => "bitbucket-pipelines.yml".to_owned(),
+/// The jobs of the manifest that declare the retired `scheduler = "remote"`: name and "provider, platform" as the
+/// declaration spells them. Empty at `render_schema = 3`, which refuses the scheduler before this is asked.
+fn retired_remote_jobs(parsed: &crate::Manifest) -> Result<Vec<(String, String)>> {
+    let mut found = Vec::new();
+    for name in parsed.jobs.keys() {
+        let plan = jobs::plan_parsed(parsed, name, None)?;
+        if plan.scheduler == jobs::Scheduler::Remote {
+            let provider = plan
+                .provider
+                .map(|provider| format!("{provider:?}").to_lowercase())
+                .unwrap_or_default();
+            found.push((
+                name.clone(),
+                format!("{provider}, {}", plan.platform.as_deref().unwrap_or("")),
+            ));
+        }
     }
+    Ok(found)
 }
 
 /// The files one render writes, from `templates`. Pure apart from reading the
@@ -757,19 +783,12 @@ fn render_outputs(
             surface_job(&mut plan, gating.contains(name))?;
         }
         if plan.scheduler == jobs::Scheduler::Remote {
-            // Remote jobs are dispatched by the host-side broker, which runs
-            // the provider's own workflow; ccid only records the declaration.
-            // The workflow file must already exist in the repository.
-            let provider = plan
-                .provider
-                .ok_or_else(|| failure(format!("Remote job {name}: missing provider")))?;
-            let path = remote_workflow_path(provider, &plan.workflow);
-            if !repo.join(&path).is_file() {
-                return Err(failure(format!(
-                    "Remote job {name}: provider workflow file {path} is missing"
-                )));
+            // `scheduler = "remote"` is retired (`retired.rs`): nothing dispatches a provider workflow any more, so the
+            // job is not recorded in the inventory and its provider workflow file is not required. Only the check's
+            // recognition of an inventory written before the retirement records it.
+            if templates.remote_inventory {
+                inventory.jobs.insert(name.clone(), plan);
             }
-            inventory.jobs.insert(name.clone(), plan);
             continue;
         }
         if plan.scheduler == jobs::Scheduler::Forgejo {
@@ -1024,6 +1043,22 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         schema,
         &Templates::CURRENT,
     )?;
+    // `scheduler = "remote"` is retired at every schema (`retired.rs`); render_schema = 3 refused it above. Schemas 1
+    // and 2 keep accepting the declaration as a transition: the render drops the job from the inventory, a check
+    // accepts the declaration and an inventory that still records it. Remove this (and `Templates::remote_inventory`)
+    // once the fleet's manifests have moved their remote jobs.
+    let remote = retired_remote_jobs(&parsed)?;
+    for (job, what) in &remote {
+        eprintln!(
+            "ccid render: [jobs.{job}] has scheduler = \"remote\" ({what}), which is retired (a declared transition: {}); {}",
+            retired::REMOTE_TRANSITION,
+            if check {
+                "the next render drops it from the inventory"
+            } else {
+                "it is not recorded in the inventory"
+            }
+        );
+    }
     // render_schema = 3: every CI file is classified before anything is written; a refused file stops the render.
     let surface = if schema == Schema::Surface {
         let entries = surface::assess(repo, &parsed, &outputs)?;
@@ -1148,6 +1183,31 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             transitional.push(plan.path.clone());
         } else {
             security_drift.push(plan.path.clone());
+        }
+    }
+    // A check at schemas 1 and 2 accepts an inventory that still records the retired remote jobs (written by a release
+    // before the retirement); the next render writes it without them.
+    if check && !remote.is_empty() {
+        let inventory = PathBuf::from(INVENTORY);
+        if drift.contains(&inventory) {
+            let before = render_outputs(
+                repo,
+                manifest,
+                &parsed,
+                &bytes,
+                config,
+                schema,
+                &Templates::CURRENT.with_remote_inventory(),
+            )?;
+            if committed.get(&inventory) == before.get(&inventory) {
+                eprintln!(
+                    "ccid render: {} still records the retired remote jobs (a declared transition); the next render writes it without them",
+                    inventory.display()
+                );
+                drift.retain(|relative| relative != &inventory);
+                committed.remove(&inventory);
+                transitional.push(inventory);
+            }
         }
     }
     // A check accepts a file this release renders from a declared transition's previous body.
@@ -1871,15 +1931,31 @@ mod tests {
             [jobs.legacy]\nchecks=['test']\nworkflow='legacy'\ncommand=['sh','.ci/run.sh']\n\
             [check_shell]\n"
         );
-        [("central", central), ("pinned", pinned)]
-            .into_iter()
-            .map(|(name, manifest)| {
-                let root = tempfile::tempdir().unwrap();
-                fs::create_dir(root.path().join(".ci")).unwrap();
-                fs::write(root.path().join(".ci/ccid.toml"), manifest).unwrap();
-                (name, root)
-            })
-            .collect()
+        // A downstream repository: the declaration renders the upstream-sync workflow, which needs its check job.
+        let downstream = format!(
+            "{central}[checks.downstream-check]\nkind='commands'\ncommands=[['true']]\n\
+            [jobs.downstream-check]\nscheduler='forgejo'\nruns_on='linux'\nchecks=['downstream-check']\nworkflow='downstream-check'\ncommand=['ccid:run-declared-checks']\nevents=['manual']\n"
+        );
+        [
+            ("central", central),
+            ("pinned", pinned),
+            ("downstream", downstream),
+        ]
+        .into_iter()
+        .map(|(name, manifest)| {
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir(root.path().join(".ci")).unwrap();
+            fs::write(root.path().join(".ci/ccid.toml"), manifest).unwrap();
+            if name == "downstream" {
+                fs::write(
+                    root.path().join("ccvl-downstream.json"),
+                    "{\"schema_version\":1,\"upstream\":{\"remote\":\"upstream\",\"branch\":\"main\",\"url\":\"https://forge.example/team/up.git\"}}\n",
+                )
+                .unwrap();
+            }
+            (name, root)
+        })
+        .collect()
     }
 
     fn check(root: &Path) -> Result<Report> {

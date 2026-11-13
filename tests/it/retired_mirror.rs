@@ -317,3 +317,105 @@ fn a_symlink_at_a_retired_path_is_never_followed_or_removed() {
             .is_symlink()
     );
 }
+
+// `scheduler = "remote"` is retired the same way (operating model R6, R7): nothing dispatches a provider workflow on a
+// copy any more. Schemas 1 and 2 accept the declaration as a transition; schema 3 refuses it.
+
+const REMOTE_JOB: &str = "\n[jobs.windows]\nscheduler = \"remote\"\nprovider = \"gitlab\"\nplatform = \"windows-x64\"\nworkflow = \"ccid-remote\"\nchecks = [\"test\"]\n";
+
+/// The entry an inventory of an earlier release recorded for `REMOTE_JOB`.
+const LEGACY_ENTRY: &str = ",\n    \"windows\": {\n      \"job\": \"windows\",\n      \"scheduler\": \"remote\",\n      \"checks\": [\n        \"test\"\n      ],\n      \"workflow\": \"ccid-remote\",\n      \"command\": [],\n      \"provider\": \"gitlab\",\n      \"platform\": \"windows-x64\",\n      \"timeout_minutes\": 60\n    }";
+
+/// The end of the jobs table and of the inventory.
+const INVENTORY_TAIL: &str = "\n  }\n}\n";
+
+/// A repository at `schema` that declares `REMOTE_JOB` and has no provider workflow file at all.
+fn remote_repository(schema: u8) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    git(root.path(), &["init", "-q"]);
+    git(
+        root.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.example/org/retired.git",
+        ],
+    );
+    write(
+        root.path(),
+        ".ci/ccid.toml",
+        &format!("{}{REMOTE_JOB}", manifest(schema)),
+    );
+    root
+}
+
+#[test]
+fn a_retired_remote_job_is_not_recorded_and_needs_no_provider_workflow() {
+    let root = remote_repository(2);
+    // Used to fail: "provider workflow file .gitlab-ci.yml is missing".
+    let report = render(root.path(), false).unwrap();
+    assert!(report.files.contains(&PathBuf::from(".ci/jobs.json")));
+    let inventory = fs::read_to_string(root.path().join(".ci/jobs.json")).unwrap();
+    assert!(inventory.contains("\"verify\""), "{inventory}");
+    assert!(
+        !inventory.contains("windows") && !inventory.contains("remote"),
+        "{inventory}"
+    );
+    commit(root.path());
+    let checked = render(root.path(), true).unwrap();
+    assert!(checked.removed.is_empty() && checked.transitional.is_empty());
+}
+
+#[test]
+fn a_check_accepts_an_inventory_that_still_records_the_remote_job_and_a_render_drops_it() {
+    let root = remote_repository(2);
+    render(root.path(), false).unwrap();
+    let current = fs::read_to_string(root.path().join(".ci/jobs.json")).unwrap();
+    let head = current
+        .strip_suffix(INVENTORY_TAIL)
+        .expect("the inventory ends with the jobs table");
+    write(
+        root.path(),
+        ".ci/jobs.json",
+        &format!("{head}{LEGACY_ENTRY}{INVENTORY_TAIL}"),
+    );
+    commit(root.path());
+    // A declared transition: the channel bump re-stales no repository that still records the job.
+    let checked = render(root.path(), true).unwrap();
+    assert_eq!(checked.transitional, vec![PathBuf::from(".ci/jobs.json")]);
+    // The next render writes the inventory without it, and then nothing is transitional.
+    render(root.path(), false).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.path().join(".ci/jobs.json")).unwrap(),
+        current
+    );
+    commit(root.path());
+    assert!(render(root.path(), true).unwrap().transitional.is_empty());
+}
+
+#[test]
+fn an_inventory_that_differs_in_anything_else_stays_drift() {
+    let root = remote_repository(2);
+    render(root.path(), false).unwrap();
+    let current = fs::read_to_string(root.path().join(".ci/jobs.json")).unwrap();
+    let head = current.strip_suffix(INVENTORY_TAIL).unwrap();
+    let altered = LEGACY_ENTRY.replace("\"timeout_minutes\": 60", "\"timeout_minutes\": 61");
+    write(
+        root.path(),
+        ".ci/jobs.json",
+        &format!("{head}{altered}{INVENTORY_TAIL}"),
+    );
+    commit(root.path());
+    let error = render(root.path(), true).unwrap_err().to_string();
+    assert!(error.contains(".ci/jobs.json"), "{error}");
+}
+
+#[test]
+fn render_schema_three_refuses_the_remote_scheduler() {
+    let root = remote_repository(3);
+    for check in [false, true] {
+        let error = render(root.path(), check).unwrap_err().to_string();
+        assert!(error.contains("no remote scheduler"), "{error}");
+    }
+}

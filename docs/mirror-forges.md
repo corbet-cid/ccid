@@ -49,6 +49,7 @@ no repository carries the files any more; from then on a check at every schema n
 - `registries = ["jsr"]` in `[release]` is refused: nothing publishes to JSR until it can be done from our side
   (R46). The other registries are unchanged ([release.md](release.md)).
 - The report of `ccid render` no longer has a `forge_only` list.
-- Remote jobs (`scheduler = "remote"`, schemas 1 and 2) are a different matter: they dispatch a provider's own
-  workflow on a copy and are still validated and recorded as before. `render_schema = 3` refuses them
-  ([surface.md](surface.md)).
+- Remote jobs (`scheduler = "remote"`) are retired the same way: nothing dispatches a provider workflow on a copy any
+  more. At schemas 1 and 2 `render` does not record them in `.ci/jobs.json` and `render --check` accepts the declaration
+  and an inventory that still records them (a notice, and `.ci/jobs.json` in `transitional`), until a later release drops
+  the tolerance; `render_schema = 3` refuses them ([surface.md](surface.md), [rendering.md](rendering.md)).

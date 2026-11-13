@@ -9,10 +9,10 @@
     ".ci/jobs.json": "6ff3c07a1fc90e451e3762eeea7542674a9de3c1698f1efe4478d57410a082c8",
     ".forgejo/workflows/ci.yml": "f3ec1bd8f0b00f65f0d73c3d3366acb0919c82250df70ca2e3362103cc99977e",
     ".forgejo/workflows/downstream-check.yml": "7691f8d1d41f34317d076a2668ae6ef4bb75f7a48abcc27304424da1d020ad8b",
-    ".forgejo/workflows/upstream-sync.yml": "df830ee9d3096e7db0e7c3be2bb02ebb057e8317e8a0ca28e2a8e6a487c669dd"
+    ".forgejo/workflows/upstream-sync.yml": "7a4f7bea801e7899ad866e33a1f3d08f4ddd6deb2798b2df689b698704115e1d"
   },
   "manual-remote": {
-    ".ci/jobs.json": "9546fc8ace3a10e861af213b74edbe715aaca4a8d4de58755b757bfc8c816776",
+    ".ci/jobs.json": "1f117574ddd8985c042460f19f088641688ea4a7a9a0b68a5e9c6e2f443ef6bc",
     ".forgejo/workflows/ci.yml": "5769d052af0757a03d15b4bed8d7b8024c150c5d053fcf451b89f53e0098b119"
   },
   "pinned-crow": {

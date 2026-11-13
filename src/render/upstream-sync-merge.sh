@@ -88,9 +88,12 @@ if git merge-base --is-ancestor "$commit" "$tip"; then
   { echo "SYNC_MERGE=$tip"; echo "SYNC_CHECK=0"; echo "SYNC_PUSH=0"; } >> "$env_out"
   exit 0
 fi
+# A machine merge commit stays unsigned (the runner holds no signing key) and carries a trailer in its last paragraph that names the
+# automation and the upstream commit it merged (operating model R54).
 name=$(git log -1 --format=%an "$tip"); email=$(git log -1 --format=%ae "$tip")
 if ! GIT_LFS_SKIP_SMUDGE=1 git -c "user.name=$name" -c "user.email=$email" -c commit.gpgsign=false merge --no-edit \
-    -m "Merge upstream $SYNC_UPSTREAM_BRANCH at $(git rev-parse --short=12 "$commit")" "$commit" >/dev/null 2>&1; then
+    -m "Merge upstream $SYNC_UPSTREAM_BRANCH at $(git rev-parse --short=12 "$commit")" \
+    -m "Upstream-Sync: $up_slug@$commit" "$commit" >/dev/null 2>&1; then
   conflicts=$(git diff --name-only --diff-filter=U | head -40 | tr '\n' ' ')
   git merge --abort 2>/dev/null || true
   fail "the merge conflicts (${conflicts:-no file list}): nothing is pushed, resolve it by hand"
