@@ -727,3 +727,25 @@ fn the_project_roots_include_the_main_checkout_of_a_linked_worktree() {
     let roots = project_roots(&linked.join("sub").canonicalize().unwrap());
     assert!(roots.contains(&linked.canonicalize().unwrap()), "{roots:?}");
 }
+
+#[test]
+fn a_channel_without_a_fleet_member_names_no_more_spellings_and_is_no_error() {
+    // An ordinary state: a release channel that carries no fleet data (a runner prints that and goes on).
+    let temp = tempfile::tempdir().unwrap();
+    let mut environment = loadable(temp.path());
+    let channel = temp.path().join("channel.json");
+    fs::write(&channel, r#"{"default":{"revision":"r","sha256":"s"}}"#).unwrap();
+    environment.insert("CCID_FLEET_FILE".into(), channel.clone().into());
+    let catalog = Catalog::load(&environment).unwrap().unwrap();
+    assert_eq!(catalog.forge_hosts(), ["forge.example"]);
+    assert!(catalog.classify_forge_path("me/alpha").is_some());
+    // A file that is not JSON, and a fleet member that does not validate, are errors.
+    fs::write(&channel, "not json").unwrap();
+    assert!(Catalog::load(&environment).is_err());
+    fs::write(
+        &channel,
+        r#"{"default":{"revision":"r","sha256":"s"},"fleet":{"schema":2,"first_party":[]}}"#,
+    )
+    .unwrap();
+    assert!(Catalog::load(&environment).is_err());
+}

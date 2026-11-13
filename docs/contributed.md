@@ -32,7 +32,7 @@ writes it:
 |---|---|
 | `name` | A plain lowercase name, unique; the list is in strictly ascending order. |
 | `upstream` | The project's own repository. |
-| `forks` | Optional. Our copies of it on any forge, ours included. |
+| `forks` | Optional. Other locations of the same project: our copies on any forge (ours under every host spelling it is cloned by), or a second home of the project itself. |
 
 Every location is spelled `https://<host>/<owner>/<repo>` exactly: lowercase host, no user name,
 port, query, trailing slash or `.git`; a location belongs to one project only, and owner and

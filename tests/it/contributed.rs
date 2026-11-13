@@ -1090,3 +1090,42 @@ fn a_placement_that_is_not_one_stops_the_work() {
         text(&output.stderr)
     );
 }
+
+#[test]
+fn a_channel_without_fleet_data_does_not_stop_the_guard() {
+    // An ordinary state of a runner (the release channel carries no fleet data): the guard still classifies.
+    let world = World::new();
+    let channel = world.path().join("fleetless.json");
+    fs::write(&channel, r#"{"default":{"revision":"r","sha256":"s"}}"#).unwrap();
+    let owned = world
+        .ccid()
+        .env("CCID_FLEET_FILE", &channel)
+        .args(["render", "--repo"])
+        .arg(world.owned())
+        .output()
+        .unwrap();
+    assert!(owned.status.success(), "{}", text(&owned.stderr));
+    let foreign = world
+        .ccid()
+        .env("CCID_FLEET_FILE", &channel)
+        .args(["render", "--repo"])
+        .arg(world.foreign())
+        .output()
+        .unwrap();
+    assert!(refused(&foreign), "{}", text(&foreign.stderr));
+    // A channel that is not JSON is an error, not a smaller list.
+    fs::write(&channel, "not json").unwrap();
+    let broken = world
+        .ccid()
+        .env("CCID_FLEET_FILE", &channel)
+        .args(["render", "--repo"])
+        .arg(world.owned())
+        .output()
+        .unwrap();
+    assert_eq!(broken.status.code(), Some(2));
+    assert!(
+        text(&broken.stderr).contains("CCID_FLEET_FILE"),
+        "{}",
+        text(&broken.stderr)
+    );
+}

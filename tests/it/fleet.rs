@@ -54,6 +54,8 @@ fn ccid(root: &Path, fleet_file: Option<&Path>) -> Command {
         "CCID_FLEET_DIGEST",
         "CCID_FLEET_KEYED",
         "CCID_FORGE_HOSTS",
+        // a placement copy of the host or the runner (the contributed-project guard) is no input of a fleet check
+        "CCID_PLACEMENT_FILE",
         "CI_MIN_AVAILABLE_MB",
         "CI_MEMORY_MB",
         "CI_MEMORY_PER_JOB_MB",

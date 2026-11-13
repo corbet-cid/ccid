@@ -78,7 +78,8 @@ pub struct Project {
     pub name: String,
     /// The project's own repository (canonical `https://host/owner/repo`).
     pub upstream: String,
-    /// Our copies of it on any forge, ours included (forks).
+    /// Other locations of the same project: our copies on any forge (ours under every host spelling it is cloned by), or a second
+    /// home of the project itself.
     pub forks: Vec<String>,
 }
 
@@ -262,17 +263,26 @@ impl Catalog {
 }
 
 /// More spellings of our forge than the placement names: the fleet data's (when `CCID_FLEET_FILE` is set: a copy that
-/// is set but unusable is an error, never a quietly smaller list) and this machine's `CCID_FORGE_HOSTS` (an in-cluster
-/// name a runner reaches the forge by).
+/// is unreadable, not JSON or carries a fleet member that does not validate is an error, never a quietly smaller list; a
+/// channel without a fleet member is an ordinary state and names no more spellings) and this machine's
+/// `CCID_FORGE_HOSTS` (an in-cluster name a runner reaches the forge by).
 fn forge_host_spellings(environment: &Environment) -> Result<Vec<String>> {
     let mut hosts: Vec<String> = Vec::new();
-    if value(environment, crate::fleet::FLEET_FILE_ENV).is_some() {
-        let (fleet, _) = crate::fleet::load(environment).map_err(|error| {
+    if let Some(path) = value(environment, crate::fleet::FLEET_FILE_ENV) {
+        let path = PathBuf::from(path);
+        let unusable = |error: &dyn std::fmt::Display| {
             failure(format!(
-                "{error}: the fleet data names the spellings of our forge that {PLACEMENT_FILE_ENV} needs"
+                "{} {}: {error}: the fleet data names the spellings of our forge that {PLACEMENT_FILE_ENV} needs",
+                crate::fleet::FLEET_FILE_ENV,
+                path.display()
             ))
-        })?;
-        hosts.extend(fleet.all_forge_hosts().map(str::to_owned));
+        };
+        let bytes = crate::fleet::read_regular(&path).map_err(|error| unusable(&error))?;
+        let document: Value = serde_json::from_slice(&bytes).map_err(|error| unusable(&error))?;
+        if document.get("fleet").is_some() {
+            let fleet = crate::fleet::from_channel(&bytes).map_err(|error| unusable(&error))?;
+            hosts.extend(fleet.all_forge_hosts().map(str::to_owned));
+        }
     }
     if let Some(list) = value(environment, crate::fleet::FORGE_HOSTS_ENV) {
         for host in list.split(',').map(str::trim).filter(|h| !h.is_empty()) {
