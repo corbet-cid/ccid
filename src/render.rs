@@ -10,6 +10,7 @@ use std::{
 };
 
 mod mirror;
+pub mod surface;
 mod upstream_sync;
 
 const GENERATOR: &str = "ccid render v1";
@@ -486,6 +487,8 @@ pub struct Config {
     #[serde(default)]
     pub tool_revision: String,
     /// 2: Forgejo workflows carry a short stable shim that finds the centrally chosen ccid and runs `ccid job-run`; the repository pins no release.
+    /// 3: as 2, and ccid owns the repository's whole CI surface (`surface`): verdict jobs run per commit, other jobs by
+    /// hand, labels are `linux`, `windows` or `macos`, retired CI files go and unknown ones are refused.
     #[serde(default)]
     pub render_schema: Option<u32>,
     /// Crow repo secret holding the immutable prebuilt tool path.
@@ -524,6 +527,119 @@ pub struct Config {
     /// The escape hatch exists for repositories that have not moved yet.
     #[serde(default)]
     pub allow_crow: bool,
+}
+
+/// The render form a manifest's `render_schema` selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Schema {
+    /// No `render_schema`: the repository pins its own ccid release.
+    Pinned,
+    /// `render_schema = 2`: the central channel chooses the release.
+    Central,
+    /// `render_schema = 3`: as 2, and ccid owns the whole CI surface.
+    Surface,
+}
+
+impl Schema {
+    fn of(config: &Config) -> Result<Schema> {
+        match config.render_schema {
+            None => Ok(Schema::Pinned),
+            Some(2) => Ok(Schema::Central),
+            Some(3) => Ok(Schema::Surface),
+            Some(other) => Err(failure(format!(
+                "[render].render_schema {other} is not supported by this ccid (supported: 2, 3)"
+            ))),
+        }
+    }
+
+    fn central(self) -> bool {
+        self != Schema::Pinned
+    }
+}
+
+/// The `[render]` table's own rules, before anything is rendered.
+fn validate_config(config: &Config, schema: Schema) -> Result<()> {
+    if schema.central() {
+        if !config.tool_revision.is_empty() || config.tool_sha256.is_some() {
+            return Err(failure(format!(
+                "A repository on render_schema = {} pins no release: remove [render].tool_revision and tool_sha256 (the central channel chooses)",
+                if schema == Schema::Surface { 3 } else { 2 }
+            )));
+        }
+    } else if config.tool_revision.len() != 40
+        || !config
+            .tool_revision
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(failure(
+            "Rendered tool revision must be a full lowercase Git SHA",
+        ));
+    }
+    if schema == Schema::Surface && config.allow_crow {
+        return Err(failure(
+            "render_schema = 3 has no Crow: remove [render].allow_crow",
+        ));
+    }
+    if let Some(secret) = config.resolver_token_secret.as_deref() {
+        validate_resolver_token_secret(secret)?;
+    }
+    validate_secret_environment(&config.secret_environment)?;
+    if let Some(digest) = &config.tool_sha256 {
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(failure(
+                "[render].tool_sha256 must be 64 lowercase hex digits",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A job's schema-3 form: Forgejo only, a known label (default `linux`), a verdict job on every commit, every
+/// other job by hand unless it names its events.
+fn surface_job(plan: &mut jobs::Plan, verdict: bool) -> Result<()> {
+    match plan.scheduler {
+        jobs::Scheduler::Forgejo => {}
+        jobs::Scheduler::Remote => {
+            return Err(failure(format!(
+                "render_schema = 3 has no remote scheduler: [jobs.{}] becomes a Forgejo job on the windows or macos label, an evaluation on linux (aarch64), or goes",
+                plan.job
+            )))
+        }
+        other => {
+            return Err(failure(format!(
+                "render_schema = 3 runs Forgejo jobs only: [jobs.{}] has scheduler = \"{}\"",
+                plan.job,
+                format!("{other:?}").to_lowercase()
+            )))
+        }
+    }
+    match plan.runs_on.as_deref() {
+        None => plan.runs_on = Some(surface::DEFAULT_LABEL.to_owned()),
+        Some(label) if surface::LABELS.contains(&label) => {}
+        Some(label) => {
+            return Err(failure(format!(
+                "render_schema = 3 knows the runner labels {} only: [jobs.{}] asks for {label}",
+                surface::LABELS.join(", "),
+                plan.job
+            )))
+        }
+    }
+    if verdict {
+        if !plan.events.is_empty() {
+            return Err(failure(format!(
+                "At render_schema = 3 a verdict job runs on every push, every pull request and by hand: remove events from [jobs.{}]",
+                plan.job
+            )));
+        }
+    } else if plan.events.is_empty() {
+        plan.events = vec!["manual".to_owned()];
+    }
+    Ok(())
 }
 
 fn default_tool_secret_binary() -> String {
@@ -619,9 +735,10 @@ fn render_outputs(
     parsed: &crate::Manifest,
     bytes: &[u8],
     config: &Config,
-    central: bool,
+    schema: Schema,
     templates: &Templates,
 ) -> Result<BTreeMap<PathBuf, String>> {
+    let central = schema.central();
     let mut inventory = Inventory {
         schema: 1,
         generator: GENERATOR,
@@ -640,8 +757,24 @@ fn render_outputs(
     }
     let mut outputs = BTreeMap::new();
     let gating = gating_jobs(parsed)?;
+    if schema == Schema::Surface {
+        if gating.is_empty() {
+            return Err(failure(
+                "render_schema = 3 verifies every commit: declare [jobs.verify] or [verdict] jobs",
+            ));
+        }
+        if !parsed.push_consumer.is_empty() {
+            return Err(failure(
+                "render_schema = 3 has no Crow push_consumer fan-out: remove the push_consumer entries",
+            ));
+        }
+    }
+    let _ = manifest;
     for name in parsed.jobs.keys() {
-        let plan = jobs::plan(repo, manifest, name, None)?;
+        let mut plan = jobs::plan_parsed(parsed, name, None)?;
+        if schema == Schema::Surface {
+            surface_job(&mut plan, gating.contains(name))?;
+        }
         if plan.scheduler == jobs::Scheduler::Remote {
             // Remote jobs are dispatched by the host-side broker, which runs
             // the provider's own workflow; ccid only records the declaration.
@@ -723,7 +856,7 @@ fn render_outputs(
         .as_deref()
         .filter(|url| !url.contains("CCID") && crate::cache::canonical_repository(url).is_ok());
     for name in parsed.jobs.keys() {
-        let planned = jobs::plan(repo, manifest, name, None)?;
+        let planned = jobs::plan_parsed(parsed, name, None)?;
         if planned.scheduler == jobs::Scheduler::Forgejo
             || planned.scheduler == jobs::Scheduler::Remote
             || planned.push_branches.is_empty()
@@ -804,6 +937,14 @@ fn render_outputs(
         }
     }
     for (workflow, plans) in &forgejo {
+        if schema == Schema::Surface
+            && plans.iter().any(|plan| gating.contains(&plan.job))
+            && plans.iter().any(|plan| !gating.contains(&plan.job))
+        {
+            return Err(failure(format!(
+                "At render_schema = 3 verdict jobs run per commit and other jobs by hand: workflow {workflow} mixes them, so give the other jobs their own workflow (or list them in [verdict] jobs)"
+            )));
+        }
         if plans.iter().any(|plan| plan.events != plans[0].events) {
             return Err(failure(format!(
                 "Forgejo jobs of workflow {workflow} must declare the same events"
@@ -832,7 +973,12 @@ fn render_outputs(
         outputs.insert(PathBuf::from(CHECK_SHELL), templates.check_shell.to_owned());
     }
     if let Some(source) = mirror::source(repo, parsed.repository.as_deref()) {
-        outputs.extend(mirror::outputs(repo, &source, templates)?);
+        outputs.extend(mirror::outputs(
+            repo,
+            &source,
+            templates,
+            schema == Schema::Surface,
+        )?);
     }
     outputs.extend(upstream_sync::outputs(repo, &inventory.jobs, templates)?);
     Ok(outputs)
@@ -851,46 +997,8 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         .render
         .as_ref()
         .ok_or_else(|| failure("Manifest requires [render].tool_revision"))?;
-    let central = match config.render_schema {
-        None => false,
-        Some(2) => true,
-        Some(other) => {
-            return Err(failure(format!(
-                "[render].render_schema {other} is not supported by this ccid (supported: 2)"
-            )))
-        }
-    };
-    if central {
-        if !config.tool_revision.is_empty() || config.tool_sha256.is_some() {
-            return Err(failure(
-                "A repository on render_schema = 2 pins no release: remove [render].tool_revision and tool_sha256 (the central channel chooses)",
-            ));
-        }
-    } else if config.tool_revision.len() != 40
-        || !config
-            .tool_revision
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
-        return Err(failure(
-            "Rendered tool revision must be a full lowercase Git SHA",
-        ));
-    }
-    if let Some(secret) = config.resolver_token_secret.as_deref() {
-        validate_resolver_token_secret(secret)?;
-    }
-    validate_secret_environment(&config.secret_environment)?;
-    if let Some(digest) = &config.tool_sha256 {
-        if digest.len() != 64
-            || !digest
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(failure(
-                "[render].tool_sha256 must be 64 lowercase hex digits",
-            ));
-        }
-    }
+    let schema = Schema::of(config)?;
+    validate_config(config, schema)?;
     if parsed.jobs.is_empty() {
         return Err(failure("Rendering requires at least one declared job"));
     }
@@ -900,9 +1008,28 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         &parsed,
         &bytes,
         config,
-        central,
+        schema,
         &Templates::CURRENT,
     )?;
+    // render_schema = 3: every CI file is classified before anything is written; a refused file stops the render.
+    let surface = if schema == Schema::Surface {
+        let known = mirror::source(repo, parsed.repository.as_deref()).is_some();
+        let entries = surface::assess(repo, &parsed, &outputs, known)?;
+        if let Some(message) = surface::refusal(&entries) {
+            return Err(failure(message));
+        }
+        Some(entries)
+    } else {
+        None
+    };
+    let replaced: Vec<&Path> = surface
+        .iter()
+        .flatten()
+        .filter(|item| {
+            item.class == surface::Class::Legacy && item.action == surface::Action::Write
+        })
+        .map(|item| item.path.as_path())
+        .collect();
 
     // Validate the whole destination set before any writes or directory creation.
     for directory in [".ci", ".crow", ".forgejo", ".github"] {
@@ -924,7 +1051,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
                 )));
             }
             let actual = fs::read_to_string(path)?;
-            if !owned(relative, &actual) {
+            if !owned(relative, &actual) && !replaced.contains(&relative.as_path()) {
                 return Err(failure(format!(
                     "Refusing to overwrite foreign adapter: {}",
                     relative.display()
@@ -938,7 +1065,21 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
             drift.push(relative.clone());
         }
     }
-    let obsolete = obsolete(repo, &outputs)?;
+    let obsolete = match &surface {
+        None => obsolete(repo, &outputs)?,
+        Some(entries) => entries
+            .iter()
+            .filter(|item| item.action == surface::Action::Delete)
+            .map(|item| item.path.clone())
+            .collect(),
+    };
+    // Legacy files a check names with what replaces them.
+    let legacy: BTreeMap<&Path, &str> = surface
+        .iter()
+        .flatten()
+        .filter(|item| item.class == surface::Class::Legacy)
+        .filter_map(|item| Some((item.path.as_path(), item.replacement?)))
+        .collect();
     // A check accepts the absence of a file this release introduced; the next render writes it.
     let mut transitional = Vec::new();
     if check {
@@ -961,7 +1102,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
     // A check accepts a file this release renders from a declared transition's previous body.
     if check && !committed.is_empty() {
         let accepted = transitions(&committed, |templates| {
-            render_outputs(repo, manifest, &parsed, &bytes, config, central, templates)
+            render_outputs(repo, manifest, &parsed, &bytes, config, schema, templates)
         })?;
         for (relative, declared) in &accepted {
             let from: Vec<String> = declared
@@ -991,7 +1132,15 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         let paths = drift
             .iter()
             .chain(&obsolete)
-            .map(|path| path.display().to_string())
+            .map(|path| match legacy.get(path.as_path()) {
+                Some(replacement) => {
+                    format!(
+                        "{} (retired, render removes it: {replacement})",
+                        path.display()
+                    )
+                }
+                None => path.display().to_string(),
+            })
             .collect::<Vec<_>>()
             .join(", ");
         return Err(failure(format!(
@@ -1019,6 +1168,100 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         removed: obsolete,
         transitional,
     })
+}
+
+/// `ccid surface report`: every CI file of the repository, its class and what a `render_schema = 3` render does
+/// with it. A repository on an older schema is classified against the files its own schema renders.
+pub fn surface_report(repo: &Path, manifest: &Path) -> Result<surface::Report> {
+    if manifest != Path::new(".ci/ccid.toml") {
+        return Err(failure("Job adapters require .ci/ccid.toml"));
+    }
+    let (parsed, bytes) = load_manifest(repo, manifest)?;
+    let config = parsed
+        .render
+        .as_ref()
+        .ok_or_else(|| failure("Manifest requires [render]"))?;
+    let schema = Schema::of(config)?;
+    validate_config(config, schema)?;
+    let outputs = render_outputs(
+        repo,
+        manifest,
+        &parsed,
+        &bytes,
+        config,
+        schema,
+        &Templates::CURRENT,
+    )?;
+    let known = mirror::source(repo, parsed.repository.as_deref()).is_some();
+    Ok(surface::Report {
+        render_schema: config.render_schema,
+        files: surface::assess(repo, &parsed, &outputs, known)?,
+    })
+}
+
+/// `ccid surface plan` of one repository: the manifest's mechanical `render_schema = 3` edits, applied in memory,
+/// and what a render of the edited manifest writes, deletes, keeps and refuses. Never writes; a failure is recorded.
+pub fn surface_plan(repo: &Path, manifest: &Path) -> surface::Plan {
+    let mut plan = surface::Plan {
+        repo: repo.to_path_buf(),
+        ..surface::Plan::default()
+    };
+    let result = (|| -> Result<()> {
+        if manifest != Path::new(".ci/ccid.toml") {
+            return Err(failure("Job adapters require .ci/ccid.toml"));
+        }
+        let bytes = fs::read(repo.join(manifest))?;
+        let mut value: toml::Value = toml::from_str(std::str::from_utf8(&bytes)?)?;
+        plan.project = value
+            .get("project")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned);
+        plan.render_schema = value
+            .get("render")
+            .and_then(|render| render.get("render_schema"))
+            .and_then(toml::Value::as_integer);
+        // The repository's manifest must parse as it is before the plan edits it.
+        crate::parse_manifest(&bytes)?;
+        let (edits, decisions, notes) = surface::align(&mut value);
+        plan.edits = edits;
+        plan.decisions = decisions;
+        plan.notes = notes;
+        let edited = toml::to_string(&value)?;
+        let parsed = crate::parse_manifest(edited.as_bytes())?;
+        let config = parsed
+            .render
+            .as_ref()
+            .ok_or_else(|| failure("Manifest requires [render]"))?;
+        validate_config(config, Schema::Surface)?;
+        if parsed.jobs.is_empty() {
+            return Err(failure("Rendering requires at least one declared job"));
+        }
+        let outputs = render_outputs(
+            repo,
+            manifest,
+            &parsed,
+            edited.as_bytes(),
+            config,
+            Schema::Surface,
+            &Templates::CURRENT,
+        )?;
+        let known = mirror::source(repo, parsed.repository.as_deref()).is_some();
+        let entries = surface::assess(repo, &parsed, &outputs, known)?;
+        plan.writes = outputs
+            .iter()
+            .filter(|(relative, body)| {
+                fs::read(repo.join(relative)).ok().as_deref() != Some(body.as_bytes())
+            })
+            .map(|(relative, _)| relative.clone())
+            .collect();
+        plan.settle(entries);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        plan.error = Some(error.to_string());
+    }
+    plan.finish();
+    plan
 }
 
 /// The committed files that equal a render with some combination of declared
@@ -1591,8 +1834,8 @@ mod tests {
         let manifest = Path::new(".ci/ccid.toml");
         let (parsed, bytes) = load_manifest(root, manifest).unwrap();
         let config = parsed.render.as_ref().unwrap();
-        let central = config.render_schema == Some(2);
-        render_outputs(root, manifest, &parsed, &bytes, config, central, templates).unwrap()
+        let schema = Schema::of(config).unwrap();
+        render_outputs(root, manifest, &parsed, &bytes, config, schema, templates).unwrap()
     }
 
     fn write_all(root: &Path, files: &BTreeMap<PathBuf, String>) {

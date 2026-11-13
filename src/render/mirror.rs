@@ -162,10 +162,14 @@ fn splice(template: &str, core: &str) -> Result<String> {
 
 /// The provider files for `source`. A provider file this release does not own (a hand-written
 /// `.gitlab-ci.yml`) is left alone and its mirror is not rendered.
+///
+/// `replace_legacy` (`render_schema = 3`): a hand-written file of a retired family (the remote scheduler's
+/// pipeline) is not foreign; the render replaces it with the mirror file.
 pub(super) fn outputs(
     repo: &Path,
     source: &str,
     templates: &Templates,
+    replace_legacy: bool,
 ) -> Result<BTreeMap<PathBuf, String>> {
     let core = templates.mirror_core.replace("CCID_MIRROR_SOURCE", source);
     let mut files = BTreeMap::new();
@@ -178,7 +182,9 @@ pub(super) fn outputs(
         gitlab.push((BITBUCKET, templates.mirror_bitbucket));
     }
     for (relative, template) in gitlab {
-        if foreign(repo, relative)? {
+        if foreign(repo, relative)?
+            && !(replace_legacy && super::surface::replaceable(repo, relative)?)
+        {
             eprintln!(
                 "ccid render: {relative} is not generated here, so its release mirror is not rendered"
             );

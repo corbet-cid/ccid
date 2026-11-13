@@ -186,6 +186,11 @@ enum Action {
         #[arg(long, hide = true)]
         parent_watch: bool,
     },
+    /// The CI surface: the class of every CI file and the plan of the move to render_schema = 3.
+    Surface {
+        #[command(subcommand)]
+        command: ccid::render::surface::Command,
+    },
     /// Fleet data from the release channel: first-party owner prefixes and their legacy aliases.
     Fleet {
         #[command(subcommand)]
@@ -647,6 +652,15 @@ fn main() -> ExitCode {
                 }
                 Err(error) => Err(error),
             }
+        }
+        Action::Surface { command } => {
+            return match ccid::render::surface::run(&command) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid surface: {error}");
+                    ExitCode::from(2)
+                }
+            };
         }
         Action::Fleet { action } => {
             return match ccid::fleet::run(&action) {

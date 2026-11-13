@@ -180,6 +180,35 @@ struct Manifest {
     /// What the job runtime's Rust toolchain needs besides stable (see `runtime`).
     #[serde(default)]
     toolchain: Option<runtime::ToolchainConfig>,
+    /// `[surface]`: what `render_schema = 3` cannot know about the repository's CI files (`render::surface`).
+    #[serde(default)]
+    surface: Option<render::surface::Config>,
+}
+
+impl Manifest {
+    /// Every manifest string that may name a repository file: the argv of checks and jobs, the cache
+    /// inputs, outputs and tool probes, and job environment values.
+    fn named_strings(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        for check in self.checks.values() {
+            out.extend(check.commands.iter().flatten().map(String::as_str));
+            out.extend(check.cache_tools.iter().flatten().map(String::as_str));
+            out.extend(check.cache_outputs.iter().map(String::as_str));
+            out.extend(check.cache_inputs.iter().flatten().map(String::as_str));
+        }
+        for job in self.jobs.values() {
+            out.extend(job.named_strings());
+        }
+        out
+    }
+
+    /// The declared cache input globs: the files a check reads.
+    fn input_globs(&self) -> Vec<&str> {
+        self.checks
+            .values()
+            .flat_map(|check| check.cache_inputs.iter().flatten().map(String::as_str))
+            .collect()
+    }
 }
 /// The jobs whose success is the commit's aggregated verdict; every other job
 /// (release, publish, scheduled gates) reports under its own non-gating context.
@@ -228,7 +257,13 @@ pub struct Check {
 /// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
 fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
     let bytes = fs::read(root.join(manifest))?;
-    let mut parsed: Manifest = toml::from_str(std::str::from_utf8(&bytes)?)?;
+    let parsed = parse_manifest(&bytes)?;
+    Ok((parsed, bytes))
+}
+
+/// Parse and validate manifest bytes (the body of [`load_manifest`]).
+fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
+    let mut parsed: Manifest = toml::from_str(std::str::from_utf8(bytes)?)?;
     // `fleet = true` keys the fleet digest through the existing cache_env path (verdict store and moon).
     fleet::normalise(&mut parsed.checks)?;
     runtime::validate(parsed.runtime.as_ref(), parsed.toolchain.as_ref())?;
@@ -244,7 +279,7 @@ fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
             "Manifest requires schema=1 and a plain project slug",
         ));
     }
-    Ok((parsed, bytes))
+    Ok(parsed)
 }
 
 /// Resolve comma-separated selectors to declared check names and validate the

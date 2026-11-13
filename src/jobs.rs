@@ -328,6 +328,16 @@ pub fn is_self_checks_command(command: &[String]) -> bool {
     command.len() == 1 && command[0] == SELF_CHECKS_SENTINEL
 }
 
+impl Job {
+    /// The job's strings that may name a repository file: its command and environment values.
+    pub(crate) fn named_strings(&self) -> impl Iterator<Item = &str> {
+        self.command
+            .iter()
+            .chain(self.environment.values())
+            .map(String::as_str)
+    }
+}
+
 /// Plan one declared job without installing tools, contacting a forge or submitting work.
 pub fn plan(
     repo: &Path,
@@ -336,11 +346,20 @@ pub fn plan(
     scheduler: Option<Scheduler>,
 ) -> Result<Plan> {
     let (manifest, _) = load_manifest(repo, manifest)?;
+    plan_parsed(&manifest, name, scheduler)
+}
+
+/// [`plan`] of an already parsed manifest.
+pub(crate) fn plan_parsed(
+    manifest: &crate::Manifest,
+    name: &str,
+    scheduler: Option<Scheduler>,
+) -> Result<Plan> {
     let job = manifest
         .jobs
         .get(name)
         .ok_or_else(|| failure(format!("Unknown job: {name}")))?;
-    let checks = select_checks(&manifest, &job.checks)?;
+    let checks = select_checks(manifest, &job.checks)?;
     let effective = scheduler.unwrap_or(job.scheduler);
     // Remote jobs have no command: the provider workflow is the command.
     if effective != Scheduler::Remote {

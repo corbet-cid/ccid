@@ -134,6 +134,13 @@ transitions. A later change of the same template replaces the previous body
 with the then-released one, so a render two changes behind drifts. Remove a
 transition once the fleet has re-rendered.
 
+## The whole CI surface (`render_schema = 3`)
+
+At `render_schema = 3` ccid owns every CI file of the repository: verdict jobs run per commit, other jobs by
+hand, labels are `linux`, `windows` or `macos`, retired CI files go once their replacement is live, and
+unknown ones are refused. `ccid surface report` and `ccid surface plan` show what a render does with each
+file. See [surface.md](surface.md). Schemas 1 and 2 render byte for byte as before.
+
 ## Forgejo Actions
 
 A job with `scheduler = "forgejo"` renders to a native Forgejo Actions workflow,
@@ -143,7 +150,7 @@ workflow name share one file; each job becomes a job of that workflow.
 ```toml
 [jobs.verify]
 scheduler = "forgejo"
-runs_on = "linux"                       # runner label; default "light"
+runs_on = "linux"                       # runner label; default "light" (schema 3: linux, windows or macos; default linux)
 checks = ["test"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]  # the only command a Forgejo job takes
