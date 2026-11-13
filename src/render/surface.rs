@@ -236,8 +236,8 @@ const TABLE: &[Family] = &[
     legacy(
         "github-ci",
         &[".github/workflows/ci.yml"],
-        "per-commit verify on Forgejo and the rendered pull-request check",
-        Some("the rendered mirror pull-request and merge-request checks"),
+        "per-commit verify on Forgejo and the rendered pull-request check (`.github/workflows/pr-check.yml`)",
+        None,
     ),
     legacy(
         "github-release",
@@ -1324,6 +1324,25 @@ pub(super) fn align(value: &mut toml::Value) -> (Vec<Edit>, Vec<String>, Vec<Str
             .push("push_consumer: Crow fan-out has no Forgejo form; the plan drops it".to_owned());
     }
     let mut verdict = strings(table.get("verdict").and_then(|verdict| verdict.get("jobs")));
+    // The evaluation-only aarch64 pattern: a nix repository covers aarch64 by evaluating every system without
+    // building (`kind = "nix"`, `mode = "eval"`), on `linux`; a native aarch64 job is never a runner (B6).
+    let nix_checks: Vec<(String, Option<String>)> = table
+        .get("checks")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+        .filter(|(_, check)| check.get("kind").and_then(toml::Value::as_str) == Some("nix"))
+        .map(|(name, check)| {
+            (
+                name.clone(),
+                check
+                    .get("mode")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned),
+            )
+        })
+        .collect();
+    let mut aarch64_remote = Vec::new();
     let Some(jobs) = table.get_mut("jobs").and_then(toml::Value::as_table_mut) else {
         decisions.push("no [jobs]: render_schema = 3 needs a verdict job".to_owned());
         return (edits, decisions, notes);
@@ -1341,9 +1360,17 @@ pub(super) fn align(value: &mut toml::Value) -> (Vec<Edit>, Vec<String>, Vec<Str
             "remote" => {
                 let provider = job.get("provider").map(shown).unwrap_or_default();
                 let platform = job.get("platform").map(shown).unwrap_or_default();
-                decisions.push(format!(
-                    "remote job {name} ({provider}, {platform}): a Forgejo job on the windows or macos label, an evaluation on linux for aarch64, or nothing; the plan drops it"
-                ));
+                let aarch64 = platform.contains("arm64") || platform.contains("aarch64");
+                if aarch64 && !nix_checks.is_empty() {
+                    aarch64_remote.push(name.clone());
+                    notes.push(format!(
+                        "remote job {name} ({provider}, {platform}): aarch64 is covered by evaluation only (`nix flake check --all-systems --no-build`, on linux); the plan drops the remote job"
+                    ));
+                } else {
+                    decisions.push(format!(
+                        "remote job {name} ({provider}, {platform}): a Forgejo job on the windows or macos label, an evaluation on linux for aarch64, or nothing; the plan drops it"
+                    ));
+                }
                 jobs.remove(name);
                 if let Some(list) = verdict.as_mut() {
                     list.retain(|job| job != name);
@@ -1518,7 +1545,78 @@ pub(super) fn align(value: &mut toml::Value) -> (Vec<Edit>, Vec<String>, Vec<Str
             toml::Value::Array(gating.iter().cloned().map(toml::Value::String).collect()),
         );
     }
+    if !aarch64_remote.is_empty() {
+        aarch64_evaluation(table, &nix_checks, &gating, &mut edits);
+    }
     (edits, decisions, notes)
+}
+
+/// The evaluation-only aarch64 check a dropped native aarch64 job leaves behind: the nix check with
+/// `mode = "eval"` (declared, or added as `[checks.eval]`) in the first verdict job's checks.
+fn aarch64_evaluation(
+    table: &mut toml::Table,
+    nix_checks: &[(String, Option<String>)],
+    gating: &[String],
+    edits: &mut Vec<Edit>,
+) {
+    let Some(verdict) = gating.first() else {
+        return;
+    };
+    let declared = nix_checks
+        .iter()
+        .find(|(_, mode)| mode.as_deref() == Some("eval"))
+        .map(|(name, _)| name.clone());
+    let name = match declared {
+        Some(name) => name,
+        None => {
+            let name = ["eval", "aarch64-eval"]
+                .into_iter()
+                .find(|name| {
+                    !table
+                        .get("checks")
+                        .is_some_and(|checks| checks.get(name).is_some())
+                })
+                .unwrap_or("aarch64-eval")
+                .to_owned();
+            let mut check = toml::Table::new();
+            check.insert("kind".to_owned(), toml::Value::String("nix".to_owned()));
+            check.insert("mode".to_owned(), toml::Value::String("eval".to_owned()));
+            let checks = table
+                .entry("checks")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if let Some(checks) = checks.as_table_mut() {
+                checks.insert(name.clone(), toml::Value::Table(check));
+            }
+            edits.push(Edit {
+                kind: "aarch64_eval",
+                key: format!("checks.{name}"),
+                was: None,
+                now: Some("kind = \"nix\", mode = \"eval\"".to_owned()),
+            });
+            name
+        }
+    };
+    let Some(job) = table
+        .get_mut("jobs")
+        .and_then(|jobs| jobs.get_mut(verdict))
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return;
+    };
+    let mut listed = strings(job.get("checks")).unwrap_or_default();
+    if !listed.contains(&name) {
+        listed.push(name.clone());
+        job.insert(
+            "checks".to_owned(),
+            toml::Value::Array(listed.into_iter().map(toml::Value::String).collect()),
+        );
+        edits.push(Edit {
+            kind: "aarch64_eval",
+            key: format!("jobs.{verdict}.checks"),
+            was: None,
+            now: Some(format!("+ {name}")),
+        });
+    }
 }
 
 /// `ccid surface` subcommands.

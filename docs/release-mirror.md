@@ -17,6 +17,11 @@ either gets no files). There is nothing to declare:
 A hand-written `.gitlab-ci.yml` is never overwritten; that repository has no GitLab mirror
 until it includes the job itself.
 
+At `render_schema = 3` the same `.gitlab-ci.yml` also carries `workflow: rules` (a pipeline exists for a
+merge request, a `v*` tag and this job's own runs, and for nothing else) and the merge-request check; the
+GitHub side gets `.github/workflows/pr-check.yml`. See [mirror-check.md](mirror-check.md). The release job
+itself is the same text on every schema.
+
 ## What a job does
 
 1. Asks the baked identity URL where the forge is (one redirect hop) and reads

@@ -45,21 +45,25 @@ enum Action {
         #[arg(long)]
         job: String,
         /// `owner/name` of the repository.
-        #[arg(long)]
-        repository: String,
-        #[arg(long)]
-        sha: String,
-        #[arg(long)]
-        server_url: String,
+        #[arg(long, required_unless_present = "mirror")]
+        repository: Option<String>,
+        #[arg(long, required_unless_present = "mirror")]
+        sha: Option<String>,
+        #[arg(long, required_unless_present = "mirror")]
+        server_url: Option<String>,
         /// Owner of the repository (qualifies sibling names).
-        #[arg(long)]
-        owner: String,
+        #[arg(long, required_unless_present = "mirror")]
+        owner: Option<String>,
         /// Run the job against an existing source export instead of fetching the commit: the land gate's entry point.
         #[arg(long)]
         local: bool,
-        /// Source directory for --local (an export of the exact commit).
-        #[arg(long, requires = "local")]
+        /// Source directory for --local (an export of the exact commit) or --mirror (default: the current directory).
+        #[arg(long)]
         source: Option<PathBuf>,
+        /// The pull-request or merge-request check of a mirror platform: run a verdict job's declared checks against
+        /// the platform's own checkout, with no token, result cache, compile-cache wrapper or sibling of ours.
+        #[arg(long, conflicts_with_all = ["local", "repository", "sha", "server_url", "owner"])]
+        mirror: bool,
     },
     /// Generate owned scheduler adapters from the repository job manifest.
     Render {
@@ -452,26 +456,30 @@ fn main() -> ExitCode {
             owner,
             local,
             source,
+            mirror,
         } => {
-            let local = if local {
-                match source {
-                    Some(source) => Some(source),
-                    None => {
-                        eprintln!("ccid: --local requires --source");
-                        return ExitCode::from(2);
-                    }
+            let local = match (local, mirror, source) {
+                (true, _, Some(source)) => Some(source),
+                (true, _, None) => {
+                    eprintln!("ccid: --local requires --source");
+                    return ExitCode::from(2);
                 }
-            } else {
-                None
+                (false, true, source) => source,
+                (false, false, Some(_)) => {
+                    eprintln!("ccid: --source requires --local or --mirror");
+                    return ExitCode::from(2);
+                }
+                (false, false, None) => None,
             };
             match ccid::job_run::run(
                 &ccid::job_run::Options {
                     job,
-                    repository,
-                    sha,
-                    server_url,
-                    owner,
+                    repository: repository.unwrap_or_default(),
+                    sha: sha.unwrap_or_default(),
+                    server_url: server_url.unwrap_or_default(),
+                    owner: owner.unwrap_or_default(),
                     local,
+                    mirror,
                 },
                 &ccid::job_run::Pace::default(),
             ) {

@@ -7,7 +7,7 @@
 //! repository declares anything by hand.
 
 use super::{metadata, Templates, CROW_MARKER};
-use crate::Result;
+use crate::{jobs, Result};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -17,6 +17,178 @@ use std::{
 pub(super) const GITHUB: &str = ".github/workflows/release-mirror.yml";
 pub(super) const GITLAB: &str = ".gitlab-ci.yml";
 pub(super) const BITBUCKET: &str = "bitbucket-pipelines.yml";
+/// The GitHub pull-request check (`render_schema = 3`): the repository's verdict jobs on GitHub's own compute.
+pub(super) const GITHUB_CHECK: &str = ".github/workflows/pr-check.yml";
+
+/// The job the mirror platforms' checks and `job-run --mirror` have in common is named here, once.
+/// Where the ccid release a mirror check runs is published: the tool's own repository (its package
+/// metadata), on whichever forge serves it. The check reads the release channel and the binary
+/// anonymously from there.
+const TOOL_SOURCE: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// The verdict jobs of a repository that run on the mirror platforms' own compute, and those that do not.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Checks {
+    /// Mirrored: the verdict jobs a pull request or merge request runs, in name order.
+    pub eligible: Vec<String>,
+    /// Not mirrored, with the reason: `(job, reason)`.
+    pub forge_only: Vec<(String, String)>,
+}
+
+/// Why a verdict job is not mirrored (`SPEC` 3.5), or none when it is. A job is mirrored when it is a
+/// verdict job (the caller's choice), runs on `linux`, uses the sentinel command `ccid:run-declared-checks`,
+/// has no secrets, reads no sibling repository (whether a sibling is public is not known when rendering)
+/// and does not opt out with `mirror = false`.
+pub(crate) fn forge_only_reason(plan: &jobs::Plan) -> Option<String> {
+    if let Some(reason) = &plan.mirror_optout {
+        return Some(format!("mirror = false: {reason}"));
+    }
+    let label = plan.runs_on.as_deref().unwrap_or("linux");
+    if label != "linux" {
+        return Some(format!("runner label {label}"));
+    }
+    if !jobs::is_self_checks_command(&plan.command) {
+        return Some(format!("command {}", plain_words(&plan.command)));
+    }
+    if !plan.secrets.is_empty() {
+        return Some("it names secrets".to_owned());
+    }
+    if !plan.siblings.is_empty() {
+        return Some("it reads sibling repositories".to_owned());
+    }
+    None
+}
+
+/// A command as words a step summary and a shell-quoted `echo` can carry: every other character is `?`.
+fn plain_words(words: &[String]) -> String {
+    let text: String = words
+        .join(" ")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || " ._/:=+@-".contains(c) {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    text.chars().take(120).collect()
+}
+
+impl Checks {
+    /// Sort the verdict jobs `gating` of `plans` into mirrored and forge-only. A fork (it lists upstream
+    /// files in `[surface] upstream`) mirrors nothing: its upstream CI stays what it is.
+    pub(super) fn of(
+        plans: &BTreeMap<String, jobs::Plan>,
+        gating: &[String],
+        fork: bool,
+    ) -> Checks {
+        let mut checks = Checks::default();
+        if fork {
+            return checks;
+        }
+        let mut names: Vec<&String> = gating.iter().collect();
+        names.sort();
+        for name in names {
+            let Some(plan) = plans.get(name) else {
+                continue;
+            };
+            match forge_only_reason(plan) {
+                None => checks.eligible.push(name.clone()),
+                Some(reason) => checks.forge_only.push((name.clone(), reason)),
+            }
+        }
+        checks
+    }
+
+    /// The `render` and `render --check` notice for each forge-only verdict job.
+    pub(super) fn notices(&self) -> Vec<String> {
+        self.forge_only
+            .iter()
+            .map(|(job, reason)| format!("{job} runs on the forge only: {reason}"))
+            .collect()
+    }
+}
+
+/// `template` with its `CCID_CHECK_CORE` line replaced by the check script, indented to match, and the
+/// check's own values filled in.
+fn check_script(templates: &Templates, checks: &Checks) -> String {
+    templates
+        .mirror_check_core
+        .replace("CCID_TOOL_SOURCE", TOOL_SOURCE)
+        .replace("CCID_CHECK_JOBS", &checks.eligible.join(" "))
+}
+
+/// The step that tells a reader which verdict jobs this platform does not run, or nothing.
+fn forge_only_step(checks: &Checks) -> String {
+    if checks.forge_only.is_empty() {
+        return String::new();
+    }
+    let mut lines = String::new();
+    for (job, reason) in &checks.forge_only {
+        lines.push_str(&format!(
+            "            echo '- `{job}` runs on the forge only: {reason}'\n"
+        ));
+    }
+    format!(
+        "      - name: Say which checks run on the forge only\n        run: |\n          # shellcheck disable=SC2016\n          {{\n            echo '### Checks that run on the forge only'\n{lines}          }} >> \"$GITHUB_STEP_SUMMARY\"\n"
+    )
+}
+
+/// The GitHub pull-request check workflow, or none when no verdict job is mirrored.
+pub(super) fn github_check(templates: &Templates, checks: &Checks) -> Result<Option<String>> {
+    if checks.eligible.is_empty() {
+        return Ok(None);
+    }
+    let body = splice_marker(
+        templates.pr_check_github,
+        "CCID_CHECK_CORE",
+        &check_script(templates, checks),
+    )?;
+    let mut out = String::new();
+    let mut summary = false;
+    for line in body.split_inclusive('\n') {
+        if line.trim() == "CCID_CHECK_SUMMARY" {
+            out.push_str(&forge_only_step(checks));
+            summary = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !summary {
+        return Err(crate::failure(
+            "The pull-request check template has no CCID_CHECK_SUMMARY line",
+        ));
+    }
+    Ok(Some(out))
+}
+
+/// The GitLab pipeline rules that let a pipeline exist at all (merge requests, release tags, the
+/// release mirror's own runs) and the merge-request check job when a verdict job is mirrored.
+fn gitlab_check(templates: &Templates, checks: &Checks) -> Result<String> {
+    let mut out = templates.mirror_check_gitlab_workflow.to_owned();
+    if checks.eligible.is_empty() {
+        return Ok(out);
+    }
+    out.push('\n');
+    out.push_str(&splice_marker(
+        templates.mirror_check_gitlab_job,
+        "CCID_CHECK_CORE",
+        &check_script(templates, checks),
+    )?);
+    Ok(out)
+}
+
+/// `body` of the GitLab release mirror with the check parts in front of the release job: the file keeps
+/// one copy of the release job's text.
+fn with_gitlab_checks(release: &str, check: &str) -> Result<String> {
+    const JOB: &str = "\nrelease-mirror:\n";
+    let at = release
+        .find(JOB)
+        .ok_or_else(|| crate::failure("The GitLab release mirror template lost its job"))?;
+    let (head, job) = release.split_at(at + 1);
+    Ok(format!("{head}{check}\n{job}"))
+}
 
 /// Bitbucket's Downloads are a paid-plan feature (a Free workspace answers HTTP 402), so the
 /// Bitbucket pipeline is written and tested but not rendered until the plan has them.
@@ -137,10 +309,15 @@ fn foreign(repo: &Path, relative: &str) -> Result<bool> {
 
 /// `template` with its `CCID_MIRROR_CORE` line replaced by the core script, indented to match.
 fn splice(template: &str, core: &str) -> Result<String> {
+    splice_marker(template, "CCID_MIRROR_CORE", core)
+}
+
+/// `template` with its `marker` line replaced by `core`, indented to match.
+fn splice_marker(template: &str, marker: &str, core: &str) -> Result<String> {
     let mut out = String::new();
     let mut found = false;
     for line in template.split_inclusive('\n') {
-        if line.trim() == "CCID_MIRROR_CORE" {
+        if line.trim() == marker {
             let indent = &line[..line.len() - line.trim_start().len()];
             for script in core.lines() {
                 if !script.is_empty() {
@@ -155,7 +332,9 @@ fn splice(template: &str, core: &str) -> Result<String> {
         }
     }
     if !found {
-        return Err(crate::failure("A release mirror template has no core line"));
+        return Err(crate::failure(format!(
+            "A mirror template has no {marker} line"
+        )));
     }
     Ok(out)
 }
@@ -165,11 +344,15 @@ fn splice(template: &str, core: &str) -> Result<String> {
 ///
 /// `replace_legacy` (`render_schema = 3`): a hand-written file of a retired family (the remote scheduler's
 /// pipeline) is not foreign; the render replaces it with the mirror file.
+///
+/// `checks` (`render_schema = 3`): the GitLab file also carries the pipeline rules and the merge-request
+/// check. Schemas 1 and 2 pass none and render the release mirror alone, as before.
 pub(super) fn outputs(
     repo: &Path,
     source: &str,
     templates: &Templates,
     replace_legacy: bool,
+    checks: Option<&Checks>,
 ) -> Result<BTreeMap<PathBuf, String>> {
     let core = templates.mirror_core.replace("CCID_MIRROR_SOURCE", source);
     let mut files = BTreeMap::new();
@@ -177,7 +360,13 @@ pub(super) fn outputs(
         PathBuf::from(GITHUB),
         splice(templates.mirror_github, &core)?,
     );
-    let mut gitlab = vec![(GITLAB, templates.mirror_gitlab)];
+    let gitlab_body = match checks {
+        None => templates.mirror_gitlab.to_owned(),
+        Some(checks) => {
+            with_gitlab_checks(templates.mirror_gitlab, &gitlab_check(templates, checks)?)?
+        }
+    };
+    let mut gitlab = vec![(GITLAB, gitlab_body.as_str())];
     if RENDER_BITBUCKET {
         gitlab.push((BITBUCKET, templates.mirror_bitbucket));
     }

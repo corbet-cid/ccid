@@ -58,6 +58,11 @@ tracked files and new files git does not ignore.
 | legacy | a retired family (table in `src/render/surface.rs`) | see below | red |
 | unknown | anything else | refuses the render | red |
 
+The rendered files of a schema-3 repository include the [mirror checks](mirror-check.md):
+`.github/workflows/pr-check.yml` (a pull request) and, in `.gitlab-ci.yml` next to the release mirror, the
+pipeline rules and the `mr-check` job (a merge request). They replace the hand-written
+`.github/workflows/ci.yml`, a legacy family that render now deletes (unless a declared check reads it).
+
 A legacy family has a replacement. When the replacement is live:
 
 - render deletes the file if nothing that stays uses it;
@@ -91,7 +96,8 @@ ccid surface plan --summary --repo ...       # only the totals
 without writing: `render_schema = 3`; drop an own `tool_revision`/`tool_sha256` and `allow_crow`; dead
 labels to `linux`; `events` dropped on verdict jobs and `events = ["manual"]` dropped elsewhere; a separate
 pull-request job with the verdict's checks and command folded into the verdict job; a non-verdict job that
-shares the verdict's workflow moved to its own. A remote, Crow or Argo job and `push_consumer` are
-decisions for a person; the plan applies the conservative default (the job goes, or moves to Forgejo) and
-says so. For each repository the plan lists the edits, the decisions, the files render writes, deletes,
+shares the verdict's workflow moved to its own; the native aarch64 job of a nix repository replaced by the
+evaluation-only `mode = "eval"` check ([the pattern](mirror-check.md#the-aarch64-pattern-for-nix-repositories-evaluation-only)).
+A remote, Crow or Argo job and `push_consumer` are decisions for a person; the plan applies the conservative
+default (the job goes, or moves to Forgejo) and says so. For each repository the plan lists the edits, the decisions, the files render writes, deletes,
 keeps and refuses, and whether it is ready; the totals count repositories per edit kind and files per family.

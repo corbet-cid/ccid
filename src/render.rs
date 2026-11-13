@@ -38,6 +38,10 @@ enum Template {
     MirrorGithub,
     MirrorGitlab,
     MirrorBitbucket,
+    MirrorCheckCore,
+    PrCheckGithub,
+    MirrorCheckGitlabWorkflow,
+    MirrorCheckGitlabJob,
     UpstreamSync,
     UpstreamSyncMerge,
     UpstreamSyncPublish,
@@ -45,7 +49,7 @@ enum Template {
 
 impl Template {
     #[cfg(test)]
-    const ALL: [Template; 14] = [
+    const ALL: [Template; 18] = [
         Template::Crow,
         Template::Push,
         Template::Consumer,
@@ -57,6 +61,10 @@ impl Template {
         Template::MirrorGithub,
         Template::MirrorGitlab,
         Template::MirrorBitbucket,
+        Template::MirrorCheckCore,
+        Template::PrCheckGithub,
+        Template::MirrorCheckGitlabWorkflow,
+        Template::MirrorCheckGitlabJob,
         Template::UpstreamSync,
         Template::UpstreamSyncMerge,
         Template::UpstreamSyncPublish,
@@ -76,6 +84,10 @@ impl Template {
             Template::MirrorGithub => "release-mirror-github.yml",
             Template::MirrorGitlab => "release-mirror-gitlab.yml",
             Template::MirrorBitbucket => "release-mirror-bitbucket.yml",
+            Template::MirrorCheckCore => "mirror-check-core.sh",
+            Template::PrCheckGithub => "pr-check-github.yml",
+            Template::MirrorCheckGitlabWorkflow => "mirror-check-gitlab-workflow.yml",
+            Template::MirrorCheckGitlabJob => "mirror-check-gitlab-job.yml",
             Template::UpstreamSync => "upstream-sync.yml",
             Template::UpstreamSyncMerge => "upstream-sync-merge.sh",
             Template::UpstreamSyncPublish => "upstream-sync-publish.sh",
@@ -98,6 +110,10 @@ struct Templates {
     mirror_github: &'static str,
     mirror_gitlab: &'static str,
     mirror_bitbucket: &'static str,
+    mirror_check_core: &'static str,
+    pr_check_github: &'static str,
+    mirror_check_gitlab_workflow: &'static str,
+    mirror_check_gitlab_job: &'static str,
     upstream_sync: &'static str,
     upstream_sync_merge: &'static str,
     upstream_sync_publish: &'static str,
@@ -116,6 +132,10 @@ impl Templates {
         mirror_github: include_str!("render/release-mirror-github.yml"),
         mirror_gitlab: include_str!("render/release-mirror-gitlab.yml"),
         mirror_bitbucket: include_str!("render/release-mirror-bitbucket.yml"),
+        mirror_check_core: include_str!("render/mirror-check-core.sh"),
+        pr_check_github: include_str!("render/pr-check-github.yml"),
+        mirror_check_gitlab_workflow: include_str!("render/mirror-check-gitlab-workflow.yml"),
+        mirror_check_gitlab_job: include_str!("render/mirror-check-gitlab-job.yml"),
         upstream_sync: include_str!("render/upstream-sync.yml"),
         upstream_sync_merge: include_str!("render/upstream-sync-merge.sh"),
         upstream_sync_publish: include_str!("render/upstream-sync-publish.sh"),
@@ -135,6 +155,10 @@ impl Templates {
             Template::MirrorGithub => self.mirror_github,
             Template::MirrorGitlab => self.mirror_gitlab,
             Template::MirrorBitbucket => self.mirror_bitbucket,
+            Template::MirrorCheckCore => self.mirror_check_core,
+            Template::PrCheckGithub => self.pr_check_github,
+            Template::MirrorCheckGitlabWorkflow => self.mirror_check_gitlab_workflow,
+            Template::MirrorCheckGitlabJob => self.mirror_check_gitlab_job,
             Template::UpstreamSync => self.upstream_sync,
             Template::UpstreamSyncMerge => self.upstream_sync_merge,
             Template::UpstreamSyncPublish => self.upstream_sync_publish,
@@ -154,6 +178,10 @@ impl Templates {
             Template::MirrorGithub => &mut self.mirror_github,
             Template::MirrorGitlab => &mut self.mirror_gitlab,
             Template::MirrorBitbucket => &mut self.mirror_bitbucket,
+            Template::MirrorCheckCore => &mut self.mirror_check_core,
+            Template::PrCheckGithub => &mut self.pr_check_github,
+            Template::MirrorCheckGitlabWorkflow => &mut self.mirror_check_gitlab_workflow,
+            Template::MirrorCheckGitlabJob => &mut self.mirror_check_gitlab_job,
             Template::UpstreamSync => &mut self.upstream_sync,
             Template::UpstreamSyncMerge => &mut self.upstream_sync_merge,
             Template::UpstreamSyncPublish => &mut self.upstream_sync_publish,
@@ -701,6 +729,9 @@ pub struct Report {
     /// template transition; the next render updates them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transitional: Vec<PathBuf>,
+    /// `render_schema = 3`: the verdict jobs the mirror platforms do not run, each with its reason.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub forge_only: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -774,6 +805,10 @@ fn render_outputs(
         let mut plan = jobs::plan_parsed(parsed, name, None)?;
         if schema == Schema::Surface {
             surface_job(&mut plan, gating.contains(name))?;
+        } else if plan.mirror_optout.is_some() {
+            return Err(failure(format!(
+                "[jobs.{name}] mirror = false belongs to render_schema = 3 (the mirror platforms' checks)"
+            )));
         }
         if plan.scheduler == jobs::Scheduler::Remote {
             // Remote jobs are dispatched by the host-side broker, which runs
@@ -972,16 +1007,77 @@ fn render_outputs(
     if parsed.check_shell.is_some() {
         outputs.insert(PathBuf::from(CHECK_SHELL), templates.check_shell.to_owned());
     }
+    // render_schema = 3: the mirror platforms also run the repository's verdict jobs for a pull request or
+    // a merge request. Schemas 1 and 2 render the release mirror alone, byte for byte as before.
+    let checks = if schema == Schema::Surface {
+        Some(mirror_checks(&inventory.jobs, &gating, parsed))
+    } else {
+        None
+    };
     if let Some(source) = mirror::source(repo, parsed.repository.as_deref()) {
         outputs.extend(mirror::outputs(
             repo,
             &source,
             templates,
             schema == Schema::Surface,
+            checks.as_ref(),
         )?);
+    }
+    if let Some(checks) = &checks {
+        if let Some(workflow) = mirror::github_check(templates, checks)? {
+            outputs.insert(PathBuf::from(mirror::GITHUB_CHECK), workflow);
+        }
     }
     outputs.extend(upstream_sync::outputs(repo, &inventory.jobs, templates)?);
     Ok(outputs)
+}
+
+/// The verdict jobs that run on the mirror platforms' own compute and those that stay on the forge.
+fn mirror_checks(
+    plans: &BTreeMap<String, jobs::Plan>,
+    gating: &[String],
+    parsed: &crate::Manifest,
+) -> mirror::Checks {
+    let fork = parsed
+        .surface
+        .as_ref()
+        .is_some_and(|surface| !surface.upstream.is_empty());
+    mirror::Checks::of(plans, gating, fork)
+}
+
+/// The `render` and `render --check` notices for the verdict jobs that stay on the forge only.
+fn forge_only_notices(parsed: &crate::Manifest, schema: Schema) -> Result<Vec<String>> {
+    if schema != Schema::Surface {
+        return Ok(Vec::new());
+    }
+    let gating = gating_jobs(parsed)?;
+    let mut plans = BTreeMap::new();
+    for name in parsed.jobs.keys() {
+        let mut plan = jobs::plan_parsed(parsed, name, None)?;
+        surface_job(&mut plan, gating.contains(name))?;
+        plans.insert(name.clone(), plan);
+    }
+    Ok(mirror_checks(&plans, &gating, parsed).notices())
+}
+
+/// Why `job` is not a mirror check of the manifest in `repo` (`ccid job-run --mirror` refuses it), or
+/// none when it is one: a verdict job that `forge_only_reason` accepts.
+pub(crate) fn mirror_refusal(repo: &Path, manifest: &Path, job: &str) -> Result<Option<String>> {
+    let (parsed, _) = load_manifest(repo, manifest)?;
+    let plan = jobs::plan_parsed(&parsed, job, None)?;
+    if !gating_jobs(&parsed)?.iter().any(|name| name == job) {
+        return Ok(Some("it is not a verdict job".to_owned()));
+    }
+    if parsed
+        .surface
+        .as_ref()
+        .is_some_and(|surface| !surface.upstream.is_empty())
+    {
+        return Ok(Some(
+            "this repository lists upstream CI files (a fork)".to_owned(),
+        ));
+    }
+    Ok(mirror::forge_only_reason(&plan))
 }
 
 /// Render repository jobs, or check byte-for-byte drift without modifying files.
@@ -1011,6 +1107,10 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         schema,
         &Templates::CURRENT,
     )?;
+    let forge_only = forge_only_notices(&parsed, schema)?;
+    for notice in &forge_only {
+        eprintln!("ccid render: {notice}");
+    }
     // render_schema = 3: every CI file is classified before anything is written; a refused file stops the render.
     let surface = if schema == Schema::Surface {
         let known = mirror::source(repo, parsed.repository.as_deref()).is_some();
@@ -1167,6 +1267,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         files: outputs.into_keys().collect(),
         removed: obsolete,
         transitional,
+        forge_only,
     })
 }
 

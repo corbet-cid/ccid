@@ -32,6 +32,8 @@ mod job_execution;
 mod job_runtime;
 #[cfg(unix)]
 mod measure_inputs;
+#[cfg(unix)]
+mod mirror_check;
 mod native_compile_cache;
 mod prose_cli;
 mod quality_cli;
