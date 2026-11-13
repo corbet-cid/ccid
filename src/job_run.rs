@@ -905,13 +905,14 @@ mod tests {
             ),
         )
         .unwrap();
-        // The runner names its system configuration in the environment of every job, so the wrapper only sets it when the caller did not.
+        // The runner names its system configuration in the environment of every job, and so does the CI runner this test itself runs on: whatever
+        // the test process inherited, a git call gets the runner's rules, except the call that switched them off (GIT_CONFIG_SYSTEM=/dev/null).
         let wrapper = root.join("bin/git");
         fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
         write_stub(
             &wrapper,
             &format!(
-                "#!/bin/sh\n: \"${{GIT_CONFIG_SYSTEM:={}}}\"\nexport GIT_CONFIG_SYSTEM\nexec git \"$@\"\n",
+                "#!/bin/sh\ncase \"${{GIT_CONFIG_SYSTEM:-}}\" in\n  /dev/null) ;;\n  *) GIT_CONFIG_SYSTEM={}; unset GIT_CONFIG_COUNT ;;\nesac\nexport GIT_CONFIG_SYSTEM\nexec git \"$@\"\n",
                 system.display()
             ),
         );
