@@ -1207,6 +1207,54 @@ fn the_declared_cache_tools_argv_is_the_version_query_with_a_dash_v_fallback() {
     );
 }
 
+/// A tool whose `-v` exits 0 without printing anything (and which fails `--version`).
+fn silent_tool(directory: &Path) {
+    fs::write(
+        directory.join("silent-tool"),
+        "#!/bin/sh\nif [ \"$1\" = '-v' ]; then exit 0; fi\necho 'usage: silent-tool [-v]' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            directory.join("silent-tool"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn a_silent_dash_v_is_not_a_tool_identity() {
+    let fixture = fixture("tool-probe");
+    let root = fixture.path();
+    let tools = tempfile::tempdir().unwrap();
+    silent_tool(tools.path());
+    let env = tool_path_env(&environment(), tools.path());
+    let commit_id = commit(root, None, &env).unwrap();
+
+    // The `-v` fallback exits 0 but prints nothing: there is no identity, so the
+    // bare program gets no verdict instead of keying every release to "".
+    // (On the old code this prepare succeeds with the empty-string identity.)
+    let mut bare = check();
+    bare.commands = vec![vec!["sh".into(), "-c".into(), "true".into()]];
+    bare.cache_tools = vec![vec!["silent-tool".into()]];
+    assert!(
+        prepare(root, "verify", &bare, &env, &commit_id, &[]).is_err(),
+        "a tool silent on -v must get no verdict"
+    );
+
+    // The same holds when `-v` is the declared query: verbatim silence is not an answer.
+    let mut declared = check();
+    declared.commands = vec![vec!["sh".into(), "-c".into(), "true".into()]];
+    declared.cache_tools = vec![vec!["silent-tool".into(), "-v".into()]];
+    assert!(
+        prepare(root, "verify", &declared, &env, &commit_id, &[]).is_err(),
+        "a declared query printing nothing must get no verdict"
+    );
+}
+
 #[test]
 fn systemd_unit_directories_never_enter_the_semantic_environment() {
     let fixture = fixture("unit-layout");

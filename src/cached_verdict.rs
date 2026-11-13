@@ -688,7 +688,15 @@ fn run_tool(program: &Path, args: &[&str], environment: &Environment) -> Result<
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Some tools (notably older Python) print their version on stderr. Either stream is the
-    // tool's answer; both empty is not an answer.
+    // tool's answer; both empty is not an answer: an exit-0 silence must fail this attempt
+    // so the probe chain moves on instead of keying every release to the same "" identity.
+    if stdout.trim().is_empty() && stderr.trim().is_empty() {
+        return Err(failure(format!(
+            "Verdict key {} {} printed no version output",
+            program.display(),
+            args.join(" ")
+        )));
+    }
     let text = if stdout.trim().is_empty() {
         stderr
     } else {
