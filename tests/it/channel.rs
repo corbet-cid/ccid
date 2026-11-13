@@ -47,15 +47,21 @@ fn channel_json_entries_are_published_with_the_named_digest() {
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("channel.json");
     let channel: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    let mut entries = vec![&channel["default"]];
+    let mut entries = vec![("default", &channel["default"])];
     if let Some(classes) = channel["classes"].as_object() {
-        entries.extend(classes.values());
+        entries.extend(classes.iter().map(|(class, entry)| (class.as_str(), entry)));
     }
     let mut checked = std::collections::BTreeSet::new();
-    for entry in entries {
+    for (class, entry) in entries {
         let revision = entry["revision"].as_str().unwrap();
         let digest = entry["sha256"].as_str().unwrap();
-        if !checked.insert((revision.to_owned(), digest.to_owned())) {
+        // The shim downloads `ccid-<triple>` of the runner (CCID_TOOL_TRIPLE): the `macos` class names the macOS binary, every other class the Linux one.
+        let file = if class == "macos" {
+            "ccid-x86_64-apple-darwin"
+        } else {
+            "ccid-x86_64-unknown-linux-gnu"
+        };
+        if !checked.insert((revision.to_owned(), digest.to_owned(), file)) {
             continue;
         }
         let output = std::process::Command::new("curl")
@@ -67,18 +73,18 @@ fn channel_json_entries_are_published_with_the_named_digest() {
                 "--max-time",
                 "120",
             ])
-            .arg(format!("{base}/{revision}/ccid-x86_64-unknown-linux-gnu"))
+            .arg(format!("{base}/{revision}/{file}"))
             .output()
             .expect("curl runs");
         assert!(
             output.status.success(),
-            "release {revision} cannot be fetched from the package registry: {}",
+            "release {revision} ({file}, class {class}) cannot be fetched from the package registry: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let actual = format!("{:x}", Sha256::digest(&output.stdout));
         assert_eq!(
             actual, digest,
-            "release {revision}: the registry's digest differs from the channel's"
+            "release {revision} ({file}, class {class}): the registry's digest differs from the channel's"
         );
     }
     eprintln!(
