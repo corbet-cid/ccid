@@ -274,6 +274,7 @@ fn nix_mode(check: &Check) -> Result<&str> {
 }
 
 pub(crate) fn validate_check(check: &Check) -> Result<()> {
+    crate::narrowing::validate_declaration(check)?;
     let commands = match check.kind.as_str() {
         "cargo" => {
             if check.toolchain.as_deref() == Some("") {

@@ -34,14 +34,34 @@ ccid measure-inputs --check verify [--repo .] [--depth 1] [--strace strace] [--n
    missed something (for example a read by a daemon that was already running) and the result is
    refused (exit 1).
 
-The command prints one JSON line with the `cache_inputs` line to put on the check; it writes
-nothing to the repository. The key mechanism adds every lock and ecosystem manifest to a narrowed
-declaration on its own.
+The command prints one JSON line with the `cache_inputs` line to put on the check, followed by the
+provenance that lets the verdict key narrow to it; it writes nothing to the repository:
+
+```
+cache_inputs = ["src/**", "Cargo.toml", ".ci/**"]
+cache_inputs_measured = { tool = "<ccid source revision>", commands = "<sha256>", inputs = "<sha256>", layout = "<sha256>", date = "2026-11-13" }
+```
+
+* `tool`: the full source revision of the ccid that measured (a local `unversioned` build prints
+  its provenance but the key refuses it);
+* `commands`: the digest of the check's definition as measured (everything the check declares
+  except `cache_inputs` and `cache_inputs_measured`), so an edited check is keyed on the whole
+  tree until it is measured again;
+* `inputs`: the digest of the `cache_inputs` list printed above (sorted, de-duplicated), so a
+  list edited by hand afterwards is not taken for the measured one;
+* `layout`: the digest of the committed tree's top-level entry names, so a top-level entry the
+  measurement never saw invalidates the narrowing;
+* `date`: provenance for a reader; it never expires.
+
+Measure on a clean checkout of the commit (the layout is the committed tree's). The key mechanism
+adds every lock and ecosystem manifest, and everything under `.ci/`, to a narrowed declaration on
+its own.
 
 ## Limits
 
-- `cache_inputs` narrows the moon result cache. The shared verdict store still keys the whole tree,
-  so a narrowed check skips through the moon cache, not through a verdict.
+- `cache_inputs` narrows the moon result cache. The shared verdict store keys the measured
+  read-set only for a check that also carries `cache_inputs_measured` and whose provenance still
+  holds (see [narrowed keys](verdicts.md#narrowed-keys)); any other check keys the whole tree.
 - The measurement holds for the tree it was taken on. A change that makes the check read a new
   top-level entry is covered only if that entry was already looked for (cargo, for example, probes
   for `build.rs`, `benches` and `examples`). Measure again after a structural change.

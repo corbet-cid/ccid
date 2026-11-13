@@ -96,6 +96,19 @@ fn measure_inputs_keeps_what_the_check_touched_and_verifies_it() {
         "{text}"
     );
     assert_eq!(line["verified"], true, "{text}");
+    // The provenance that lets the verdict key narrow to these inputs.
+    let measured = &line["cache_inputs_measured"];
+    assert_eq!(
+        measured["commands"].as_str().map(str::len),
+        Some(64),
+        "{text}"
+    );
+    assert_eq!(
+        measured["layout"].as_str().map(str::len),
+        Some(64),
+        "{text}"
+    );
+    assert_eq!(measured["date"].as_str().map(str::len), Some(10), "{text}");
 }
 
 #[test]
@@ -106,6 +119,7 @@ fn measure_inputs_keeps_the_whole_tree_for_a_check_that_lists_the_root() {
     assert_eq!(code, Some(0), "{text}");
     assert_eq!(line["narrowed"], false, "{text}");
     assert!(line["cache_inputs"].is_null(), "{text}");
+    assert!(line["cache_inputs_measured"].is_null(), "{text}");
 }
 
 #[test]

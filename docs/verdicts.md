@@ -13,17 +13,67 @@ components, in this order:
 
 | Component | Meaning |
 |---|---|
-| `schema` | Key schema (`2`). Unknown schemas are refused. |
-| `tree` | SHA-256 of the tree's content: path, kind (regular/executable/symlink/submodule) and bytes of every committed file. A `git archive` export of a commit and a checkout of the same commit produce the same value; generated directories (`.git`, `.moon`, `.ccid`, `target`, `node_modules`) are not part of it. |
+| `schema` | Key schema (`3`). Unknown schemas are refused. A schema change misses every verdict once, so it ships with a channel bump. |
+| `tree` | SHA-256 of the tree's content: path, kind (regular/executable/symlink/submodule) and bytes of every committed file. A `git archive` export of a commit and a checkout of the same commit produce the same value; generated directories (`.git`, `.moon`, `.ccid`, `target`, `node_modules`) are not part of it. A **narrowed** key digests only the check's measured read-set (see [Narrowed keys](#narrowed-keys)). |
 | `git_dependencies` | Every git-sourced package of every `Cargo.lock` (root and nested), keyed `<lock path>:<package>:<url>`, mapped to the commit the build resolves it to: the float's commit map when the run floated (see below), so it is the resolved commit, not the committed pin. |
 | `toolchain` | Stable role → SHA-256 of the tool's **semantic identity** (its release and target), never its installed bytes. See [Tool identity](#tool-identity). |
 | `profile` | SHA-256 of the shared build profile (`profiles/dev.toml`) compiled into the producing binary. |
 | `epoch` | `VERDICT_EPOCH`: what a verdict *means*. A release that checks the same things the same way keeps every verdict; only a semantic change raises it (`2`). |
 | `check` | The selected check's name. |
 | `check_identity` | SHA-256 of the check declaration plus the **declared** environment: the values of `SEMANTIC_ENV` and the check's `cache_env`, with producer-local path entries normalised away (see [Declared environment](#declared-environment)). An absent variable and an empty one differ. Ambient variables never enter the key. |
+| `read_set` | Present **only** on a narrowed key (`{inputs, layout, commands}`, three SHA-256 digests); absent otherwise, so a whole-tree key has exactly the components above. See [Narrowed keys](#narrowed-keys). |
 
 No path, URL, commit id, run id, timestamp or host name is part of the key. Two producers on
 different hosts therefore compute the same key for the same content.
+
+### Narrowed keys
+
+A key over the whole tree reruns a check for every commit, including one that only touches a
+README. [`ccid measure-inputs`](measure-inputs.md) derives the files a check actually touches; a
+check that carries that measurement is keyed on those files only, so a commit outside its
+read-set reuses the verdict. A false skip is worse than a slow run, so the narrowing is
+**fail-closed**: the whole-tree key is used (and `verdict-narrowing` reports why) unless all of
+this holds.
+
+| Condition | Otherwise |
+|---|---|
+| the check declares `cache_inputs` **and** `cache_inputs_measured` (the provenance `ccid measure-inputs` prints: `tool`, `commands`, `inputs`, `layout`, `date`) | a guessed list never narrows a verdict |
+| the provenance is well formed: `tool` is the full source revision of a released ccid (a local `unversioned` build is refused), the digests are SHA-256, the date is `YYYY-MM-DD` | refused when the check is selected |
+| `commands` equals the digest of the check's definition now (everything the check declares except `cache_inputs`, `cache_inputs_measured` and the float's resolution variable) | an edited check is keyed on the whole tree until it is measured again |
+| `inputs` equals the digest of the `cache_inputs` list now (sorted, de-duplicated) | a list edited by hand since the measurement is not the measured list |
+| `layout` equals the digest of the tree's top-level entry names now | a top-level entry the measurement never saw is an input outside the measured set: it invalidates the narrowing |
+| the kind is not `nix` | a nix check keys every file |
+| the declared inputs select at least one file | |
+
+The narrowed `tree` is the digest (same construction as the whole-tree digest) of the committed
+files that the `cache_inputs` globs select, matched by git's own pathspec matcher with `:(glob)`
+magic, the matcher `measure-inputs` verifies with and the moon result cache narrows with, **plus**
+files no narrow declaration may leave out: everything under `.ci/` (the commands' own scripts and
+the manifest) and the locks and ecosystem manifests of the check's kind, anywhere in the tree
+(`Cargo.toml`, `Cargo.lock`, `.cargo/**`, `rust-toolchain*`; for `commands` checks also the Go,
+JavaScript, Python, Nix, CMake, Docker, proto and Terraform lock and manifest files). A negative
+glob (`!pattern`) narrows further but never removes one of those; declared `cache_outputs` and
+tool state are never inputs. The key still names the check's commands (`check_identity`), the
+toolchain, the profile and the dependencies exactly as before, and `read_set` records the digests
+of the inputs, layout and commands it was narrowed from (equal to the provenance, or the key would be whole-tree).
+
+What stays whole-tree even for a narrowed key:
+
+* **The preconditions.** A working tree that differs from the commit, or holds an untracked
+  file, outside the read-set is still refused: the check could read it and the key cannot name it.
+* **The post-run guard.** A verdict is recorded only if, after the run, the whole tree digest is
+  unchanged as well as the narrowed one: a check that wrote anywhere in the tree leaves no pass.
+* **The lock scan.** Git dependencies are read from every `Cargo.lock` as before.
+
+`ccid cached --plan` and `verdict-record` report the key's `scope` (`read-set` or `tree`).
+
+Residual limit: ccid does not observe reads while a check runs (that needs a tracer, which is
+`measure-inputs`' job and too slow for a job). A commit that edits a file the check reads so that
+the check now also reads a file below a directory the measurement classified as unread is
+recorded under the narrowed key without that file, and a later commit that touches only that
+file reuses the verdict. Measure again after a change that gives the check a new dependency on
+files outside its `cache_inputs`. The `layout` check is what turns the commonest structural
+change, a new top-level directory or file, from a silent false skip into a rerun.
 
 ### Tool identity
 
@@ -83,7 +133,7 @@ One JSON file per key: `<CCID_RESULT_CACHE>/verdicts/<key>.json`.
 
 | Field | Meaning |
 |---|---|
-| `schema` | Record schema (`2`). |
+| `schema` | Record schema (`3`). |
 | `key` | The key above. |
 | `components` | The exact components; they must hash to `key`, or the record is refused. |
 | `commit` | The commit the tree came from (provenance only). |
@@ -243,8 +293,8 @@ a later nightly run restores the identical reports without a second full build.
 
 * `ccid cached --check <name>` — look up, then run the ordinary cached transaction on a miss and
   record a success. Events: `verdict-plan`, `verdict-inspect`, `verdict-record`,
-  `verdict-skipped`, `verdict-disabled`, `verdict-unavailable`, `verdict-outputs-stored`,
-  `verdict-outputs-restored`, `verdict-outputs-prune`. A hit restores the declared outputs and
+  `verdict-skipped`, `verdict-disabled`, `verdict-unavailable`, `verdict-narrowing`,
+  `verdict-outputs-stored`, `verdict-outputs-restored`, `verdict-outputs-prune`. A hit restores the declared outputs and
   emits a `cache-check` with `status: cached` and `computed: 0`, and leaves the declared receipt
   (`<check>.jsonl`).
 * `ccid cached --check <name> --plan` — print each check's verdict and its bypass reason (a
