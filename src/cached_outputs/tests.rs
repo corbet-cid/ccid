@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 use std::time::Duration;
 
@@ -379,6 +379,7 @@ fn a_verdict_is_published_only_after_every_declared_output_is_stored() {
     crate::cached_verdict::record_success(
         std::slice::from_ref(&prepared),
         &BTreeSet::new(),
+        &BTreeMap::new(),
         &producer,
         20,
         &env,
@@ -397,6 +398,7 @@ fn a_verdict_is_published_only_after_every_declared_output_is_stored() {
     crate::cached_verdict::record_success(
         std::slice::from_ref(&prepared),
         &BTreeSet::new(),
+        &BTreeMap::new(),
         &producer,
         30,
         &env,
@@ -447,6 +449,7 @@ fn a_verdict_is_published_only_after_every_declared_output_is_stored() {
             started_at: 1,
             finished_at: 2,
             duration_seconds: 1,
+            proof: None,
         },
     )
     .unwrap();

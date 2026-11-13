@@ -44,6 +44,7 @@ this holds.
 | `layout` equals the digest of the tree's top-level entry names now | a top-level entry the measurement never saw is an input outside the measured set: it invalidates the narrowing |
 | the kind is not `nix` | a nix check keys every file |
 | the declared inputs select at least one file | |
+| the run that stores the verdict **proves the read-set on that run** (below) | the pass is stored under the whole-tree key, and `verdict-narrowing` carries `remeasure` |
 
 The narrowed `tree` is the digest (same construction as the whole-tree digest) of the committed
 files that the `cache_inputs` globs select, matched by git's own pathspec matcher with `:(glob)`
@@ -55,7 +56,46 @@ JavaScript, Python, Nix, CMake, Docker, proto and Terraform lock and manifest fi
 glob (`!pattern`) narrows further but never removes one of those; declared `cache_outputs` and
 tool state are never inputs. The key still names the check's commands (`check_identity`), the
 toolchain, the profile and the dependencies exactly as before, and `read_set` records the digests
-of the inputs, layout and commands it was narrowed from (equal to the provenance, or the key would be whole-tree).
+of the inputs, layout and commands it was narrowed from (equal to the provenance, or the key would be whole-tree)
+and the `proof` that backs the key (`stripped-copy-1`).
+
+#### The proof, on the run that stores the verdict
+
+A narrowed key is a claim made from an earlier measurement, and a source change can make a check
+start reading a file that measurement never saw. A stale read-set is the false skip this store
+must never produce, so a verdict is stored under a narrowed key only by a run that has just shown,
+on that run, that the read-set suffices:
+
+1. A lookup asks the narrowed key, and then the whole-tree key (where an unproven run's pass is
+   stored). Either hit answers; nothing runs.
+2. On a miss the check executes **in a proving copy** of the tree (`verdict-proof` reports its
+   size): a repository of its own in which every committed file is present, so a probe for a file
+   that exists finds it and a probe for one that does not still fails, but only the read-set,
+   `.ci/**`, the locks and manifests, and git's own plumbing (`.gitignore`, `.gitattributes`,
+   `.gitmodules`) keep their content. Every other file holds placeholder bytes (not valid UTF-8,
+   never empty) and its original mode, so a check that reads one fails instead of passing on
+   content it did not have. The run is forced past the moon result cache: a replayed result
+   executes nothing and would prove nothing on this run.
+3. **Pass:** the read-set suffices for this tree. The declared outputs and the receipt are moved
+   into the checkout, and the verdict is stored under the narrowed key with a `proof`
+   (`{method, files, of}`) that the record must carry; a narrowed record without it, or a
+   whole-tree record with one, is refused as a record and never answers a lookup.
+4. **Fail:** the measurement is stale (or the check is red, which only the next step can tell).
+   `verdict-narrowing` is emitted with `scope = tree`, `remeasure = true` and the failure. The
+   check then runs on the whole tree as it always did; its pass is stored under the **whole-tree**
+   key, and a red check stays red. Run `ccid measure-inputs` again and put the new lines on the
+   check. Until then each executing run pays the proving attempt before the whole-tree run.
+
+Why a copy and not a tracer: proving the read-set by tracing the run (`strace`, as
+`measure-inputs` does) sees every read, but it costs a tenth of the run's CPU and between
+one and a half and two times its wall clock, and it needs the compile caches switched off (a
+cache hit executes nothing to trace), which on a cold target multiplies the CPU several times.
+Building the copy is a few files and one `git commit`: tens of milliseconds, and the compile
+caches work as usual.
+
+The optional files a measurement probed for and did not find are part of the read-set: they are in
+`cache_inputs` as the path and everything below it, so such a file appearing in a later commit
+changes the key (a new top-level entry changes `layout`, and keys the whole tree).
 
 What stays whole-tree even for a narrowed key:
 
@@ -67,13 +107,14 @@ What stays whole-tree even for a narrowed key:
 
 `ccid cached --plan` and `verdict-record` report the key's `scope` (`read-set` or `tree`).
 
-Residual limit: ccid does not observe reads while a check runs (that needs a tracer, which is
-`measure-inputs`' job and too slow for a job). A commit that edits a file the check reads so that
-the check now also reads a file below a directory the measurement classified as unread is
-recorded under the narrowed key without that file, and a later commit that touches only that
-file reuses the verdict. Measure again after a change that gives the check a new dependency on
-files outside its `cache_inputs`. The `layout` check is what turns the commonest structural
-change, a new top-level directory or file, from a silent false skip into a rerun.
+Residual limit: the proof shows that the check passes when the files outside its read-set cannot
+be read as content. A check that reads such a file and tolerates garbage (an optional
+configuration it ignores when it cannot parse it) passes in the copy although it read the file;
+a later commit that changes only that file reuses the verdict. The proof closes the
+required-input and the optional-input-that-is-checked cases, and `ccid measure-inputs` (which
+traces every read) remains the tool that finds the rest: measure again after a change that gives
+the check a new dependency. On a host without `unix` the copy cannot be built and the whole tree
+is keyed.
 
 ### Tool identity
 
@@ -142,6 +183,7 @@ One JSON file per key: `<CCID_RESULT_CACHE>/verdicts/<key>.json`.
 | `producer` | `lane` or `ci`, plus free-form identity (host, lane, pipeline URL). Provenance only. |
 | `tool` | The producing ccid binary: SHA-256 of its bytes and the source revision compiled into it. |
 | `started_at`, `finished_at`, `duration_seconds` | Unix seconds. |
+| `proof` | Present exactly when the key is narrowed: `{method, files, of}`, the evidence that the run that stored the record passed in a copy holding `files` of the tree's `of` files. |
 
 Records are written atomically under a per-key lock. A pass wins over a failure forever: two
 producers that agree on the key agree on the result, and a later failure never erases a pass. A

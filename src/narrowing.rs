@@ -17,6 +17,17 @@
 //! * the tree's top-level entries are exactly those the measurement classified: an entry the
 //!   measurement never saw is an input outside the measured set, seen when the check runs.
 //!
+//! A key that is narrowed by those conditions alone would trust a measurement made earlier, and a
+//! source change can make a check start reading a file the measurement never saw. So the key is
+//! only a *claim*, and the run that stores a verdict under it proves the claim on that run: the
+//! check executes in a copy of the tree that holds the read-set and nothing else (every file
+//! outside it is present but replaced by [`PLACEHOLDER`] bytes, so the tree has the same shape and
+//! a read of one is a read of garbage, never a read of a missing file). A pass proves the read-set
+//! suffices for the tree being judged; a failure means the measurement is stale, and the check
+//! runs again on the whole tree, whose verdict is stored under the whole-tree key with a
+//! `remeasure` flag. The key names its proof ([`PROOF`]), so only a verdict recorded by that proof
+//! can ever answer a narrowed lookup.
+//!
 //! The key then names the selected files only. It always adds the locks and ecosystem manifests
 //! (the same set the moon result cache adds to a narrowed declaration) and everything under
 //! `.ci/`, where the check's own scripts live, so a change to the commands' scripts, the
@@ -56,6 +67,25 @@ pub struct Measured {
     pub date: String,
 }
 
+/// How the run that stores a narrowed verdict proves its read-set suffices (see the module
+/// documentation). It is part of every narrowed key, so a verdict recorded by any other method,
+/// or by none, can never answer a narrowed lookup.
+pub(crate) const PROOF: &str = "stripped-copy-1";
+
+/// The content of every file outside the read-set in the proving copy: not valid UTF-8, not valid
+/// in any file format, and never empty, so a check that reads one fails instead of passing on
+/// content it did not have.
+pub(crate) const PLACEHOLDER: &[u8] = b"\0\xffccid: outside the measured inputs\xff\0\n";
+
+/// Files git itself reads for the copy to be a repository; they are not the check's inputs and
+/// keep their real content in the proving copy.
+pub(crate) fn is_plumbing(path: &str) -> bool {
+    matches!(
+        path.rsplit('/').next(),
+        Some(".gitignore" | ".gitattributes" | ".gitmodules")
+    )
+}
+
 /// The measured read-set as a component of a verdict key. Present only on a narrowed key, so a
 /// whole-tree key is exactly what it was before narrowing existed.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -67,6 +97,9 @@ pub struct ReadSetKey {
     pub layout: String,
     /// The measured check definition (equal to the current one, likewise).
     pub commands: String,
+    /// How a run proves, before it stores a verdict under this key, that the read-set suffices
+    /// (always [`PROOF`]; a key naming another method is refused).
+    pub proof: String,
 }
 
 fn is_hex(value: &str, length: usize) -> bool {
@@ -474,6 +507,7 @@ pub(crate) fn decide(check: &Check, paths: &[&str]) -> Scope {
             inputs,
             layout,
             commands,
+            proof: PROOF.to_owned(),
         },
         selected,
     }

@@ -115,9 +115,10 @@ is always hashed, even when its manifest is outside those patterns. Narrow input
 allow a documentation-only commit to reuse code checks; the full-repository
 default still invalidates on documentation edits. The shared verdict store narrows
 a check's key to these inputs only when they carry the provenance
-`ccid measure-inputs` prints (`cache_inputs_measured`) and it still holds; a
-hand-written list narrows the moon cache but never a verdict (see
-[narrowed keys](docs/verdicts.md#narrowed-keys)).
+`ccid measure-inputs` prints (`cache_inputs_measured`) and it still holds, and
+the run that stores the verdict proves the read-set on that run by passing in a
+copy of the tree that holds only it; a hand-written list narrows the moon cache
+but never a verdict (see [narrowed keys](docs/verdicts.md#narrowed-keys)).
 
 Declare produced files with
 `cache_outputs = ["app"]`; cache hits restore these along with the receipt. A
