@@ -139,6 +139,9 @@ impl Fixture {
             .env("CI_COMMIT_SHA", &self.sha)
             .env("GITHUB_OUTPUT", &outputs)
             .env("CCID_RELEASE_RETRY_DELAY", "0")
+            // The runner's job environment names HTTP proxies; the fake forge is on the loopback address.
+            .env("NO_PROXY", "127.0.0.1")
+            .env("no_proxy", "127.0.0.1")
             .env("CI_CACHE_ROOT", self.state.path().join("targets"))
             .env("CARGO_TARGET_DIR", self.state.path().join("targets"))
             .env("CI_TIMEOUT", "60")
