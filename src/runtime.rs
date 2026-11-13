@@ -73,7 +73,9 @@ pub struct Runtime {
 
 /// The nixpkgs revision and NAR hash of the rendered check-shell (`src/render/check-shell.nix`).
 /// One pin for the shell and the runtime's tools; a test keeps the two equal.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const NIXPKGS_REVISION: &str = "b7c2ada94fe99c15b0dbcf4d11fd7850b957a436";
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) const NIXPKGS_NAR_HASH: &str = "sha256-IItrdb7Puk05RqOBWZYFC5X6Wl1sJmCfh5MWVHw5iMM=";
 
 /// Tools every runtime provides: `ccid cached` runs checks through moon, and the toolchain
@@ -194,6 +196,7 @@ pub(crate) fn validate(config: Option<&Config>, toolchain: Option<&ToolchainConf
 
 /// `sha256(repository URL)` as lowercase hex, first 24 characters: the script's
 /// `printf '%s' "$CI_REPOSITORY_URL" | sha256sum | cut -c1-24`.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn namespace(repository_url: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(repository_url.as_bytes()))[..24].to_owned()

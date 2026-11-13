@@ -254,6 +254,26 @@ enum Action {
         #[arg(long)]
         third_party: bool,
     },
+    /// Measure a check's inputs instead of guessing them: run it uncached under strace, keep what
+    /// its own processes touched (read, listed, probed and not found), generalise to top-level
+    /// entries, run it again in a copy that holds only those, and print the cache_inputs line.
+    /// Exit 1 when the check fails or the copy does not reproduce its pass.
+    #[cfg(unix)]
+    MeasureInputs {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        check: String,
+        /// Path components an input keeps (1: top-level entries).
+        #[arg(long, default_value_t = 1)]
+        depth: usize,
+        /// The strace program.
+        #[arg(long, default_value = "strace")]
+        strace: PathBuf,
+        /// Skip the run in the stripped copy (the result is then unverified).
+        #[arg(long)]
+        no_verify: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -783,6 +803,28 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid lock-refresh: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        #[cfg(unix)]
+        Action::MeasureInputs {
+            repo,
+            check,
+            depth,
+            strace,
+            no_verify,
+        } => {
+            return match ccid::read_set::run(&ccid::read_set::Options {
+                repo,
+                check,
+                depth,
+                strace,
+                verify: !no_verify,
+            }) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid measure-inputs: {error}");
                     ExitCode::from(2)
                 }
             };

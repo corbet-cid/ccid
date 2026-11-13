@@ -273,5 +273,6 @@ authoritative scripts, Nix apps/packages and special integration contracts.
 
 See [the job runtime](docs/job-runtime.md) for `[runtime]`, which replaces a repository's `.ci/run-cached.sh`.
 See [lock refresh](docs/lock-refresh.md) for `ccid lock-refresh`, the event-started mover of committed `Cargo.lock` files.
+See [measured check inputs](docs/measure-inputs.md) for `ccid measure-inputs`, which derives a check's `cache_inputs` from what it actually touched.
 See [execution and worker contracts](docs/execution.md) for resource allocation,
 verified source staging, bootstrap artifacts and platform evidence.

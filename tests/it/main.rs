@@ -30,6 +30,8 @@ mod freshness;
 mod job_execution;
 #[cfg(unix)]
 mod job_runtime;
+#[cfg(unix)]
+mod measure_inputs;
 mod native_compile_cache;
 mod prose_cli;
 mod quality_cli;
