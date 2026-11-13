@@ -94,7 +94,8 @@ the manifest (CI never commits), and proving a stale read-set on every miss woul
 executing check twice, so the verdict store keeps the finding and the check measures itself
 again, **once per staleness event**, driven by events only (no timer, no schedule). The state is
 three small files per check definition below `verdicts/measured/` (the slot: a digest of the
-repository, the check's name and the digest of its definition, so an edited check starts over):
+repository, the check's name, the digest of its declaration and the digest of its *definition*,
+everything its verdict key says except the tree: see [a refusal ends with its definition](#a-refusal-ends-with-its-definition)):
 
 | File | Meaning |
 |---|---|
@@ -135,6 +136,20 @@ repository, the check's name and the digest of its definition, so an edited chec
    the list's digest, the layout). A new measurement a person puts on the check, a hand edit of
    the list and an edited check each start over. `verdict-narrowing` reports which set keyed the
    check (`measured`: `manifest` or `store`).
+
+##### A refusal ends with its definition
+
+A check refused into whole-tree mode (its traced candidate failed its proof) is not stuck for good.
+The slot names the check's **definition**: its name and identity (declaration and the values of the
+declared environment), the git dependency commits of its locks, its toolchain, the build profile
+and the verdict epoch, that is every component of the key that is not a tree input. When any of
+them changes, the new definition has a slot of its own: the old refusal, candidate and stored set
+no longer apply, and the check starts over from the manifest's measured set, proven on its next
+miss or found stale again on its own. Nobody has to do anything, and the cost is the one proving
+attempt every narrowed miss costs. A person running `ccid measure-inputs` and putting the new
+lines on the check remains the other way out (the new `inputs` digest ends the refusal at once).
+`read-set-stale` and `read-set-refused` carry the `definition` digest. The files of an old
+definition stay in the store, a few hundred bytes each.
 
 The files are read with the verdict record's discipline: a symlink, an oversized or malformed
 file, a file that describes another check definition or whose list is not the measured one, and a

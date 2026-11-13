@@ -13,9 +13,15 @@
 //! | `<slot>.candidate.json` | The read-set one traced whole-tree run measured after the marker was set. Not trusted: it keys nothing until a run proves it |
 //! | `<slot>.proven.json` | A read-set a proving run passed with: the check's current measured set. Lookups take it before the manifest's |
 //!
-//! The slot is the digest of the repository, the check's name and the digest of the check's
-//! definition, so an edited check starts a slot of its own and never inherits a measurement made
-//! for another definition. A stored set descends from the manifest's measurement it replaced
+//! The slot is the digest of the repository, the check's name, the digest of the check's
+//! declaration and the digest of its *definition* (everything its verdict key says except the
+//! tree: declaration and declared environment, the git dependency commits of its locks, the
+//! toolchain, the build profile, the verdict epoch). A check whose definition changes starts a
+//! slot of its own: a refusal, a candidate or a stored set made for the old definition never
+//! applies to the new one, which starts over from the manifest's measurement and is proven or
+//! found stale again on its own. That is how a check refused into whole-tree mode comes back
+//! without anybody touching it; a person running `ccid measure-inputs` is the other way out.
+//! A stored set descends from the manifest's measurement it replaced
 //! (`base`, that measurement's `inputs` digest): when a person measures again and puts new lines
 //! on the check, the manifest's digest changes, the stored lineage no longer applies, and the
 //! manifest wins.
@@ -138,14 +144,25 @@ pub(crate) struct Slot {
     check: String,
     repository: String,
     commands: String,
+    definition: String,
 }
 
 impl Slot {
-    pub(crate) fn new(store: &Path, repository: &str, check: &str, commands: &str) -> Slot {
+    /// The slot of `check` in `repository` for one definition of it: `commands` is the digest of
+    /// its declaration (what a measurement names), `definition` the digest of everything its
+    /// verdict key says except the tree (declaration and environment, locks, toolchain, profile).
+    pub(crate) fn new(
+        store: &Path,
+        repository: &str,
+        check: &str,
+        commands: &str,
+        definition: &str,
+    ) -> Slot {
         let id = format!(
             "{:x}",
             Sha256::digest(
-                serde_json::to_vec(&json!([repository, check, commands])).unwrap_or_default()
+                serde_json::to_vec(&json!([repository, check, commands, definition]))
+                    .unwrap_or_default()
             )
         );
         Slot {
@@ -154,6 +171,7 @@ impl Slot {
             check: check.to_owned(),
             repository: repository.to_owned(),
             commands: commands.to_owned(),
+            definition: definition.to_owned(),
         }
     }
 
@@ -384,6 +402,7 @@ impl Slot {
             "event": "read-set-stale",
             "check": self.check,
             "commands": self.commands,
+            "definition": self.definition,
             "inputs": stale_inputs,
             "since": since,
         }));
@@ -406,6 +425,7 @@ impl Slot {
         event(json!({
             "event": "read-set-refused",
             "check": self.check,
+            "definition": self.definition,
             "inputs": marker.stale_inputs,
             "reason": "the traced read-set failed its proof as well; measure the check by hand with `ccid measure-inputs`",
         }));
@@ -530,6 +550,7 @@ pub(crate) fn overlay(
     repository: &str,
     name: &str,
     check: &Check,
+    definition: &str,
     environment: &Environment,
 ) -> Option<Overlay> {
     let manifest = check.cache_inputs_measured.as_ref()?;
@@ -541,7 +562,7 @@ pub(crate) fn overlay(
         return None;
     }
     let commands = narrowing::commands_digest(check).ok()?;
-    let slot = Slot::new(store?, repository, name, &commands);
+    let slot = Slot::new(store?, repository, name, &commands, definition);
     let proven = slot.proven(environment)?;
     if proven.base != manifest.inputs {
         return None;

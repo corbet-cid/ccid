@@ -2649,6 +2649,68 @@ fn a_measurement_that_fails_its_proof_is_refused_and_nothing_measures_again() {
 
 #[cfg(unix)]
 #[test]
+fn a_refused_check_starts_over_when_its_definition_changes() {
+    let run = ProofRun::new("refused-definition");
+    let runs = go_stale(&run);
+    run.tracer("ok", &["src/lib.rs", "Cargo.toml"]);
+    touch_source(run.root(), 1);
+    proof_run(run.root(), &run.env).unwrap();
+    touch_source(run.root(), 2);
+    proof_run(run.root(), &run.env).unwrap();
+    let refused = run.slot();
+    assert_eq!(
+        refused.marker().expect("the marker").state,
+        read_sets::MarkerState::Refused
+    );
+    assert_eq!(run.runs(), runs + 3);
+
+    // The refusal holds as long as the definition does: one plain run per commit, no proof, no
+    // trace.
+    touch_source(run.root(), 3);
+    proof_run(run.root(), &run.env).unwrap();
+    assert_eq!(run.runs(), runs + 4);
+    assert_eq!(run.traced(), 1);
+
+    // Something the key says besides the tree changes (a declared environment value here; a lock
+    // or the toolchain do the same) while the check's commands stay as they are: another
+    // definition, another slot. The refusal does not follow it.
+    let mut changed = run.env.clone();
+    changed.insert("RUSTFLAGS".into(), "-C target-cpu=native".into());
+    let fresh = prepared_for(run.root(), &changed, &run.checks["verify"])
+        .slot()
+        .expect("a narrowed key has a slot");
+    assert_ne!(fresh.id, refused.id);
+    assert!(fresh.marker().is_none(), "the new definition starts clean");
+
+    // It starts over from the manifest's measured set: proven again on its next miss (it fails,
+    // the check reads docs now, and the whole-tree run passes), so the read-set is stale again
+    // and not refused.
+    touch_source(run.root(), 4);
+    proof_run(run.root(), &changed).unwrap();
+    assert_eq!(
+        run.runs(),
+        runs + 6,
+        "the proving attempt and the whole-tree run"
+    );
+    assert_eq!(
+        fresh.marker().expect("a marker of its own").state,
+        read_sets::MarkerState::Stale
+    );
+    // The old definition's refusal is not touched.
+    assert_eq!(
+        refused.marker().expect("the old marker").state,
+        read_sets::MarkerState::Refused
+    );
+
+    // And the new definition measures itself: the next executing run is the one traced run.
+    touch_source(run.root(), 5);
+    proof_run(run.root(), &changed).unwrap();
+    assert_eq!(run.traced(), 2);
+    assert!(fresh.candidate(&changed).is_some());
+}
+
+#[cfg(unix)]
+#[test]
 fn a_check_that_fails_under_the_tracer_leaves_nothing_and_the_next_pass_measures() {
     let run = ProofRun::new("stale-traced-red");
     let runs = go_stale(&run);

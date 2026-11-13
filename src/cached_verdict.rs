@@ -324,6 +324,9 @@ pub struct Prepared {
     /// For a narrowed key, the `inputs` digest of the manifest measurement its read-set descends
     /// from: the manifest's own, or the one a stored set replaced (see `read_sets`).
     lineage: Option<String>,
+    /// The digest of everything the key says about the check except the tree it ran on (see
+    /// [`definition_digest`]): the identity of the files a measured read-set is stored under.
+    definition: String,
     /// The git dependency commits of the checkout's own locks when the key was built. A floated
     /// key names the resolution's commits instead; the checkout's locks must still read the same
     /// after the run, because ccid never writes them.
@@ -411,6 +414,7 @@ impl Prepared {
             &self.repository,
             &self.check,
             &read_set.commands,
+            &self.definition,
         ))
     }
 
@@ -1722,6 +1726,24 @@ pub(crate) fn prepare_resolved(
     let cache = store_root(environment);
     let store = cache.as_ref().map(|root| root.join(STORE_DIR));
     let repository = repository_identity(root, environment);
+    // Everything the key says about the check except the tree: it names the check definition the
+    // store keeps measured read-sets for, so a changed toolchain, lock, declared environment or
+    // command starts over from the manifest's measurement (see `read_sets`).
+    let identity = check_identity_payload(check, environment, root)?;
+    let check_identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&identity)?));
+    let checkout_dependencies = git_dependencies(root, commit_id)?;
+    let git_dependencies = resolved
+        .cloned()
+        .unwrap_or_else(|| checkout_dependencies.clone());
+    let toolchain = toolchain(check, environment)?;
+    let profile = format!("{:x}", Sha256::digest(DEV_PROFILE.as_bytes()));
+    let definition = definition_digest(
+        check_name,
+        &check_identity,
+        &git_dependencies,
+        &toolchain,
+        &profile,
+    )?;
     // The measured set the key narrows on: the newest the store holds for this check definition
     // (a run that found the manifest's stale measured it again, see `read_sets`), else the
     // manifest's own. The check's identity below is the declaration as written either way.
@@ -1730,6 +1752,7 @@ pub(crate) fn prepare_resolved(
         &repository,
         check_name,
         check,
+        &definition,
         environment,
     );
     let deciding = stored.as_ref().map_or(check, |stored| &stored.check);
@@ -1778,17 +1801,12 @@ pub(crate) fn prepare_resolved(
             (full_tree.clone(), None, None, None)
         }
     };
-    let identity = check_identity_payload(check, environment, root)?;
-    let check_identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&identity)?));
-    let checkout_dependencies = git_dependencies(root, commit_id)?;
     let components = KeyComponents {
         schema: SCHEMA,
         tree,
-        git_dependencies: resolved
-            .cloned()
-            .unwrap_or_else(|| checkout_dependencies.clone()),
-        toolchain: toolchain(check, environment)?,
-        profile: format!("{:x}", Sha256::digest(DEV_PROFILE.as_bytes())),
+        git_dependencies,
+        toolchain,
+        profile,
         epoch: crate::cached::VERDICT_EPOCH,
         check: check_name.to_owned(),
         check_identity,
@@ -1819,11 +1837,39 @@ pub(crate) fn prepare_resolved(
         full_tree,
         narrowed,
         lineage,
+        definition,
         checkout_dependencies,
         cache,
         store,
         outputs,
     })
+}
+
+/// The digest of everything a verdict key says about a check except the tree it ran on: the
+/// check's name and identity (its declaration and declared environment), the git dependency
+/// commits of its locks, its toolchain, the build profile and the verdict epoch. The measured
+/// read-sets the store keeps for a check belong to one such definition: when any part of it
+/// changes, a refusal or a stored measurement made for the old one no longer applies.
+fn definition_digest(
+    check_name: &str,
+    check_identity: &str,
+    git_dependencies: &BTreeMap<String, String>,
+    toolchain: &BTreeMap<String, String>,
+    profile: &str,
+) -> Result<String> {
+    let payload = json!({
+        "schema": SCHEMA,
+        "check": check_name,
+        "check_identity": check_identity,
+        "git_dependencies": git_dependencies,
+        "toolchain": toolchain,
+        "profile": profile,
+        "epoch": crate::cached::VERDICT_EPOCH,
+    });
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&payload)?)
+    ))
 }
 
 /// The output-store subject of one prepared check.
