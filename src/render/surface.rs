@@ -267,7 +267,7 @@ const TABLE: &[Family] = &[
             ".github/workflows/resolve.yml",
         ],
         "`ccid lock-refresh`, started by events",
-        Some("`ccid lock-refresh`"),
+        Some("the workflow that runs `ccid lock-refresh` on events (the release preflight, the release-published dispatch)"),
     ),
     legacy(
         "job-script",
