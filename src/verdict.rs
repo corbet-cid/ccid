@@ -204,6 +204,10 @@ fn post(options: &Options, name: &str, state: State) -> Result<()> {
 
 /// Report one job and, when it gates landing, the commit's aggregated verdict.
 pub fn run(options: &Options) -> Result<()> {
+    // R11: we report no verdict for a contributed project's commits.
+    if let Some(repo) = options.repo.as_deref() {
+        crate::contributed::refuse_forge_path("verdict", repo)?;
+    }
     if !exact_commit(&options.commit) {
         return Err(failure("Commit must be an exact 40-hex Git SHA"));
     }

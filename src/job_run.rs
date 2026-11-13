@@ -377,6 +377,11 @@ fn stripped_profile_variables(declared: &BTreeMap<String, String>) -> Vec<&'stat
 /// Run the whole job: claim, fetch, check the adapters, exec the declared command. Does not return on success of the exec.
 #[cfg(unix)]
 pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
+    // R10/R11: the CI of a contributed project never runs on our compute, from a forge event or from a source export.
+    crate::contributed::refuse_repository("job-run", &options.server_url, &options.repository)?;
+    if let Some(source) = &options.local {
+        crate::contributed::refuse_working_copy("job-run", source)?;
+    }
     let token = std::env::var("CCID_FORGE_TOKEN").ok();
     if token.is_none() && options.local.is_none() {
         return Err(failure("CCID_FORGE_TOKEN (the job token) is required"));

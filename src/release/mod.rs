@@ -405,6 +405,19 @@ pub enum Command {
 
 /// Run one `ccid release` command; the exit code.
 pub fn run(command: &Command) -> Result<std::process::ExitCode> {
+    // R11: a contributed project's releases are not ours to build, publish or mirror.
+    match command {
+        Command::Preflight { repo, .. }
+        | Command::Build { repo }
+        | Command::Leg { repo, .. }
+        | Command::Put { repo, .. }
+        | Command::Fetch { repo, .. }
+        | Command::Promote { repo }
+        | Command::Discard { repo, .. } => {
+            crate::contributed::refuse_working_copy("release", repo)?
+        }
+        Command::Version { .. } | Command::Platforms { .. } | Command::Sums { .. } => {}
+    }
     match command {
         Command::Version { repo } => flow::describe_version(repo, false),
         Command::Platforms { repo } => flow::describe_version(repo, true),

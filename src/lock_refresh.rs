@@ -115,6 +115,8 @@ pub(crate) fn plan(
 /// `ccid lock-refresh --repo REPO [--package NAME]… [--third-party]`: move the committed locks
 /// in place and print one JSON line describing what moved.
 pub fn run(repo: &Path, packages: &[String], third_party: bool) -> Result<u8> {
+    // R11/R35: a contributed project follows its own maintainers' update tooling; we do not move its locks.
+    crate::contributed::refuse_working_copy("lock-refresh", repo)?;
     let environment: Environment = std::env::vars_os().collect();
     refresh(repo, packages, third_party, &environment)
 }

@@ -199,6 +199,11 @@ pub struct Request {
 /// Run the repository's entrypoint from verified source and exact local Git history.
 /// Crow and Argo call this same function with the same request.
 pub fn execute(request: &Request) -> Result<()> {
+    // R10/R11: the scheduler names the job's own repository in its environment; a contributed project's job never
+    // runs here. (`source_urls` are dependencies the job fetches: a fork of ours may be one, and that is our own job.)
+    if let Some(url) = request.environment.get("CI_REPOSITORY_URL") {
+        crate::contributed::refuse_url("execute-job", url)?;
+    }
     if request.tool_revision != crate::SOURCE_REVISION {
         return Err(failure("Job request does not match this ccid revision"));
     }

@@ -1020,6 +1020,8 @@ fn write_text_file(repo: &Path, relative: &Path, text: &str) -> Result<()> {
 /// Manual Crow execution adapters come from job workflows; push execution
 /// adapters come from job push opt-ins and consumer fan-out declarations.
 pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
+    // R11: nothing of ours enters a contributed project's repository, whatever its manifest says.
+    crate::contributed::refuse_working_copy("render", repo)?;
     // execute-job reads this exact path from its verified source archive.
     if manifest != Path::new(".ci/ccid.toml") {
         return Err(failure("Job adapters require .ci/ccid.toml"));

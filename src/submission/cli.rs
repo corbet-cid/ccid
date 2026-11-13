@@ -177,7 +177,19 @@ pub enum JobAction {
     Logs { state: PathBuf },
 }
 
+/// R10/R11: a contributed project's CI is not submitted to our schedulers.
+fn refuse_contributed(action: &Action) -> Result<()> {
+    let repo = match action {
+        Action::Plan(args) | Action::Run(args) => &args.repo,
+        Action::CheckDependents(args) => &args.repo,
+        Action::Resolve { repo, .. } => repo,
+        _ => return Ok(()),
+    };
+    crate::contributed::refuse_working_copy("crow-ci", repo)
+}
+
 pub fn run(action: Action, path: Option<&Path>) -> Result<()> {
+    refuse_contributed(&action)?;
     match action {
         Action::ProbeCancellation { child } => return probe::run(child),
         Action::ValidateAdapters {

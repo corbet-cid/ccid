@@ -1462,6 +1462,9 @@ pub fn push_run(
     cache_root: PathBuf,
     timeout_secs: u64,
 ) -> Result<PushOutcome> {
+    // R10/R11: the consumer's job is the one that runs here, so it must not be a contributed project's. (The event's
+    // repository may be a dependency of ours, a fork included: building our own consumer is our own work.)
+    crate::contributed::refuse_url("push-run", &consumer_url)?;
     let kind = match trigger_kind.as_str() {
         "self" => TriggerKind::Consumer,
         "dep" => TriggerKind::Dependency,

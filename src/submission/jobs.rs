@@ -301,6 +301,10 @@ fn run(config: &Config, args: &JobArgs, plan_only: bool) -> Result<()> {
     emit(&state)
 }
 pub fn run_cli(action: JobAction, path: Option<&Path>) -> Result<()> {
+    if let JobAction::Plan(args) | JobAction::Run(args) = &action {
+        // R10/R11: a contributed project's jobs are not submitted to our schedulers.
+        crate::contributed::refuse_working_copy("ci-job", &args.repo)?;
+    }
     let config = Config::load(path)?;
     match action {
         JobAction::Plan(args) => run(&config, &args, true),

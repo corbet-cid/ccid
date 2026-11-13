@@ -21,6 +21,8 @@ mod channel;
 mod cli;
 mod content_pins;
 #[cfg(unix)]
+mod contributed;
+#[cfg(unix)]
 mod coverage_run;
 mod dependency_resolution;
 #[cfg(unix)]

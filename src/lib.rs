@@ -32,6 +32,7 @@ pub mod check_shell;
 mod checks;
 pub mod compile_cache;
 pub mod content_pins;
+pub mod contributed;
 pub mod coverage;
 mod dependency;
 pub mod first_party;
@@ -340,6 +341,28 @@ pub(crate) fn run_checks_in(
         false,
         CheckContext {
             base_environment: Some(environment.clone()),
+            ..CheckContext::default()
+        },
+    )
+}
+
+/// The checks of an overlay manifest that lies outside the working copy (`contributed::check`): the direct route
+/// only. The result cache keys committed content and writes beside the sources, so the caller removes it from the
+/// environment, and an absolute manifest path is read as it is.
+pub(crate) fn run_overlay_checks(
+    repo: &Path,
+    manifest: &Path,
+    selectors: &[String],
+    plan: bool,
+    environment: Environment,
+) -> Result<()> {
+    run_checks_inner(
+        repo,
+        manifest,
+        selectors,
+        plan,
+        CheckContext {
+            base_environment: Some(environment),
             ..CheckContext::default()
         },
     )

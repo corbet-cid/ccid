@@ -218,6 +218,11 @@ enum Action {
         #[command(subcommand)]
         action: ccid::fleet::Action,
     },
+    /// Contributed projects (operating model R11): which working copies are one, and our own checks on them.
+    Contributed {
+        #[command(subcommand)]
+        action: ccid::contributed::Action,
+    },
     /// Shared Rust toolchain lock and the wasm-bindgen test runner (Unix only).
     #[cfg(unix)]
     Toolchain {
@@ -526,6 +531,14 @@ fn main() -> ExitCode {
             plan,
             parent_watch,
         } => {
+            // R11: a contributed project's checks run from an overlay manifest (`ccid contributed check`): the result
+            // cache and the rendered check-shell of this route write beside its sources.
+            if archive.is_none() {
+                if let Err(error) = ccid::contributed::refuse_working_copy("check", &repo) {
+                    eprintln!("ccid: {error}; run our own checks with `ccid contributed check`");
+                    return ExitCode::from(2);
+                }
+            }
             // A repository with a rendered check-shell builds inside it: one C
             // toolchain and one set of native libraries for CI and for a lane
             // that sources the same file. Plans stay outside (they run nothing).
@@ -583,6 +596,11 @@ fn main() -> ExitCode {
             plan,
             force,
         } => {
+            // R11: see `check` above; `cached` writes `.ccid` and `.moon` beside the sources.
+            if let Err(error) = ccid::contributed::refuse_working_copy("cached", &repo) {
+                eprintln!("ccid: {error}; run our own checks with `ccid contributed check`");
+                return ExitCode::from(2);
+            }
             // The moon tasks this starts are ordinary `ccid check` runs; enter
             // the one rendered shell here so every task inherits it.
             if !plan {
@@ -745,6 +763,45 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid fleet: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::Contributed { action } => {
+            // The overlay check runs the project's commands: the same cancellation and parent supervision as `check`,
+            // so an interrupt or a dead parent leaves no child holding the target lock.
+            #[cfg(unix)]
+            if let ccid::contributed::Action::Check {
+                plan: false,
+                parent_watch,
+                ..
+            } = &action
+            {
+                if let Err(error) =
+                    ctrlc::set_handler(|| ccid::INTERRUPTED.store(true, Ordering::SeqCst))
+                {
+                    eprintln!("ccid: cannot install cancellation handler: {error}");
+                    return ExitCode::from(2);
+                }
+                if *parent_watch {
+                    if let Err(error) = supervision::watch_parent() {
+                        eprintln!("ccid: cannot watch enclosing process: {error}");
+                        return ExitCode::from(2);
+                    }
+                } else {
+                    return match supervision::execute() {
+                        Ok(status) => ExitCode::from(status.code().unwrap_or(2) as u8),
+                        Err(error) => {
+                            eprintln!("ccid: cannot supervise checks: {error}");
+                            ExitCode::from(2)
+                        }
+                    };
+                }
+            }
+            return match ccid::contributed::run(&action) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid contributed: {error}");
                     ExitCode::from(2)
                 }
             };

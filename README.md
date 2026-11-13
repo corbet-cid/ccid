@@ -279,6 +279,7 @@ belongs in an explicit repository command. Use `kind="commands"` for existing
 authoritative scripts, Nix apps/packages and special integration contracts.
 
 See [the job runtime](docs/job-runtime.md) for `[runtime]`, which replaces a repository's `.ci/run-cached.sh`.
+See [contributed projects](docs/contributed.md) for `ccid contributed`: what ccid refuses to write or run for someone else's project, and how to run our own checks on it.
 See [lock refresh](docs/lock-refresh.md) for `ccid lock-refresh`, the event-started mover of committed `Cargo.lock` files.
 See [security and dependency visibility](docs/security.md) for the README status, the SECURITY.md block, the release-notes section and `ccid security plan`.
 See [measured check inputs](docs/measure-inputs.md) for `ccid measure-inputs`, which derives a check's `cache_inputs` from what it actually touched.
