@@ -31,6 +31,30 @@ targets = ["stable:wasm32-unknown-unknown"]
 
 The table names are working names.
 
+## FreeBSD builds (opt-in, build only)
+
+`targets = ["stable:x86_64-unknown-freebsd"]` in `[toolchain]` makes the job cross-compile for FreeBSD on the linux
+runner: rustup adds the standard library, the runtime adds the nixpkgs cross compiler
+`pkgsCross.x86_64-freebsd.stdenv.cc` (clang over the FreeBSD 15 sysroot, substituted from the binary cache, no network)
+and exports `CC_x86_64_unknown_freebsd`, `AR_x86_64_unknown_freebsd` and
+`CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER`, so C dependencies built by the `cc` crate (ring, aws-lc-sys) link.
+There is no FreeBSD kernel here: the check compiles and links, it never tests. Declare it as a plain check and name
+the job so, and key the sysroot with `cache_env` (the value is the compiler's store path, which fixes its sysroot):
+
+```toml
+[checks.freebsd-build]
+kind = "commands"
+commands = [["cargo", "build", "--locked", "--target", "x86_64-unknown-freebsd"]]
+cache_env = ["CC_x86_64_unknown_freebsd"]
+
+[jobs.freebsd-build-only]       # build only: no tests run on FreeBSD
+scheduler = "forgejo"
+runs_on = "linux"
+checks = ["freebsd-build"]
+workflow = "ci"
+command = ["ccid:run-declared-checks"]
+```
+
 ## What `job-run` does with `[runtime]`
 
 After the source is staged and `render --check` passed, before the job command starts:

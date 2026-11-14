@@ -71,6 +71,14 @@ pub struct Runtime {
     pub toolchain: Option<ToolchainConfig>,
 }
 
+/// A `[toolchain] targets` entry ending in this opts the job into FreeBSD cross builds (build only: no
+/// FreeBSD kernel runs here, so a check for it compiles and links, never tests).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) const FREEBSD_SUFFIX: &str = ":x86_64-unknown-freebsd";
+/// The nixpkgs cross compiler (clang wrapper over the FreeBSD 15 sysroot), substituted from the binary cache.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) const FREEBSD_CC: &str = "pkgsCross.x86_64-freebsd.stdenv.cc";
+
 /// The nixpkgs revision and NAR hash of the rendered check-shell (`src/render/check-shell.nix`).
 /// One pin for the shell and the runtime's tools; a test keeps the two equal.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -207,7 +215,10 @@ pub(crate) use setup::{prepare, Setup};
 
 #[cfg(unix)]
 mod setup {
-    use super::{namespace, Runtime, BASE_TOOLS, NIXPKGS_NAR_HASH, NIXPKGS_REVISION};
+    use super::{
+        namespace, Runtime, BASE_TOOLS, FREEBSD_CC, FREEBSD_SUFFIX, NIXPKGS_NAR_HASH,
+        NIXPKGS_REVISION,
+    };
     use crate::{failure, toolchain, Environment, Result};
     use std::{
         collections::BTreeMap,
@@ -459,7 +470,20 @@ mod setup {
         };
         let moon_home = state.join("moon-home");
         fs::create_dir_all(&moon_home)?;
-        let tool_paths = build_tools(&runtime.config.tools, environment)?;
+        // The FreeBSD cross target is an opt-in capability: declaring `stable:x86_64-unknown-freebsd` in
+        // `[toolchain] targets` (rustup brings the standard library) adds the nixpkgs cross compiler
+        // with its FreeBSD sysroot and points cargo and the `cc` crate at it. No network, content-keyed.
+        let freebsd = runtime.toolchain.as_ref().is_some_and(|toolchain| {
+            toolchain
+                .targets
+                .iter()
+                .any(|target| target.ends_with(FREEBSD_SUFFIX))
+        });
+        let mut tools = runtime.config.tools.clone();
+        if freebsd {
+            tools.push(FREEBSD_CC.into());
+        }
+        let tool_paths = build_tools(&tools, environment)?;
         let proto_home = toolchains.join("proto");
         let mut variables: BTreeMap<String, String> = BTreeMap::new();
         // PATH as the script built it: each tool's bin in front (the last one first), then the
@@ -475,6 +499,24 @@ mod setup {
             .parent()
             .ok_or_else(|| failure("the ccid executable has no directory"))?;
         path = prepend(exe_dir, &path)?.into();
+        if freebsd {
+            let bin = tool_paths
+                .last()
+                .map(|tool| tool.join("bin"))
+                .unwrap_or_default();
+            let cc = text(&bin.join("x86_64-unknown-freebsd-cc"))?;
+            // The store path names the compiler and its sysroot: a check lists CC_x86_64_unknown_freebsd
+            // in `cache_env` so a different sysroot is a different verdict.
+            variables.insert(
+                "CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER".into(),
+                cc.clone(),
+            );
+            variables.insert(
+                "AR_x86_64_unknown_freebsd".into(),
+                text(&bin.join("x86_64-unknown-freebsd-ar"))?,
+            );
+            variables.insert("CC_x86_64_unknown_freebsd".into(), cc);
+        }
         variables.insert("PROTO_HOME".into(), text(&proto_home)?);
         variables.insert("MOON_HOME".into(), text(&moon_home)?);
         for (name, value) in [
@@ -571,7 +613,7 @@ mod setup {
             BASE_TOOLS
                 .iter()
                 .copied()
-                .chain(runtime.config.tools.iter().map(String::as_str))
+                .chain(tools.iter().map(String::as_str))
                 .collect::<Vec<_>>()
                 .join(" ")
         );

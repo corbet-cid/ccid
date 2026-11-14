@@ -239,3 +239,25 @@ mod unix {
         assert!(timeout(&environment(&[("CI_TIMEOUT", "1h")])).is_err());
     }
 }
+
+#[test]
+fn the_freebsd_cross_target_is_an_opt_in_through_the_toolchain_targets() {
+    assert!(valid_attribute(FREEBSD_CC));
+    let declared = |target: &str| ToolchainConfig {
+        targets: vec![target.to_owned()],
+        ..ToolchainConfig::default()
+    };
+    let opted_in = |toolchain: &ToolchainConfig| {
+        toolchain
+            .targets
+            .iter()
+            .any(|target| target.ends_with(FREEBSD_SUFFIX))
+    };
+    assert!(opted_in(&declared("stable:x86_64-unknown-freebsd")));
+    assert!(!opted_in(&declared("stable:wasm32-unknown-unknown")));
+    validate(
+        Some(&Config::default()),
+        Some(&declared("stable:x86_64-unknown-freebsd")),
+    )
+    .unwrap();
+}
