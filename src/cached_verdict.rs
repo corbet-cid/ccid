@@ -2584,12 +2584,18 @@ mod own_tool_tests {
     #[test]
     fn identity_survives_the_binary_path_vanishing_while_it_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let copy = dir.path().join("sleeper");
-        fs::copy("/bin/sleep", &copy)
-            .or_else(|_| fs::copy("/usr/bin/sleep", &copy))
-            .unwrap();
+        let bash = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|d| d.join("bash"))
+            .find(|p| p.is_file())
+            .expect("bash on PATH");
+        let copy = dir.path().join("blocker");
+        fs::copy(bash, &copy).unwrap();
         let expected = crate::sha256_file(&copy).unwrap();
-        let mut child = std::process::Command::new(&copy).arg("30").spawn().unwrap();
+        let mut child = std::process::Command::new(&copy)
+            .args(["-c", "read line"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
         fs::remove_file(&copy).unwrap();
         let link = PathBuf::from(format!("/proc/{}/exe", child.id()));
         assert_eq!(hash_running_exe(&link).unwrap(), expected);
