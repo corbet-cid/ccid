@@ -10,8 +10,8 @@
       "sha256": "05a34171bd5b4f839ea48b3d298f78bb10b6360159af9d17c70265c6a49f8928"
     },
     "macos": {
-      "revision": "f0e18fe2cc62b6793953eef8cab6136dc5ab12b9",
-      "sha256": "a8ccea591d661292fab2a392bef94f40cccdedd4e678d60d25fe93c8c9be010f"
+      "revision": "d4a16ab0194560054471b635b6e9ff9404090db4",
+      "sha256": "32691c5726c66dd701e50675c94929a1a51eae04418acf0a09c4430664896985"
     }
   },
   "fleet": {
