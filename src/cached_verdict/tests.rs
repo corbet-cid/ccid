@@ -3145,3 +3145,87 @@ fn a_committed_symlink_is_keyed_by_its_target() {
     commit_all(root, "retarget");
     assert_ne!(first, tree_digest(root, "HEAD").unwrap());
 }
+
+/// A directory holding fake `cargo`/`rustc` programs that answer `-vV` / `--version` with `text`.
+fn fake_toolchain(directory: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(directory).unwrap();
+    for name in ["cargo", "rustc"] {
+        let path = directory.join(name);
+        fs::write(&path, format!("#!/bin/sh\necho '{name} {text}'\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+fn argv(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|part| (*part).to_owned()).collect()
+}
+
+#[test]
+fn two_cargos_in_one_check_are_keyed_apart_and_a_single_cargo_keeps_its_key() {
+    let scratch = tempfile::tempdir().unwrap();
+    let stable = scratch.path().join("stable");
+    let nightly = scratch.path().join("nightly");
+    fake_toolchain(&stable, "1.100.0 stable");
+    fake_toolchain(&nightly, "1.102.0 nightly");
+    let environment = |path: String| {
+        let mut env = Environment::new();
+        env.insert("PATH".into(), path.into());
+        env
+    };
+    let stable_env = environment(format!("{}:/usr/bin:/bin", stable.display()));
+
+    // A single toolchain: the plain role keys, exactly as before.
+    let single = crate::Check {
+        kind: "commands".into(),
+        commands: vec![argv(&["cargo", "test"])],
+        cache_tools: vec![argv(&["cargo", "--version"])],
+        ..Default::default()
+    };
+    let one = toolchain(&single, &stable_env).unwrap();
+    assert!(one.contains_key("cargo"), "{one:?}");
+    assert!(!one.keys().any(|key| key.starts_with("cargo.")), "{one:?}");
+    let digest = |tools: &BTreeMap<String, String>, role: &str| tools[role].clone();
+    let again = toolchain(&single, &stable_env).unwrap();
+    assert_eq!(one, again);
+
+    // The same check also runs a pinned nightly cargo by absolute path: two tools, one name.
+    let nightly_cargo = nightly.join("cargo").display().to_string();
+    let mut both = single.clone();
+    both.commands.push(argv(&[&nightly_cargo, "llvm-cov"]));
+    let split = toolchain(&both, &stable_env).expect("two cargos are keyed, not refused");
+    assert!(!split.contains_key("cargo"), "{split:?}");
+    let cargos: Vec<&String> = split
+        .keys()
+        .filter(|key| key.starts_with("cargo."))
+        .collect();
+    assert_eq!(cargos.len(), 2, "{split:?}");
+    // The stable cargo keeps the digest it has alone; the key only gains the nightly one.
+    assert!(split.values().any(|d| *d == digest(&one, "cargo")));
+    // Order of the commands does not change the key.
+    let mut reversed = both.clone();
+    reversed.commands.reverse();
+    assert_eq!(split, toolchain(&reversed, &stable_env).unwrap());
+    // Different nightly bytes give a different key; the same bytes the same key.
+    fake_toolchain(&nightly, "1.103.0 nightly");
+    assert_ne!(split, toolchain(&both, &stable_env).unwrap());
+}
+
+#[test]
+fn bind_tool_is_order_independent_for_three_tools() {
+    let digests: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|seed| format!("{:x}", Sha256::digest(seed.as_bytes())))
+        .collect();
+    let mut first = BTreeMap::new();
+    let mut second = BTreeMap::new();
+    for digest in &digests {
+        bind_tool(&mut first, "cargo", digest.clone());
+    }
+    for digest in digests.iter().rev() {
+        bind_tool(&mut second, "cargo", digest.clone());
+        bind_tool(&mut second, "cargo", digest.clone());
+    }
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 3);
+}

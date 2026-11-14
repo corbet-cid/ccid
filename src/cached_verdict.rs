@@ -1174,12 +1174,41 @@ fn add_tool(
         ))
     })?;
     let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
-    match tools.insert(role.to_owned(), digest.clone()) {
-        None => Ok(identity),
-        Some(existing) if existing == digest => Ok(identity),
-        Some(_) => Err(failure(format!(
-            "Verdict key has two different tools for role {role:?}"
-        ))),
+    bind_tool(tools, role, digest);
+    Ok(identity)
+}
+
+/// The role a second, different tool of the same name is keyed under: the role and a prefix of
+/// the tool's own digest, so it depends on the tool alone, never on which command named it first.
+fn qualified_role(role: &str, digest: &str) -> String {
+    format!("{role}.{}", &digest[..16])
+}
+
+/// Bind a tool's digest to its role. One role normally names one tool, and that key is exactly
+/// `role -> digest`. A check that runs two different tools under one name (a stable `cargo` and
+/// a pinned nightly `cargo` for coverage) keys each of them under its own qualified role instead
+/// of refusing the key; the plain role disappears then, so the set of keys is the same for any
+/// order of the commands.
+fn bind_tool(tools: &mut BTreeMap<String, String>, role: &str, digest: String) {
+    let prefix = format!("{role}.");
+    let split = tools.keys().any(|key| {
+        key.strip_prefix(&prefix)
+            .is_some_and(|rest| rest.len() == 16 && rest.bytes().all(|b| b.is_ascii_hexdigit()))
+    });
+    if split {
+        tools.insert(qualified_role(role, &digest), digest);
+        return;
+    }
+    match tools.get(role) {
+        None => {
+            tools.insert(role.to_owned(), digest);
+        }
+        Some(existing) if *existing == digest => {}
+        Some(_) => {
+            let existing = tools.remove(role).unwrap_or_default();
+            tools.insert(qualified_role(role, &existing), existing);
+            tools.insert(qualified_role(role, &digest), digest);
+        }
     }
 }
 

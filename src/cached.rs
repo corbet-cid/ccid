@@ -309,6 +309,16 @@ pub(crate) fn run_cached_with_environment(
         .collect();
     let use_verdicts =
         value(&environment, "CCID_RESULT_CACHE").is_some() && !verdict_names.is_empty();
+    if !use_verdicts && !verdict_names.is_empty() {
+        // Without a store no key is computed, so a key that cannot be built (a tool that cannot
+        // be identified) shows only where the store exists. Say so: a run here is not evidence
+        // that the same run on CI keys cleanly.
+        event(json!({
+            "event": "verdict-disabled",
+            "reason": "CCID_RESULT_CACHE is not provisioned: no verdict key is computed in this run",
+            "checks": verdict_names,
+        }));
+    }
     let producer = if use_verdicts {
         Some(cached_verdict::producer(None, &environment)?)
     } else {
