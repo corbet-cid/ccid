@@ -128,11 +128,12 @@ target apply.
 | `targets` | Targets the entry applies to (`native`, `wasm`, `browser`); default `["native"]` |
 | `branch` | Optional exact arm `{ block, id }` with non-negative integers |
 | `evidence_sources` | Optional map of repository-relative path to sha256 hex, re-hashed every run |
-| `evidence_packages` | Optional map of package name to `{ version, source }`, matched against `Cargo.lock` |
+| `evidence_packages` | Legacy, still validated on read: map of package name to `{ version, source }` of an exact Git revision, matched against `Cargo.lock`. Do not write new ones |
+| `evidence_locked` | Optional map of THIRD-PARTY crate name to `{ version, source }` (and optional `checksum`), matched against its `Cargo.lock` entry. Owned crates follow newest main, so a Git source is refused here; a lock refresh that only moves owned crates keeps the exclusion valid, a third-party version change invalidates it |
 
 A line exclusion on a line that has branches is allowed only when every
 emitted arm of that line has its own branch exclusion. A branch exclusion
-needs its file listed in `evidence_sources`.
+needs its file listed in `evidence_sources`. New evidence pins the repository's own source files there and third-party lock entries in `evidence_locked`, never the hash of `Cargo.lock`; old whole-lock pins keep validating.
 
 ## Totals gate
 
@@ -157,7 +158,7 @@ Converts a legacy exclusion JSON list to `[[coverage.exclusions]]` TOML on
 stdout, for a mechanical move into `.ci/ccid.toml`:
 
 - entries with `file` keep `file`, `line`, `source`, `reason`, `evidence`,
-  `branch`, `evidence_sources`, `evidence_packages`; `target = "x"` becomes
+  `branch`, `evidence_sources`, `evidence_packages`, `evidence_locked`; `target = "x"` becomes
   `targets = ["x"]`, `targets` is kept, otherwise the default targets apply;
 - entries with `path` + `context` become `file` + `context`;
 - entries with `path` + `source` become `file` + `source`;

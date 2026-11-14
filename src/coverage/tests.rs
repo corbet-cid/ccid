@@ -379,6 +379,7 @@ fn branch_exclusion(fixture: &ExceptionFixture) -> Exclusion {
         branch: Some(branch_table(0, toml::Value::Integer(1))),
         evidence_sources: Some(source_map(&[("src/lib.rs", &digest)])),
         evidence_packages: None,
+        evidence_locked: None,
     }
 }
 
@@ -737,6 +738,7 @@ fn context_exclusion() -> Exclusion {
         branch: None,
         evidence_sources: None,
         evidence_packages: None,
+        evidence_locked: None,
     }
 }
 
@@ -996,6 +998,7 @@ fn documented_exclusion(line: i64, source: &str) -> Exclusion {
         branch: None,
         evidence_sources: None,
         evidence_packages: None,
+        evidence_locked: None,
     }
 }
 
@@ -1492,6 +1495,7 @@ fn convert_committed_fixtures_round_trip() {
                 branch: entry.branch.clone(),
                 evidence_sources: None,
                 evidence_packages: None,
+                evidence_locked: None,
             };
             if stub.branch.is_some() {
                 let bytes = fs::read(root.join(&entry.file)).expect("stub bytes");
@@ -1927,6 +1931,7 @@ fn cplc_exclusion() -> Exclusion {
         branch: None,
         evidence_sources: None,
         evidence_packages: None,
+        evidence_locked: None,
     }
 }
 
@@ -2065,4 +2070,55 @@ fn missing_emitted_branch_location_still_refuses() {
         check(&case.lcov, &listless),
         "Missing emitted branch locations"
     );
+}
+
+fn locked_entry(fixture: &ExceptionFixture, version: &str, checksum: &str) -> Exclusion {
+    let pin: toml::Value = toml::from_str(&format!(
+        "[serde]\nversion = \"{version}\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{checksum}\"\n"
+    ))
+    .expect("pin");
+    let mut entry = branch_exclusion(fixture);
+    entry.evidence_locked = Some(pin);
+    entry
+}
+
+fn third_party_lock(owned_revision: &str, serde_version: &str) -> String {
+    format!(
+        "[[package]]\nname = \"owned\"\nversion = \"0.0.0\"\nsource = \"git+https://forge.example/org/owned?branch=main#{owned_revision}\"\n\n\
+         [[package]]\nname = \"serde\"\nversion = \"{serde_version}\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"abc\"\n"
+    )
+}
+
+#[test]
+fn locked_evidence_survives_an_owned_only_lock_refresh_but_not_a_third_party_change() {
+    let fixture = exception_fixture();
+    let entry = locked_entry(&fixture, "1.0.0", "abc");
+    let lock = fixture.root.join("Cargo.lock");
+    fs::write(&lock, third_party_lock(&"a".repeat(40), "1.0.0")).expect("lock");
+    assert!(exception_check(&fixture, std::slice::from_ref(&entry), Target::Native).is_ok());
+    // A nightly refresh moves only the owned crate.
+    fs::write(&lock, third_party_lock(&"b".repeat(40), "1.0.0")).expect("refresh");
+    assert!(exception_check(&fixture, std::slice::from_ref(&entry), Target::Native).is_ok());
+    // A third-party version change invalidates it.
+    fs::write(&lock, third_party_lock(&"b".repeat(40), "1.0.1")).expect("bump");
+    assert!(exception_check(&fixture, &[entry], Target::Native).is_err());
+}
+
+#[test]
+fn locked_evidence_refuses_an_owned_git_crate() {
+    let fixture = exception_fixture();
+    let git = "git+https://forge.example/org/owned?branch=main#".to_owned() + &"a".repeat(40);
+    fs::write(
+        fixture.root.join("Cargo.lock"),
+        third_party_lock(&"a".repeat(40), "1.0.0"),
+    )
+    .expect("lock");
+    let mut entry = locked_entry(&fixture, "0.0.0", "abc");
+    entry.evidence_locked = Some(
+        toml::from_str(&format!(
+            "[owned]\nversion = \"0.0.0\"\nsource = \"{git}\"\n"
+        ))
+        .unwrap(),
+    );
+    assert!(exception_check(&fixture, &[entry], Target::Native).is_err());
 }

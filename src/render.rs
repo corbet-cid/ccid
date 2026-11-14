@@ -177,7 +177,7 @@ struct Transition {
 const TRANSITIONS: &[Transition] = &[
     Transition {
         template: Template::CheckShell,
-        since: "3bd0c9a089abd341f65f7cabd44cf608e8400b03",
+        since: "662542f5b4d1533ce432e8089235388410ecc659",
         previous: include_str!("render/previous/check-shell.nix"),
     },
     // The shim checks the binary's sha256 against the channel entry before every execution.
@@ -1987,6 +1987,32 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, content).unwrap();
         }
+    }
+
+    /// Declared environment variables must be mkShell attributes: attributes
+    /// merged onto the finished derivation (`mkShell {...} // {...}`) never
+    /// reach the shell environment.
+    #[test]
+    fn check_shell_declares_every_env_var_inside_mkshell() {
+        let body = Templates::CURRENT.check_shell;
+        let start = body.find("pkgs.mkShell").expect("mkShell");
+        let end = body.rfind("\nin ").expect("let ... in");
+        let result = body[end + 4..].trim();
+        assert_eq!(
+            result, "shell",
+            "the shell must be the mkShell result itself"
+        );
+        assert!(!result.contains("//"), "no attributes after mkShell");
+        for var in ["BB_LIB_DIR", "BB_NATIVE_RUSTFLAGS"] {
+            let at = body.find(&format!("{var} =")).expect(var);
+            assert!(
+                at > start && at < end,
+                "{var} must sit inside the mkShell call"
+            );
+        }
+        // The previous (released) body had the defect: it must fail this shape.
+        let old = include_str!("render/previous/check-shell.nix");
+        assert!(old.trim_end().ends_with("}") && old.contains("in base //"));
     }
 
     /// The files a set of transitions changes in `root`'s render.

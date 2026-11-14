@@ -96,6 +96,12 @@ pub struct Exclusion {
     /// Optional map of package name to `{ version, source }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_packages: Option<toml::Value>,
+    /// Optional map of THIRD-PARTY crate name to `{ version, source }` (plus the
+    /// registry `checksum` when the lock carries one), matched against the
+    /// `Cargo.lock` entry. Crates the fleet owns follow newest main and are never
+    /// pinned here; the replacement for `evidence_packages` and a whole-lock hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_locked: Option<toml::Value>,
 }
 
 /// The `[coverage]` table of `.ci/ccid.toml`.
@@ -451,6 +457,9 @@ fn validate_exclusion(entry: &Exclusion, root: &Path) -> std::result::Result<(),
             }
         }
     }
+    if let Some(locked) = &entry.evidence_locked {
+        validate_evidence_locked(locked, root)?;
+    }
     if let Some(branch) = &entry.branch {
         let table = branch
             .as_table()
@@ -471,6 +480,60 @@ fn validate_exclusion(entry: &Exclusion, root: &Path) -> std::result::Result<(),
             .is_some_and(|table| table.contains_key(&entry.file));
         if !pinned {
             return Err("Branch exception requires complete source hash".to_owned());
+        }
+    }
+    Ok(())
+}
+
+/// Third-party lock evidence: each named crate must have a `Cargo.lock` entry with
+/// exactly the pinned version, source and (when pinned) checksum. A crate the fleet
+/// owns (a Git source: owned crates follow newest main) is refused, so a lock
+/// refresh that only moves owned crates never invalidates the exclusion.
+fn validate_evidence_locked(locked: &toml::Value, root: &Path) -> std::result::Result<(), String> {
+    let table = locked
+        .as_table()
+        .ok_or("Invalid locked dependency inventory")?;
+    if table.is_empty() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(root.join("Cargo.lock")).map_err(|error| error.to_string())?;
+    let parsed: toml::Value = toml::from_str(&text).map_err(|error| error.to_string())?;
+    let packages = parsed
+        .get("package")
+        .and_then(|packages| packages.as_array())
+        .ok_or("Invalid Cargo.lock package inventory")?;
+    for (name, pin) in table {
+        let pin = pin
+            .as_table()
+            .filter(|pin| {
+                !name.is_empty()
+                    && pin
+                        .keys()
+                        .all(|key| matches!(key.as_str(), "version" | "source" | "checksum"))
+                    && ["version", "source"].iter().all(|key| {
+                        pin.get(*key)
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|v| !v.is_empty())
+                    })
+            })
+            .ok_or("Locked dependency requires a version and a source")?;
+        let source = pin["source"].as_str().unwrap_or("");
+        if source.starts_with("git+") {
+            return Err(format!(
+                "Locked dependency {name} is a Git (owned) crate; pin your own source files instead"
+            ));
+        }
+        let version = pin["version"].as_str().unwrap_or("");
+        let pinned_checksum = pin.get("checksum").and_then(|v| v.as_str());
+        let found = packages.iter().any(|package| {
+            package.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
+                && package.get("version").and_then(|v| v.as_str()) == Some(version)
+                && package.get("source").and_then(|v| v.as_str()) == Some(source)
+                && pinned_checksum
+                    .is_none_or(|sum| package.get("checksum").and_then(|v| v.as_str()) == Some(sum))
+        });
+        if !found {
+            return Err("Locked dependency changed or is missing; review it".to_owned());
         }
     }
     Ok(())
@@ -1208,6 +1271,7 @@ pub fn convert_exclusions(
         };
         let evidence_sources = carried("evidence_sources")?;
         let evidence_packages = carried("evidence_packages")?;
+        let evidence_locked = carried("evidence_locked")?;
         let (file, source, context) =
             if let Some(name) = table.get("file").and_then(|file| file.as_str()) {
                 let source = table
@@ -1262,6 +1326,7 @@ pub fn convert_exclusions(
             branch,
             evidence_sources,
             evidence_packages,
+            evidence_locked,
         });
     }
     #[derive(Serialize)]

@@ -1,6 +1,6 @@
 {
   "dead-label": {
-    ".ci/check-shell.nix": "dc74ea8e107822284d5e8b64e6be09103d891bfbe48d41a1b4e63cca0d0c03aa",
+    ".ci/check-shell.nix": "d13e76b16ecbde0a06b49d0131e1e81d92e62f0dd414f2984db9941407e48d9f",
     ".ci/jobs.json": "a2ccb534c7b4f32e79f9a383accab840dc49b5dd92b6fe7c90615cf0b8cb6ef8",
     ".forgejo/workflows/ci.yml": "f4873eace4424c7e3fd5ab3cd037dd4320b38c72337b7600d4ebd181ef28db30",
     ".forgejo/workflows/deep.yml": "bf04ddbcb801870ddf6305966f83461e32b2e4335cbaf769b2c49d5da75eefa6"
