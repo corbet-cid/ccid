@@ -586,6 +586,13 @@ fn execute_job(
             command
         }
     };
+    // `CCID_SANDBOX=<program>`: the job command (not ccid's own git and checkout steps) runs as `<program> <command...>`, e.g. the
+    // csandbox wrapper that hides this account's credentials from build and test code. Unset: byte-identical to before.
+    if let Some(wrapper) = std::env::var_os("CCID_SANDBOX").filter(|value| !value.is_empty()) {
+        let mut wrapped = Command::new(wrapper);
+        wrapped.arg(command.get_program()).args(command.get_args());
+        command = wrapped;
+    }
     command
         .envs(&extra)
         .env("CCID_SOURCE_REVISION", &options.sha);
