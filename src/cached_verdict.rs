@@ -2156,17 +2156,28 @@ fn publish_record(
     Ok(())
 }
 
+/// SHA-256 of the running binary. On Linux the open inode behind `link` (`/proc/self/exe`) is hashed,
+/// so a cold fetch that renames or deletes the binary's path while it runs cannot make the identity
+/// unreadable; elsewhere (macOS has no such link) the resolved path of `current_exe` is the label
+/// and the source of the bytes.
+fn hash_running_exe(link: &Path) -> std::result::Result<String, String> {
+    if cfg!(target_os = "linux") {
+        if let Ok(sha256) = crate::sha256_file(link) {
+            return Ok(sha256);
+        }
+    }
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("cannot locate the running ccid: {error}"))?
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve the running ccid: {error}"))?;
+    crate::sha256_file(&exe).map_err(|error| format!("cannot hash the running ccid: {error}"))
+}
+
 /// The producing binary's own identity: SHA-256 of its bytes and the revision compiled into it.
 pub(crate) fn own_tool() -> Result<Tool> {
     static TOOL: OnceLock<std::result::Result<Tool, String>> = OnceLock::new();
     TOOL.get_or_init(|| {
-        let exe = std::env::current_exe()
-            .map_err(|error| format!("cannot locate the running ccid: {error}"))?;
-        let exe = exe
-            .canonicalize()
-            .map_err(|error| format!("cannot resolve the running ccid: {error}"))?;
-        let sha256 = crate::sha256_file(&exe)
-            .map_err(|error| format!("cannot hash the running ccid: {error}"))?;
+        let sha256 = hash_running_exe(Path::new("/proc/self/exe"))?;
         Ok(Tool {
             sha256,
             source_revision: SOURCE_REVISION.to_owned(),
@@ -2565,3 +2576,24 @@ pub(crate) mod read_sets;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod own_tool_tests {
+    use super::*;
+
+    #[test]
+    fn identity_survives_the_binary_path_vanishing_while_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("sleeper");
+        fs::copy("/bin/sleep", &copy)
+            .or_else(|_| fs::copy("/usr/bin/sleep", &copy))
+            .unwrap();
+        let expected = crate::sha256_file(&copy).unwrap();
+        let mut child = std::process::Command::new(&copy).arg("30").spawn().unwrap();
+        fs::remove_file(&copy).unwrap();
+        let link = PathBuf::from(format!("/proc/{}/exe", child.id()));
+        assert_eq!(hash_running_exe(&link).unwrap(), expected);
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+}
