@@ -44,6 +44,7 @@ fn the_tool_pin_is_the_check_shells_pin() {
 fn tools_are_attribute_paths_listed_once_without_the_base_tools() {
     for good in [
         &["python3", "nodejs_24"][..],
+        &["chromium", "chromedriver", "cargo-llvm-cov", "wasm-pack"],
         &["llvmPackages.clang-unwrapped", "openssl.dev"],
         &["gtk+3"],
         &[],

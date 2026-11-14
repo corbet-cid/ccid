@@ -115,3 +115,19 @@ Blocks the runtime does not cover stay in the repository's script until they are
 by path (`CHROME_BIN=$(command -v chromium)`), interpreter environments built from a nix expression,
 a second nixpkgs pin, exit traps that copy reports, services started for a test (valkey, PostgreSQL),
 per-tool proto homes and fixture clones.
+
+## Replacing a hand-written `.ci/run-cached.sh`
+
+`ccid` renders no `pip`, `google-chrome` or `cargo llvm-cov` probe: those lines live in a repository's own
+hand-written `.ci/run-cached.sh`, which `ccid job-run` with `[runtime]` replaces (surface class `job-script`).
+Nothing is provisioned for a repository that does not declare it. A Rust repository with browser or wasm
+tests and coverage declares its tools instead, from the same nixpkgs pin:
+
+```toml
+[runtime]
+tools = ["chromium", "chromedriver", "cargo-llvm-cov", "wasm-pack"]
+```
+
+`chromium` is free software and is what `wasm-bindgen-test-runner` drives with `CHROME_BIN`; use
+`google-chrome` (unfree, not in the pin) only when a test needs Chrome itself. A Python tool such as
+`python3 -m pip` has no place in a Rust repository's CI: delete the probe with the script.
