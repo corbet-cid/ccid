@@ -133,10 +133,9 @@ pub(crate) fn lock_target(target: &Path, overall_deadline: Instant) -> Result<(P
         .create(true)
         .truncate(false)
         .open(metadata.join("lock"))?;
-    let lock_deadline = Instant::now()
-        .checked_add(Duration::from_secs(60))
-        .ok_or_else(|| failure("Target lock deadline is out of range"))?
-        .min(overall_deadline);
+    // The wait is bounded by the check's own deadline, not by a fixed minute: another run of the same repository (a queue batch beside a push) holds this lock for as long as its
+    // check runs (a Nix evaluation takes minutes), and giving up after 60 s made the later run red for a collision, not for a fault (infra shadow run, 2026-11-14).
+    let lock_deadline = overall_deadline;
     loop {
         match lock.try_lock() {
             Ok(()) => return Ok((target, lock)),
@@ -1603,6 +1602,20 @@ mod tests {
         let started = Instant::now();
         assert!(lock_target(&target, started + Duration::from_millis(80)).is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn target_lock_waits_for_the_holder_up_to_the_deadline() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let target = temp.path().join("target");
+        let (_target, held) =
+            lock_target(&target, Instant::now() + Duration::from_secs(5)).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        assert!(lock_target(&target, Instant::now() + Duration::from_secs(5)).is_ok());
+        releaser.join().unwrap();
     }
 
     #[test]
