@@ -730,7 +730,12 @@ fn tree_entries(root: &Path, commit: &str) -> Result<Vec<TreeEntry>> {
             match kind {
                 "blob" => entries.push(TreeEntry {
                     path: path.to_owned(),
-                    mode: if mode == "100755" { "100755" } else { "100644" },
+                    // A symlink is keyed by its target (`digest_of` reads the link); calling it a regular file made every tree with a symlink unkeyable.
+                    mode: match mode {
+                        "100755" => "100755",
+                        "120000" => "120000",
+                        _ => "100644",
+                    },
                     submodule: None,
                 }),
                 // A submodule's content is another commit, which the tree names exactly.

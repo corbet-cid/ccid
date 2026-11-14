@@ -3130,3 +3130,18 @@ fn a_local_build_never_measures() {
     assert_eq!(run.traced(), 0);
     assert!(run.slot().candidate(&run.env).is_none());
 }
+
+/// A committed symlink (even a dangling one) is keyed by its target: the tree stays keyable, and a changed target changes the key.
+#[test]
+#[cfg(unix)]
+fn a_committed_symlink_is_keyed_by_its_target() {
+    let fixture = fixture("committed-symlink");
+    let root = fixture.path();
+    std::os::unix::fs::symlink("../missing", root.join("link")).unwrap();
+    commit_all(root, "add a dangling symlink");
+    let first = tree_digest(root, "HEAD").expect("a tree with a symlink must stay keyable");
+    fs::remove_file(root.join("link")).unwrap();
+    std::os::unix::fs::symlink("../elsewhere", root.join("link")).unwrap();
+    commit_all(root, "retarget");
+    assert_ne!(first, tree_digest(root, "HEAD").unwrap());
+}
