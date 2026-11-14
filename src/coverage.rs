@@ -1407,6 +1407,13 @@ pub enum Action {
         #[arg(long, default_value = "native")]
         default_targets: String,
     },
+    /// Run instrumented wasm tests in headless Chrome and keep the browser open until the
+    /// profile is uploaded; the `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER` of `[coverage.wasm]`.
+    WasmRunner {
+        /// Arguments `cargo test` passes to a runner: the wasm file and the test arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Run `cargo llvm-cov` once (nightly, private target directory outside the
     /// repository), write coverage.json, coverage.lcov and coverage.txt into the
     /// repository, then run the `[coverage] gates` on those three reports.
@@ -1434,6 +1441,7 @@ struct ManifestFile {
 /// gate refusals print `Coverage gate: <message>` and return `Ok(1)`.
 pub fn run(action: Action) -> Result<u8> {
     match action {
+        Action::WasmRunner { args } => crate::wasm_runner::wasm_runner(args),
         Action::Gate {
             lcov,
             json,
@@ -1899,6 +1907,15 @@ fn wasm_stage(
     );
     // The wasm tests build their own target tree: never the native one.
     environment.remove(OsStr::new("CARGO_TARGET_DIR"));
+    // The browser runner is ccid's own, unless the repository chose another.
+    let runner = OsStr::new("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER");
+    if !environment.contains_key(runner) {
+        if let Ok(exe) = std::env::current_exe() {
+            let mut value = exe.into_os_string();
+            value.push(" coverage wasm-runner");
+            environment.insert(runner.to_owned(), value);
+        }
+    }
     eprintln!(
         "ccid coverage run: wasm execution {} into {}",
         wasm.command.join(" "),

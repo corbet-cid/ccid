@@ -572,6 +572,25 @@ fn run_gates_the_wasm_execution_after_the_native_one() {
 }
 
 #[test]
+fn run_hands_the_wasm_command_ccids_browser_runner() {
+    let fixture = Fixture::new(&wasm_manifest(
+        "cp \"$STATE\"/coverage.* \"$CCID_COVERAGE_OUT\"/ && echo \"$CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER\" > \"$STATE\"/runner",
+    ));
+    fixture.reports(1);
+    let output = fixture
+        .command(&["coverage", "run"])
+        .env("STATE", fixture.state_dir())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    let runner = fs::read_to_string(fixture.state_dir().join("runner")).unwrap();
+    assert!(
+        runner.trim_end().ends_with(" coverage wasm-runner"),
+        "{runner}"
+    );
+}
+
+#[test]
 fn run_refuses_when_the_wasm_reports_leave_a_line_uncovered() {
     let fixture = Fixture::new(&wasm_manifest(
         "cp \"$STATE\"/wasm-bad/coverage.* \"$CCID_COVERAGE_OUT\"/",

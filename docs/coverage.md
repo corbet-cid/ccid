@@ -79,6 +79,27 @@ judged by its own reports. A line that only the wasm tests reach therefore no lo
 from the native run, and the repository needs no separate wasm gate. The native execution must pass first;
 a failing command or gate is exit 1. `[coverage.wasm]` needs `--target native` (the default).
 
+The command's environment carries `CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=<ccid> coverage wasm-runner`
+unless the repository already sets it. The stock headless `wasm-bindgen-test-runner` closes the browser
+when the test summary appears, before the page uploads its profile, so no profraw is written (verified
+with wasm-bindgen-test 0.3.78: 0 of 4 runs). The runner starts the upstream server interactively, drives
+headless Chrome through chromedriver (`CHROMEDRIVER`, default `chromedriver` on `PATH`; `CHROME_BIN` selects
+the browser), waits up to 120 s for `test result: ok. N passed` (N > 0), captures the profile through
+`__owned_test_cov_dump` and `__owned_test_module_signature` of the repository's test-only runtime
+(`minicov` from its master branch; the crates.io 0.3.8 trips a memory fault when the profile is written),
+uploads it to the upstream server and exits non-zero on failed tests, a refused upload or the deadline.
+The tools it needs are declared in `[runtime] tools` (`chromium`, `chromedriver`, `cargo-llvm-cov`,
+`wasm-bindgen-cli`). The runtime crate and the rustflags
+`-Zno-profiler-runtime -Clink-args=--no-gc-sections --cfg=owned_browser_coverage` stay in the repository.
+
+```toml
+[runtime]
+tools = ["chromium", "chromedriver", "cargo-llvm-cov", "wasm-bindgen-cli"]
+
+[coverage.wasm]
+command = ["bash", ".ci/wasm-coverage.sh"]   # exports the rustflags, then runs cargo llvm-cov test --target wasm32-unknown-unknown
+```
+
 ## Source gate
 
 ```sh

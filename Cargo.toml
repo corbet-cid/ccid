@@ -26,6 +26,9 @@ base64 = "0.22"
 url = "2"
 
 tempfile = "3"
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "tokio"] }
+fantoccini = { version = "0.22.1", default-features = false }
+tokio = { version = "1", features = ["rt", "time", "process", "io-util", "net", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", features = ["fs", "process"] }

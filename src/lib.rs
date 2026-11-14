@@ -63,6 +63,7 @@ pub mod tor;
 pub(crate) mod tor_inputs;
 pub mod typescript_cache;
 pub mod verdict;
+pub mod wasm_runner;
 
 use budget::positive;
 pub use budget::{budget, Budget};
