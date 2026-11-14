@@ -44,6 +44,7 @@ the shared verify scripts:
 | `text` | `[]` | Extra arguments of the text report only (for example `["--show-instantiations"]`) |
 | `gates` | `["source"]` | Ordered subset of `"totals"`, `"source"`; empty, unknown or repeated names are refused |
 | `require_sources` | none | The totals gate's `--require-sources`, relative to `--repo`; needs `"totals"` in `gates` |
+| `wasm` | none | `[coverage.wasm]`: see below |
 | `artifacts` | `false` | Copy the reports that exist to `$ARTIFACT_ROOT` after the run, also on failure |
 
 Arguments the run sets itself (`--json`, `--lcov`, `--text`, `--html`,
@@ -60,6 +61,23 @@ a missing nightly or cargo-llvm-cov, an unsafe target directory, and
 `artifacts = true` with `ARTIFACT_ROOT` unset, relative or inside `--repo`
 exit 2 before anything runs. A signal stops the run after the current tool and
 still removes the target directory.
+
+### The wasm execution
+
+```toml
+[coverage.wasm]
+command = ["bash", ".ci/wasm-coverage.sh"]
+```
+
+After the native gates passed, `command` runs in the repository root (nightly toolchain first on `PATH`,
+`CARGO_TARGET_DIR` removed so the wasm tests build their own tree) with `CCID_COVERAGE_OUT`, a private
+directory ccid removes afterwards. The command runs the wasm tests instrumented (the repository owns the
+browser runner and its fixtures, see [fixtures.md](fixtures.md)) and writes `coverage.json`,
+`coverage.lcov` and `coverage.txt` there. The same `gates` read them with target `wasm`: an exclusion with
+`targets = ["wasm"]` applies to this execution, one with `["native"]` does not, and each execution is
+judged by its own reports. A line that only the wasm tests reach therefore no longer has to be excluded
+from the native run, and the repository needs no separate wasm gate. The native execution must pass first;
+a failing command or gate is exit 1. `[coverage.wasm]` needs `--target native` (the default).
 
 ## Source gate
 

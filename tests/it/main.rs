@@ -24,6 +24,7 @@ mod content_pins;
 mod contributed;
 #[cfg(unix)]
 mod coverage_run;
+mod declared_fixtures;
 mod dependency_resolution;
 #[cfg(unix)]
 mod fake_forge;

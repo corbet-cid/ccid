@@ -132,6 +132,24 @@ pub struct Config {
     /// Copy the reports to `$ARTIFACT_ROOT` after the run, also on failure.
     #[serde(default)]
     pub artifacts: bool,
+    /// The wasm execution of the same run: the repository's command that runs the wasm tests
+    /// instrumented and writes the three reports; ccid gates them with target `wasm`.
+    #[serde(default)]
+    pub wasm: Option<Wasm>,
+}
+
+/// `[coverage.wasm]`: the second execution of `ccid coverage run`.
+///
+/// `command` runs in the repository root after the native gates passed, with the private
+/// directory `CCID_COVERAGE_OUT` it must fill with `coverage.json`, `coverage.lcov` and
+/// `coverage.txt` of the wasm execution (the same three reports as the native one). The same
+/// `gates` read them with target `wasm`, so an exclusion with `targets = ["wasm"]` applies here and
+/// one with `["native"]` does not. A line that only the wasm tests reach is judged by this
+/// execution instead of counting as uncovered natively.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Wasm {
+    pub command: Vec<String>,
 }
 
 /// Default `[coverage] llvm_cov`.
@@ -252,6 +270,13 @@ impl Config {
                     "[coverage] require_sources must be a relative path inside the repository"
                         .to_owned(),
                 );
+            }
+        }
+        if let Some(wasm) = &self.wasm {
+            if wasm.command.first().is_none_or(String::is_empty)
+                || wasm.command.iter().any(|arg| arg.contains('\0'))
+            {
+                return Err("[coverage.wasm] command needs a nonempty executable".to_owned());
             }
         }
         let gates = self.gate_order()?;
@@ -1692,10 +1717,10 @@ fn execute(command: &[OsString], environment: &Environment, root: &Path) -> Resu
 }
 
 /// The gates of one run over its three reports; prints like `gate` and `totals`.
-fn run_gates(root: &Path, config: &Config, gates: &[Gate], target: Target) -> u8 {
+fn run_gates(root: &Path, reports: &Path, config: &Config, gates: &[Gate], target: Target) -> u8 {
     let mut texts = Vec::new();
     for name in REPORTS {
-        let path = root.join(name);
+        let path = reports.join(name);
         match fs::read_to_string(&path) {
             Ok(text) => texts.push(text),
             Err(error) => {
@@ -1829,7 +1854,17 @@ fn produce(
         }
     }
     if matches!(outcome, Ok(0)) {
-        outcome = Ok(run_gates(root, config, gates, target));
+        outcome = Ok(run_gates(root, root, config, gates, target));
+    }
+    if matches!(outcome, Ok(0)) {
+        if let Some(wasm) = &config.wasm {
+            if target != Target::Native {
+                return Err(failure(
+                    "[coverage.wasm] runs with --target native: the wasm execution is gated as wasm itself",
+                ));
+            }
+            outcome = wasm_stage(root, wasm, config, gates, &child, &parent);
+        }
     }
     let kept = directory.path().to_path_buf();
     if let Err(error) = directory.close() {
@@ -1841,6 +1876,41 @@ fn produce(
             outcome = Err(failure("the coverage target directory was not removed"));
         }
     }
+    outcome
+}
+
+/// The wasm execution: run the repository's command into a private report directory and gate
+/// its reports with target `wasm`. The directory is removed in every case.
+fn wasm_stage(
+    root: &Path,
+    wasm: &Wasm,
+    config: &Config,
+    gates: &[Gate],
+    child: &Environment,
+    parent: &Path,
+) -> Result<u8> {
+    let out = tempfile::Builder::new()
+        .prefix("ccid-coverage-wasm-")
+        .tempdir_in(parent)?;
+    let mut environment = child.clone();
+    environment.insert(
+        "CCID_COVERAGE_OUT".into(),
+        out.path().as_os_str().to_owned(),
+    );
+    // The wasm tests build their own target tree: never the native one.
+    environment.remove(OsStr::new("CARGO_TARGET_DIR"));
+    eprintln!(
+        "ccid coverage run: wasm execution {} into {}",
+        wasm.command.join(" "),
+        out.path().display()
+    );
+    let argv: Vec<OsString> = wasm.command.iter().map(OsString::from).collect();
+    let outcome = match execute(&argv, &environment, root) {
+        Ok(true) => Ok(run_gates(root, out.path(), config, gates, Target::Wasm)),
+        Ok(false) => Ok(1),
+        Err(error) => Err(error),
+    };
+    out.close()?;
     outcome
 }
 

@@ -36,6 +36,7 @@ pub mod contributed;
 pub mod coverage;
 mod dependency;
 pub mod first_party;
+mod fixtures;
 pub mod fleet;
 pub mod float;
 #[cfg(unix)]
@@ -137,6 +138,10 @@ struct Manifest {
     schema: u32,
     project: String,
     checks: BTreeMap<String, Check>,
+    /// Declared native fixtures a check lists in `fixtures` (docs/fixtures.md). An older ccid
+    /// refuses the key.
+    #[serde(default)]
+    fixtures: BTreeMap<String, fixtures::Fixture>,
     #[serde(default)]
     jobs: BTreeMap<String, jobs::Job>,
     #[serde(default)]
@@ -258,6 +263,9 @@ pub struct Check {
     cache_env: Vec<String>,
     cache_commit: bool,
     cache_inputs: Option<Vec<String>>,
+    /// Names of the declared `[fixtures.*]` this check runs with; they live for the whole check.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fixtures: Vec<String>,
     /// Provenance `ccid measure-inputs` prints with a measured `cache_inputs`. Only a check that
     /// carries a valid one has its verdict keyed on that read-set (see `narrowing`). It is not
     /// serialized: whether it holds decides the key's scope, it is not a key input itself.
@@ -294,6 +302,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
     let mut parsed: Manifest = toml::from_str(std::str::from_utf8(bytes)?)?;
     // `fleet = true` keys the fleet digest through the existing cache_env path (verdict store and moon).
     fleet::normalise(&mut parsed.checks)?;
+    fixtures::validate(&parsed.fixtures, &parsed.checks)?;
     runtime::validate(parsed.runtime.as_ref(), parsed.toolchain.as_ref())?;
     let slug = &parsed.project;
     if parsed.schema != 1
@@ -735,75 +744,87 @@ fn run_checks_inner(
         }
         let started = Instant::now();
         event(json!({"event":"check-start","check":name}));
-        match check.kind.as_str() {
-            "cargo" => {
-                let (cargo, rustc) = cargo_prefix(check, &runner)?;
-                let mut commands =
-                    cargo_commands(check, &cargo, &resources.test_threads.to_string())?;
-                let mut cargo_environment = runner.environment.clone();
-                if !caller_target {
-                    cargo_environment.remove(std::ffi::OsStr::new("CARGO_TARGET_DIR"));
-                    // Every compilation action has --locked, before any rustc
-                    // argument delimiter. cargo fmt has no target-dir option.
-                    for command in &mut commands {
-                        if let Some(index) = command.iter().position(|arg| arg == "--locked") {
-                            command.splice(
-                                index..index,
-                                ["--target-dir".into(), target.to_string_lossy().into_owned()],
-                            );
+        // Declared fixtures live exactly as long as this check (docs/fixtures.md).
+        let mut active = fixtures::start(&runner, &manifest.fixtures, &check.fixtures, None)?;
+        active.apply(&mut runner.environment);
+        let outcome: Result<()> = (|| -> Result<()> {
+            match check.kind.as_str() {
+                "cargo" => {
+                    let (cargo, rustc) = cargo_prefix(check, &runner)?;
+                    let mut commands =
+                        cargo_commands(check, &cargo, &resources.test_threads.to_string())?;
+                    let mut cargo_environment = runner.environment.clone();
+                    if !caller_target {
+                        cargo_environment.remove(std::ffi::OsStr::new("CARGO_TARGET_DIR"));
+                        // Every compilation action has --locked, before any rustc
+                        // argument delimiter. cargo fmt has no target-dir option.
+                        for command in &mut commands {
+                            if let Some(index) = command.iter().position(|arg| arg == "--locked") {
+                                command.splice(
+                                    index..index,
+                                    ["--target-dir".into(), target.to_string_lossy().into_owned()],
+                                );
+                            }
                         }
                     }
-                }
-                // Incremental compilation for every cargo check (cache::incremental_default); its state is never removed.
-                if let Some(flag) = cache::incremental_default(&cargo_environment) {
-                    set(&mut cargo_environment, "CARGO_INCREMENTAL", flag);
-                }
-                // The shared profile as a config file argument, unless the job declares profile settings itself (environment) : one mechanism fleet-wide, see profiles/dev.toml.
-                let declares_profile = cargo_environment
-                    .keys()
-                    .any(|name| name.to_string_lossy().starts_with("CARGO_PROFILE_"));
-                if !declares_profile {
-                    if let Some(scratch) = scratch_for_profile.as_ref() {
-                        let file = scratch.join("ccid-dev-profile.toml");
-                        if fs::write(&file, DEV_PROFILE).is_ok() {
-                            let file = file.to_string_lossy().into_owned();
-                            checks::apply_config_file(&mut commands, cargo.len(), &file);
+                    // Incremental compilation for every cargo check (cache::incremental_default); its state is never removed.
+                    if let Some(flag) = cache::incremental_default(&cargo_environment) {
+                        set(&mut cargo_environment, "CARGO_INCREMENTAL", flag);
+                    }
+                    // The shared profile as a config file argument, unless the job declares profile settings itself (environment) : one mechanism fleet-wide, see profiles/dev.toml.
+                    let declares_profile = cargo_environment
+                        .keys()
+                        .any(|name| name.to_string_lossy().starts_with("CARGO_PROFILE_"));
+                    if !declares_profile {
+                        if let Some(scratch) = scratch_for_profile.as_ref() {
+                            let file = scratch.join("ccid-dev-profile.toml");
+                            if fs::write(&file, DEV_PROFILE).is_ok() {
+                                let file = file.to_string_lossy().into_owned();
+                                checks::apply_config_file(&mut commands, cargo.len(), &file);
+                            }
                         }
                     }
-                }
-                let cargo_runner =
-                    Runner::until(runner.root.clone(), cargo_environment, runner.deadline)?;
-                runner.run(&rustc, false)?;
-                for command in commands {
-                    cargo_runner.run(&command, false)?;
-                }
-            }
-            "nix" => nix_check(check, &mut runner)?,
-            "javascript" => {
-                let mut typescript = None;
-                for (index, command) in javascript_commands(check)?.into_iter().enumerate() {
-                    if index == usize::from(check.install.unwrap_or(true)) {
-                        typescript = typescript_cache::TypeScriptCache::prepare(&mut runner);
+                    let cargo_runner =
+                        Runner::until(runner.root.clone(), cargo_environment, runner.deadline)?;
+                    runner.run(&rustc, false)?;
+                    for command in commands {
+                        cargo_runner.run(&command, false)?;
                     }
-                    runner.run(&command, false)?;
                 }
-                drop(typescript);
-            }
-            "commands" => {
-                runner.nix_inventory = None;
-                if check.commands.is_empty() {
-                    return Err(failure("Custom command selection is empty"));
+                "nix" => nix_check(check, &mut runner)?,
+                "javascript" => {
+                    let mut typescript = None;
+                    for (index, command) in javascript_commands(check)?.into_iter().enumerate() {
+                        if index == usize::from(check.install.unwrap_or(true)) {
+                            typescript = typescript_cache::TypeScriptCache::prepare(&mut runner);
+                        }
+                        runner.run(&command, false)?;
+                    }
+                    drop(typescript);
                 }
-                for command in &check.commands {
-                    runner.run(command, false)?;
+                "commands" => {
+                    runner.nix_inventory = None;
+                    if check.commands.is_empty() {
+                        return Err(failure("Custom command selection is empty"));
+                    }
+                    for command in &check.commands {
+                        runner.run(command, false)?;
+                    }
                 }
+                "pack" => {
+                    runner.nix_inventory = None;
+                    pack::run(check, &runner)?;
+                }
+                _ => return Err(failure(format!("Unknown check kind: {}", check.kind))),
             }
-            "pack" => {
-                runner.nix_inventory = None;
-                pack::run(check, &runner)?;
-            }
-            _ => return Err(failure(format!("Unknown check kind: {}", check.kind))),
+            Ok(())
+        })();
+        for key in active.names() {
+            runner.environment.remove(std::ffi::OsStr::new(&key));
         }
+        let stopped = active.stop(&runner);
+        outcome?;
+        stopped?;
         event(
             json!({"event":"check-success","check":name,"seconds":started.elapsed().as_secs_f64()}),
         );

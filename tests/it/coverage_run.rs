@@ -544,3 +544,65 @@ fn converted_verify_check_leaves_the_declared_source_unchanged() {
     assert!(!fixture.target().starts_with(&repo));
     assert!(!fixture.target().exists());
 }
+
+fn wasm_manifest(command: &str) -> String {
+    format!(
+        "schema = 1\nproject = \"p\"\n[coverage.wasm]\ncommand = [\"sh\", \"-c\", {command:?}]\n"
+    )
+}
+
+#[test]
+fn run_gates_the_wasm_execution_after_the_native_one() {
+    let fixture = Fixture::new(&wasm_manifest(
+        "cp \"$STATE\"/coverage.* \"$CCID_COVERAGE_OUT\"/ && echo wasm-ran >> \"$STATE\"/log && echo \"$CCID_COVERAGE_OUT\" > \"$STATE\"/wasm-out && test -z \"${CARGO_TARGET_DIR:-}\"",
+    ));
+    fixture.reports(1);
+    let output = fixture
+        .command(&["coverage", "run"])
+        .env("STATE", fixture.state_dir())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    assert!(fixture.log().iter().any(|line| line == "wasm-ran"));
+    let out = fs::read_to_string(fixture.state_dir().join("wasm-out")).unwrap();
+    assert!(
+        !Path::new(out.trim()).exists(),
+        "the wasm report directory is removed"
+    );
+}
+
+#[test]
+fn run_refuses_when_the_wasm_reports_leave_a_line_uncovered() {
+    let fixture = Fixture::new(&wasm_manifest(
+        "cp \"$STATE\"/wasm-bad/coverage.* \"$CCID_COVERAGE_OUT\"/",
+    ));
+    fixture.reports(0);
+    fs::create_dir_all(fixture.state_dir().join("wasm-bad")).unwrap();
+    for name in ["coverage.json", "coverage.lcov", "coverage.txt"] {
+        fs::copy(
+            fixture.state_dir().join(name),
+            fixture.state_dir().join("wasm-bad").join(name),
+        )
+        .unwrap();
+    }
+    // The native execution is complete; only the wasm reports are short.
+    fixture.reports(1);
+    let output = fixture
+        .command(&["coverage", "run"])
+        .env("STATE", fixture.state_dir())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Uncovered source lines"),
+        "{}",
+        text(&output)
+    );
+}
+
+#[test]
+fn run_stops_when_the_wasm_command_fails() {
+    let fixture = Fixture::new(&wasm_manifest("exit 7"));
+    let output = fixture.run();
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output));
+}

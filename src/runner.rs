@@ -58,6 +58,18 @@ impl Runner {
         })
     }
     /// Keep machine-readable stdout separate from process timing diagnostics.
+    /// A runner with the same root, environment and deadline: a fixture's own commands.
+    pub(crate) fn clone_for_fixture(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            environment: self.environment.clone(),
+            deadline: self.deadline,
+            nix_inventory: None,
+            events_to_stderr: self.events_to_stderr,
+            suppress_stderr: self.suppress_stderr,
+            suppress_stdout: self.suppress_stdout,
+        }
+    }
     pub fn with_stderr_events(mut self) -> Self {
         self.events_to_stderr = true;
         self
