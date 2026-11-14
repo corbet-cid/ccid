@@ -262,6 +262,11 @@ pub struct Check {
     cache_tools: Vec<Vec<String>>,
     cache_env: Vec<String>,
     cache_commit: bool,
+    /// The check reads git history (a push range, signatures): `ccid job-run` fetches the full history of the commit
+    /// and exports the push's previous tip as `CCID_PUSH_BEFORE` (never part of a key). Such a check is commit-keyed
+    /// (`cache_commit = true`) or uncached (`cache = false`), because the range is not a property of the tree.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    history: bool,
     cache_inputs: Option<Vec<String>>,
     /// Names of the declared `[fixtures.*]` this check runs with; they live for the whole check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -303,6 +308,13 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
     // `fleet = true` keys the fleet digest through the existing cache_env path (verdict store and moon).
     fleet::normalise(&mut parsed.checks)?;
     fixtures::validate(&parsed.fixtures, &parsed.checks)?;
+    for (name, check) in &parsed.checks {
+        if check.history && !check.cache_commit && check.cache != Some(false) {
+            return Err(failure(format!(
+                "check {name} declares history = true: it must also declare cache_commit = true or cache = false (a history result is not a property of the tree)"
+            )));
+        }
+    }
     runtime::validate(parsed.runtime.as_ref(), parsed.toolchain.as_ref())?;
     let slug = &parsed.project;
     if parsed.schema != 1
@@ -525,6 +537,7 @@ fn run_checks_inner(
                     manifest_path,
                     std::slice::from_ref(name),
                     plan,
+                    false,
                     false,
                     environment.clone(),
                 )?;

@@ -39,6 +39,7 @@ pub fn run_cached(
     selectors: &[String],
     plan: bool,
     force: bool,
+    require_hit: bool,
 ) -> Result<()> {
     run_cached_with_environment(
         repo,
@@ -46,6 +47,7 @@ pub fn run_cached(
         selectors,
         plan,
         force,
+        require_hit,
         std::env::vars_os().collect(),
     )
 }
@@ -90,7 +92,8 @@ fn plan(
     selected: &[String],
     environment: &Environment,
     resolved: Option<&BTreeMap<String, String>>,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut all_hit = true;
     let keyable: Vec<String> = selected
         .iter()
         .filter(|name| {
@@ -124,6 +127,7 @@ fn plan(
                 "bypass": bypass,
                 "verdict": "uncached",
             }));
+            all_hit = false;
             continue;
         }
         let entry = prepared.iter().find(|entry| &entry.check == name);
@@ -137,6 +141,7 @@ fn plan(
                 Some("the verdict key cannot be computed here".to_owned()),
             ),
         };
+        all_hit &= status == "hit";
         event(json!({
             "event": "cache-plan",
             "check": name,
@@ -149,7 +154,7 @@ fn plan(
             cached_verdict::plan_event(entry, environment);
         }
     }
-    Ok(())
+    Ok(all_hit)
 }
 
 /// The receipt line for a verdict hit. `run-cached.sh` asserts that the declared receipt exists
@@ -225,6 +230,7 @@ pub(crate) fn run_cached_with_environment(
     selectors: &[String],
     plan_only: bool,
     force: bool,
+    require_hit: bool,
     mut environment: Environment,
 ) -> Result<()> {
     // Adapters legitimately invoke the verified runtime by absolute path.
@@ -276,14 +282,20 @@ pub(crate) fn run_cached_with_environment(
         "manifest_sha256":format!("{:x}",Sha256::digest(&bytes)),"tool_revision":SOURCE_REVISION}),
     );
     if plan_only {
-        return plan(
+        let all_hit = plan(
             &root,
             &parsed.checks,
             &executor_checks,
             &selected,
             &environment,
             resolved,
-        );
+        )?;
+        if require_hit && !all_hit {
+            return Err(failure(
+                "--require-hit: not every selected check has a verdict for this tree",
+            ));
+        }
+        return Ok(());
     }
     // A check that declares an opt-out, or that the purity scan finds reading run metadata or
     // live state, has no content key by construction: it always runs uncached.

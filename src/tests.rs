@@ -492,3 +492,23 @@ fn this_repositorys_checks_keep_their_declarations() {
         );
     }
 }
+
+/// `history = true` (docs/verify.md): allowed only on a commit-keyed or uncached check, and it never changes a key or an inventory of a check without it.
+#[test]
+fn history_checks_are_commit_keyed_or_uncached() {
+    let head =
+        "schema = 1\nproject = \"x\"\n[checks.r]\nkind = \"commands\"\ncommands = [[\"true\"]]\n";
+    assert!(parse_manifest(format!("{head}history = true\n").as_bytes())
+        .unwrap_err()
+        .to_string()
+        .contains("history = true"));
+    for ok in ["cache_commit = true", "cache = false"] {
+        let manifest = parse_manifest(format!("{head}history = true\n{ok}\n").as_bytes()).unwrap();
+        assert!(manifest.checks["r"].history);
+    }
+    let plain = parse_manifest(head.as_bytes()).unwrap();
+    assert!(serde_json::to_value(&plain.checks["r"])
+        .unwrap()
+        .get("history")
+        .is_none());
+}

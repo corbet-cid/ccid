@@ -140,6 +140,10 @@ enum Action {
         /// Ignore cached results and run every selected check (periodic uncached runs).
         #[arg(long, conflicts_with = "plan")]
         force: bool,
+        /// With `--plan`: run nothing and exit 0 only when EVERY selected check has a verdict hit for the checked-out tree
+        /// (an uncached check, a miss or an unavailable key is a failure). The land gate's "is this tree already verified" lookup.
+        #[arg(long, requires = "plan")]
+        require_hit: bool,
     },
     CargoResolve {
         #[arg(long, default_value = ".")]
@@ -579,6 +583,7 @@ fn main() -> ExitCode {
             checks,
             plan,
             force,
+            require_hit,
         } => {
             // R11: see `check` above; `cached` writes `.ccid` and `.moon` beside the sources.
             if let Err(error) = ccid::contributed::refuse_working_copy("cached", &repo) {
@@ -601,7 +606,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
             // Each check moon starts is an ordinary, separately supervised `ccid check`.
-            ccid::run_cached(&repo, &manifest, &checks, plan, force)
+            ccid::run_cached(&repo, &manifest, &checks, plan, force, require_hit)
         }
         Action::CargoResolve {
             repo,

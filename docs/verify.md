@@ -228,3 +228,11 @@ commands = [
    compare `ccid float --repo . --into <dir outside the repository>` with
    what the stage needs (`cargo metadata --locked` in a copy with those
    locks); never add a `cargo update`.
+
+## Checks that read git history (`history = true`)
+
+A check such as a push-range or signature gate judges commits, not the tree. Declare `history = true` on it. It must
+also declare `cache_commit = true` or `cache = false` (a range is not a property of the tree; the manifest is refused
+otherwise). `ccid job-run` then fetches the full history of the commit instead of the depth-1 checkout, and exports
+`CCID_PUSH_BEFORE` (the previous tip of the push, from the event payload `GITHUB_EVENT_PATH`; absent for a new branch,
+a manual run or `--local`). The variable is never part of a key. A manifest without `history` renders and keys exactly as before.

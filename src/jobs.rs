@@ -150,6 +150,10 @@ pub struct Plan {
     /// Forgejo trigger events; skipped when empty (all of them).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<String>,
+    /// A selected check declares `history = true`: `job-run` fetches full history and exports `CCID_PUSH_BEFORE`;
+    /// skipped when false so existing inventories render byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history: bool,
     /// Forgejo: archive the locked flake inputs after the checks; skipped when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub archive_inputs: bool,
@@ -475,9 +479,13 @@ pub(crate) fn plan_parsed(
             "runs_on, paths, events, siblings and archive_inputs belong to Forgejo jobs",
         ));
     }
+    let history = checks
+        .iter()
+        .any(|check| manifest.checks.get(check).is_some_and(|c| c.history));
     Ok(Plan {
         job: name.into(),
         scheduler: effective,
+        history,
         checks,
         workflow: job.workflow.clone(),
         command: job.command.clone(),

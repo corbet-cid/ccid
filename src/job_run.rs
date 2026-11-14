@@ -159,11 +159,17 @@ fn run_ok(command: &mut Command, what: &str) -> Result<()> {
 /// and the same fetch goes to the forge. There is no waiting and no repetition: a copy that is behind costs one failed local fetch,
 /// never a pause, and a failure of the forge itself is a failure of the job.
 pub fn fetch(dir: &Path, want: &str, token: &str, pace: &Pace) -> Result<()> {
+    fetch_depth(dir, want, token, pace, "1")
+}
+
+/// `fetch` with a chosen depth: `1` for the checkout, `2147483647` (git's "everything", it also converts a shallow copy
+/// into a complete one) for a check that declares `history = true`. Same routing: the near copy once, then the forge once.
+pub fn fetch_depth(dir: &Path, want: &str, token: &str, pace: &Pace, depth: &str) -> Result<()> {
     let header = format!("http.extraHeader=Authorization: token {token}");
     let attempt = |forge_itself: bool| {
         let mut command = git(pace, dir);
         command.args([
-            "-c", &header, "fetch", "--quiet", "--depth", "1", "origin", want,
+            "-c", &header, "fetch", "--quiet", "--depth", depth, "origin", want,
         ]);
         if forge_itself {
             command
@@ -333,6 +339,25 @@ pub fn stage_siblings(
 }
 
 /// The environment variables a job's command runs with, besides the process environment.
+/// The previous tip of the push this run was started by: the `before` of the event payload `GITHUB_EVENT_PATH` names, when the
+/// event's `after` is the commit being checked and `before` is a real commit (a new branch has the all-zero id). Never a key input.
+fn push_before(sha: &str) -> Option<String> {
+    let path = std::env::var_os("GITHUB_EVENT_PATH")?;
+    let event: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    parse_push_before(&event, sha)
+}
+
+fn parse_push_before(event: &serde_json::Value, sha: &str) -> Option<String> {
+    if event.get("after")?.as_str()? != sha {
+        return None;
+    }
+    let before = event.get("before")?.as_str()?;
+    let real = before.len() == 40
+        && before.bytes().all(|b| b.is_ascii_hexdigit())
+        && before.bytes().any(|b| b != b'0');
+    real.then(|| before.to_owned())
+}
+
 fn command_environment(
     plan: &jobs::Plan,
     options: &Options,
@@ -343,6 +368,11 @@ fn command_environment(
         env.insert(key.clone(), value.clone());
     }
     env.insert("CI_COMMIT_SHA".into(), options.sha.clone());
+    if plan.history {
+        if let Some(before) = push_before(&options.sha) {
+            env.insert("CCID_PUSH_BEFORE".into(), before);
+        }
+    }
     // A `--local` run of a tree without an origin has no repository URL; nothing is invented for it.
     if !options.server_url.is_empty() {
         env.insert(
@@ -451,6 +481,10 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     checkout(&dir, options, &token, pace)?;
     let manifest = Path::new(".ci/ccid.toml");
     let plan = jobs::plan(Path::new("."), manifest, &options.job, None)?;
+    if plan.history {
+        // A check that reads git history (push range, signatures) gets the whole history of the commit, not the depth-1 checkout.
+        fetch_depth(&dir, &options.sha, &token, pace, "2147483647")?;
+    }
     execute_job(options, &exe, plan, Some((&token, &dir)), pace)
 }
 
@@ -606,6 +640,21 @@ mod tests {
             slot_poll: Duration::from_millis(5),
             slot_timeout: Duration::from_millis(200),
         }
+    }
+
+    #[test]
+    fn push_before_needs_a_matching_after_and_a_real_previous_tip() {
+        let sha = "a".repeat(40);
+        let good = "b".repeat(40);
+        let ev = |before: &str, after: &str| serde_json::json!({"before": before, "after": after});
+        assert_eq!(
+            parse_push_before(&ev(&good, &sha), &sha),
+            Some(good.clone())
+        );
+        assert_eq!(parse_push_before(&ev(&"0".repeat(40), &sha), &sha), None);
+        assert_eq!(parse_push_before(&ev(&good, &good), &sha), None);
+        assert_eq!(parse_push_before(&ev("short", &sha), &sha), None);
+        assert_eq!(parse_push_before(&serde_json::json!({}), &sha), None);
     }
 
     #[test]

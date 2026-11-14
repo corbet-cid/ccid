@@ -703,6 +703,7 @@ fn a_stored_verdict_makes_the_cached_run_skip_the_check_entirely() {
         &["verify".to_owned()],
         false,
         false,
+        false,
         env,
     )
     .unwrap();
@@ -715,6 +716,80 @@ fn a_stored_verdict_makes_the_cached_run_skip_the_check_entirely() {
         serde_json::from_slice(&fs::read(root.join(".ccid/cache-metrics.json")).unwrap()).unwrap();
     assert_eq!(metrics["checks"][0]["status"], "cached");
     assert_eq!(metrics["checks"][0]["computed"], 0);
+}
+
+#[test]
+fn require_hit_plans_exit_zero_only_when_the_stored_verdict_hits() {
+    let fixture = fixture("hit");
+    let root = fixture.path();
+    let store = tempfile::tempdir().unwrap();
+    let mut env = environment();
+    env.insert(
+        "CI_REPOSITORY_URL".into(),
+        "https://example.invalid/checks/hit".into(),
+    );
+    env.insert(
+        "CCID_RESULT_CACHE".into(),
+        store.path().as_os_str().to_owned(),
+    );
+    env.insert("CI".into(), "true".into());
+    let commit_id = commit(root, None, &env).unwrap();
+    // The manifest's declaration, not the helper's: the check identity binds it.
+    let mut manifest_check = check();
+    manifest_check.commands = vec![vec![
+        "sh".into(),
+        "-c".into(),
+        "echo ran >> .ccid/counter".into(),
+    ]];
+    let prepared = prepare(root, "verify", &manifest_check, &env, &commit_id, &[]).unwrap();
+    let tool = Tool {
+        sha256: "c".repeat(64),
+        source_revision: "a".repeat(40),
+    };
+    let channel_path = store.path().join("channel.json");
+    channel(&channel_path, &tool.sha256);
+    env.insert(
+        "CCID_CHANNEL_FILE".into(),
+        channel_path.as_os_str().to_owned(),
+    );
+    let plan_run = |env: &Environment| {
+        crate::cached::run_cached_with_environment(
+            root,
+            Path::new(".ci/ccid.toml"),
+            &["verify".to_owned()],
+            true,
+            false,
+            true,
+            env.clone(),
+        )
+    };
+    assert!(
+        plan_run(&env).is_err(),
+        "no verdict yet: --require-hit must fail"
+    );
+    write_record(
+        &store.path().join(STORE_DIR),
+        &Record {
+            schema: SCHEMA,
+            key: prepared.key.clone(),
+            components: prepared.components.clone(),
+            commit: prepared.commit.clone(),
+            repository: "https://example.invalid/checks/hit".into(),
+            result: ResultWord::Success,
+            producer: Producer {
+                kind: ProducerKind::Lane,
+                identity: Some("lane".into()),
+            },
+            tool,
+            started_at: 10,
+            finished_at: 20,
+            duration_seconds: 10,
+            proof: None,
+        },
+    )
+    .unwrap();
+    plan_run(&env).expect("the stored verdict hits: --require-hit passes");
+    assert!(!root.join(".ccid/counter").exists(), "a plan runs nothing");
 }
 
 #[test]
@@ -1783,6 +1858,7 @@ fn a_docs_only_commit_skips_a_measured_check_in_a_cached_run_from_its_manifest()
         &["verify".to_owned()],
         false,
         false,
+        false,
         env.clone(),
     )
     .unwrap();
@@ -2135,6 +2211,7 @@ fn proof_run(root: &Path, env: &Environment) -> crate::Result<()> {
         root,
         Path::new(".ci/ccid.toml"),
         &["verify".to_owned()],
+        false,
         false,
         false,
         env.clone(),

@@ -437,6 +437,9 @@ a later nightly run restores the identical reports without a second full build.
 * `ccid cached --check <name> --plan` — print each check's verdict and its bypass reason (a
   declaration opt-out or a purity-scan finding such as a network tool) without running anything.
   A pass whose stored outputs are absent reports `miss` and the missing set.
+* `ccid cached --check <name> --plan --require-hit` — the same plan, and the exit status is 0 only when EVERY selected
+  check has a verdict hit for the checked-out tree (an uncached check, a miss or an unavailable key fails). It runs
+  nothing: the land gate's "is this tree already verified" lookup, without a second ref per tree.
 * `ccid job-run --local --source <dir> --sha <commit>` — run exactly CI's declared job against an
   existing export of the commit. This is the land gate's producer entry point; it uses the same
   job plan, environment, adapter check and command as `ccid job-run` on a runner.
