@@ -21,7 +21,7 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::{Command, ExitCode, Stdio},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -188,7 +188,11 @@ pub fn fetch(dir: &Path, want: &str, token: &str, pace: &Pace) -> Result<()> {
 /// Check out the exact commit in `dir` (initialising it), with Git LFS content when the repository tracks files with LFS.
 pub fn checkout(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Result<()> {
     run_ok(git(pace, dir).args(["init", "--quiet", "."]), "git init")?;
-    let _ = git(pace, dir).args(["remote", "remove", "origin"]).status();
+    // A fresh directory has no origin yet: the removal is allowed to fail, and its "No such remote" message is noise.
+    let _ = git(pace, dir)
+        .args(["remote", "remove", "origin"])
+        .stderr(Stdio::null())
+        .status();
     let url = format!(
         "{}/{}.git",
         options.server_url.trim_end_matches('/'),
