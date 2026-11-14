@@ -11,7 +11,7 @@
     },
     "macos": {
       "revision": "b39411795077d6f634b58ee851894eb3410aa8db",
-      "sha256": "0e8888791da4c72a44e896c06ad9c4a2cc6467e8d9f1705080902d24f85319ab"
+      "sha256": "39baf299cfac34df3eb86036e4ff17fffa02f9081a93e13604dacb1fc45daa81"
     }
   },
   "fleet": {
