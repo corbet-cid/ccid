@@ -1,13 +1,13 @@
 {
   "_doc": "The central ccid release channel. Workflows rendered with render_schema = 2 read this file (the runner names its URL in CCID_CHANNEL_URL) and run the release it selects. `classes` overrides `default` per runs-on label (canary: change one class first). A bump is a commit to this file; a rollback is a revert. The release must be published in the corbet-cid generic package registry. `fleet` is fleet data (first-party owner prefixes and their legacy aliases) that checks with `fleet = true` read; an org move is an edit of this object.",
   "default": {
-    "revision": "d4a16ab0194560054471b635b6e9ff9404090db4",
-    "sha256": "05a34171bd5b4f839ea48b3d298f78bb10b6360159af9d17c70265c6a49f8928"
+    "revision": "1b00b74fc2f93df9bb040d719372aaf0d8617783",
+    "sha256": "4619b2bf6c4683b80bbf59692d8b48e40371cf2d9b413f02eabc6d00c8ab9b54"
   },
   "classes": {
     "linux": {
-      "revision": "d4a16ab0194560054471b635b6e9ff9404090db4",
-      "sha256": "05a34171bd5b4f839ea48b3d298f78bb10b6360159af9d17c70265c6a49f8928"
+      "revision": "1b00b74fc2f93df9bb040d719372aaf0d8617783",
+      "sha256": "4619b2bf6c4683b80bbf59692d8b48e40371cf2d9b413f02eabc6d00c8ab9b54"
     },
     "macos": {
       "revision": "d4a16ab0194560054471b635b6e9ff9404090db4",
