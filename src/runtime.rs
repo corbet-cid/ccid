@@ -506,7 +506,7 @@ mod setup {
                 .unwrap_or_default();
             let cc = text(&bin.join("x86_64-unknown-freebsd-cc"))?;
             // The store path names the compiler and its sysroot: a check lists CC_x86_64_unknown_freebsd
-            // in `cache_env` so a different sysroot is a different verdict.
+            // in `cache_env` (a check sees only declared variables) so a different sysroot is a different verdict.
             variables.insert(
                 "CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER".into(),
                 cc.clone(),

@@ -39,13 +39,13 @@ runner: rustup adds the standard library, the runtime adds the nixpkgs cross com
 and exports `CC_x86_64_unknown_freebsd`, `AR_x86_64_unknown_freebsd` and
 `CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER`, so C dependencies built by the `cc` crate (ring, aws-lc-sys) link.
 There is no FreeBSD kernel here: the check compiles and links, it never tests. Declare it as a plain check and name
-the job so, and key the sysroot with `cache_env` (the value is the compiler's store path, which fixes its sysroot):
+the job so, and pass the three variables through `cache_env`, which also keys the sysroot (the value is the compiler's store path, which fixes it):
 
 ```toml
 [checks.freebsd-build]
 kind = "commands"
 commands = [["cargo", "build", "--locked", "--target", "x86_64-unknown-freebsd"]]
-cache_env = ["CC_x86_64_unknown_freebsd"]
+cache_env = ["CC_x86_64_unknown_freebsd", "AR_x86_64_unknown_freebsd", "CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER"]
 
 [jobs.freebsd-build-only]       # build only: no tests run on FreeBSD
 scheduler = "forgejo"
