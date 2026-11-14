@@ -3146,6 +3146,7 @@ fn a_committed_symlink_is_keyed_by_its_target() {
     assert_ne!(first, tree_digest(root, "HEAD").unwrap());
 }
 
+#[cfg(unix)]
 /// A directory holding fake `cargo`/`rustc` programs that answer `-vV` / `--version` with `text`.
 fn fake_toolchain(directory: &Path, text: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -3157,10 +3158,12 @@ fn fake_toolchain(directory: &Path, text: &str) {
     }
 }
 
+#[cfg(unix)]
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_owned()).collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn two_cargos_in_one_check_are_keyed_apart_and_a_single_cargo_keeps_its_key() {
     let scratch = tempfile::tempdir().unwrap();
