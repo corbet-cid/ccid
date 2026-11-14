@@ -155,6 +155,10 @@ struct Manifest {
     /// adapters. Optional; push adapter rendering requires it.
     #[serde(default)]
     repository: Option<String>,
+    /// How the dependencies are kept safe, for the rendered security text (R47): `dependencies` is
+    /// `renovate` (the default), `cargo-deny` or `none`. An older ccid refuses the key.
+    #[serde(default)]
+    security: Option<security::Config>,
     /// Which jobs gate landing (see `verdict`). Absent: `verify`, if declared.
     #[serde(default)]
     verdict: Option<Verdict>,

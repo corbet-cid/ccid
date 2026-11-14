@@ -50,6 +50,8 @@ pub struct Job {
     pub sha: String,
     /// The release notes carry the security and dependency section (R47): `render_schema = 3`, no fork.
     pub security: bool,
+    /// `[security] dependencies` of the manifest: which dependency sentence the notes carry.
+    pub dependencies: crate::security::Dependencies,
 }
 
 fn git_head(repo: &Path) -> Result<String> {
@@ -95,6 +97,11 @@ impl Job {
             project: manifest.project.clone(),
             plan: config.plan(version),
             security: crate::render::security_applies(&manifest),
+            dependencies: manifest
+                .security
+                .as_ref()
+                .map(|config| config.dependencies)
+                .unwrap_or_default(),
             config,
             sha,
         })
@@ -115,7 +122,7 @@ impl Job {
         if !self.security {
             return Ok(base);
         }
-        let section = crate::security::release_section();
+        let section = crate::security::release_section(self.dependencies);
         Ok(format!("{}\n\n{section}", base.trim_end()))
     }
 

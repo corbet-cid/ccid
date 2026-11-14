@@ -18,3 +18,19 @@ Applies at `render_schema = 3` only, and not to a project that lists upstream CI
 gets nothing of ours, R10, R11). Between the markers `<!-- ccid:security:begin ... -->` and
 `<!-- ccid:security:end -->` a hand edit is drift; a file without the block yet is a declared transition for
 `render --check` (the next render adds it). A symbolic-link README or policy file is refused.
+
+## The dependency sentence is data
+
+`.ci/ccid.toml` may carry an optional table that says how the project's dependencies are kept safe, so the
+rendered text claims only what is true for that repository:
+
+```toml
+[security]
+dependencies = "renovate"   # the default; "cargo-deny" or "none"
+```
+
+- `renovate`: Renovate watches the dependencies, with OSV alerts, and an update is merged only when its tests pass.
+- `cargo-deny`: "Dependencies are checked against RustSec advisories (cargo deny) in CI."
+- `none`: no sentence about dependencies (the README status line says only "Security").
+
+An older ccid refuses the table (unknown key), so set it only for a ccid on the channel that knows it.

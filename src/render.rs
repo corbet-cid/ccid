@@ -1074,7 +1074,14 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
     };
     // R47: the security status in the README and the policy file, between markers; schema 3 only.
     let security_plans = if security_applies(&parsed) {
-        crate::security::plan_files(repo)?
+        crate::security::plan_files(
+            repo,
+            parsed
+                .security
+                .as_ref()
+                .map(|config| config.dependencies)
+                .unwrap_or_default(),
+        )?
     } else {
         Vec::new()
     };
