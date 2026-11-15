@@ -9,7 +9,7 @@
 //! ```
 //!
 //! * `release` (`ccid release build`): preflight (a version is released once; the source is main; no red
-//!   verdict), the third-party lock refresh, the declared build checks into one directory, ONE draft
+//!   verdict), the declared build checks into one directory, ONE draft
 //!   `build-<commit>` that holds every file, size-checked and resumable.
 //! * a leg (`ccid release leg <os>`): the declared leg check runs on that label against the draft and
 //!   leaves its evidence there (`ccid release fetch` and `ccid release put`).
@@ -406,7 +406,7 @@ pub enum Command {
         #[arg(long)]
         commit: Option<String>,
     },
-    /// The release job: preflight, the third-party lock refresh, the build checks, the draft with every file.
+    /// The release job: preflight, the build checks, the draft with every file.
     Build {
         #[arg(long, default_value = ".")]
         repo: PathBuf,

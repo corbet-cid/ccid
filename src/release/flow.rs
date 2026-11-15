@@ -27,9 +27,6 @@ const CREDENTIALS: [&str; 5] = [
 const VERDICT: &str = "ccid/verdict";
 /// The branch a release is cut from.
 const BRANCH: &str = "main";
-/// The trailer of a lock-only commit that a release preflight made.
-const REFRESH_TRAILER: &str = "CCID-Lock-Refresh: third-party";
-
 /// The seconds a check of a release may run: a release builds everything on a cold cache and cross compiles, so
 /// two hours unless the job already allows more.
 const CHECK_DEADLINE: u64 = 7_200;
@@ -267,179 +264,6 @@ fn describe(job: &Job) -> String {
     )
 }
 
-// ---- the third-party lock refresh ------------------------------------------------------------------------------
-
-enum Refresh {
-    Unchanged,
-    /// A lock-only commit was pushed to main and the release dispatched again on it.
-    Moved(String),
-}
-
-fn tracked_locks(repo: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["ls-files", "-z", "--", "Cargo.lock", "**/Cargo.lock"])
-        .output()
-        .map_err(|error| failure(format!("cannot run git: {error}")))?;
-    Ok(output.status.success() && !output.stdout.is_empty())
-}
-
-fn git_output(repo: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|text| !text.is_empty())
-}
-
-/// The identity a refresh commit carries: the one the environment names, else the repository's own.
-fn identity(repo: &Path) -> Result<(String, String)> {
-    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    let name =
-        env("GIT_AUTHOR_NAME").or_else(|| git_output(repo, &["config", "--get", "user.name"]));
-    let email =
-        env("GIT_AUTHOR_EMAIL").or_else(|| git_output(repo, &["config", "--get", "user.email"]));
-    match (name, email) {
-        (Some(name), Some(email)) => Ok((name, email)),
-        _ => Err(failure(
-            "the third-party lock refresh changed Cargo.lock but git has no identity to commit it with (GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL, or user.name and user.email); nothing was committed",
-        )),
-    }
-}
-
-/// The lock files `ccid lock-refresh --third-party` moved, from its one-line JSON report.
-fn changed_locks(report: &str) -> Result<Vec<String>> {
-    let report: serde_json::Value = report
-        .lines()
-        .rev()
-        .find_map(|line| serde_json::from_str(line).ok())
-        .ok_or_else(|| failure("lock-refresh printed no report"))?;
-    Ok(report
-        .get("changed")
-        .and_then(|list| list.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|path| path.as_str().map(str::to_owned))
-        .collect())
-}
-
-/// Commit the refreshed locks as one lock-only commit; returns the new commit.
-fn commit_locks(
-    repo: &Path,
-    changed: &[String],
-    version: &super::version::Version,
-) -> Result<String> {
-    // A refresh that moves again right after a refresh would loop: stop instead.
-    let last = git_output(repo, &["log", "-1", "--format=%B"]).unwrap_or_default();
-    if last.lines().any(|line| line.trim() == REFRESH_TRAILER) {
-        return Err(failure(format!(
-            "the third-party locks moved again ({}) although the last commit is a lock refresh already; nothing is committed",
-            changed.join(", ")
-        )));
-    }
-    let (name, email) = identity(repo)?;
-    let mut add = Command::new("git");
-    add.arg("-C").arg(repo).args(["add", "--"]).args(changed);
-    if !add.status()?.success() {
-        return Err(failure("git add of the refreshed locks failed"));
-    }
-    let message =
-        format!("lock-refresh: third-party dependencies for {version}\n\n{REFRESH_TRAILER}\n");
-    let committed = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "-c",
-            &format!("user.name={name}"),
-            "-c",
-            &format!("user.email={email}"),
-        ])
-        .args([
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--quiet",
-            "-m",
-            &message,
-        ])
-        .status()?;
-    if !committed.success() {
-        return Err(failure("git commit of the refreshed locks failed"));
-    }
-    git_head(repo)
-}
-
-/// Push HEAD to `url`'s main with the job token. The system git configuration is switched off: a runner
-/// may route the forge's URL to a local copy, and a push must reach the forge itself.
-fn push_head(repo: &Path, url: &str, token: &str) -> Result<()> {
-    let pushed = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["push", "--quiet", url, &format!("HEAD:refs/heads/{BRANCH}")])
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .env("GIT_CONFIG_COUNT", "1")
-        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-        .env(
-            "GIT_CONFIG_VALUE_0",
-            format!("Authorization: token {token}"),
-        )
-        .status()?;
-    if pushed.success() {
-        Ok(())
-    } else {
-        Err(failure(format!(
-            "the refreshed locks could not be pushed to {BRANCH} (moved, protected or refused); commit them through the repository's flow and release again"
-        )))
-    }
-}
-
-/// The refresh of the third-party locks (`ccid lock-refresh --third-party`) that every release run starts with.
-/// A moved lock must be in the commit that is released, so it is committed to main and the release starts
-/// again on that commit: this run releases nothing.
-fn refresh_locks(job: &Job, forge: &Forge, server_url: &str) -> Result<Refresh> {
-    if !tracked_locks(&job.repo)? {
-        return Ok(Refresh::Unchanged);
-    }
-    let output = Command::new(std::env::current_exe()?)
-        .current_dir(&job.repo)
-        .args(["lock-refresh", "--repo", ".", "--third-party"])
-        .env_remove("CCID_TARGET_LOCK_HELD")
-        .env_remove("CCID_CACHE_CHILD")
-        .output()
-        .map_err(|error| failure(format!("cannot run lock-refresh: {error}")))?;
-    if !output.status.success() {
-        return Err(failure(format!(
-            "the third-party lock refresh failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let changed = changed_locks(&String::from_utf8_lossy(&output.stdout))?;
-    if changed.is_empty() {
-        eprintln!("ccid release: the third-party locks are current");
-        return Ok(Refresh::Unchanged);
-    }
-    let new = commit_locks(&job.repo, &changed, &job.plan.version)?;
-    let token = ["CCID_FORGE_TOKEN", "FORGEJO_TOKEN", "GITHUB_TOKEN"]
-        .into_iter()
-        .find_map(|name| std::env::var(name).ok().filter(|v| !v.is_empty()))
-        .ok_or_else(|| failure("no job token to push the refreshed locks with"))?;
-    let url = format!(
-        "{}/{}.git",
-        server_url.trim_end_matches('/'),
-        forge.repository()
-    );
-    push_head(&job.repo, &url, &token)?;
-    forge.dispatch("release.yml", BRANCH)?;
-    Ok(Refresh::Moved(new))
-}
-
 // ---- build -----------------------------------------------------------------------------------------------------
 
 fn collect(dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
@@ -468,16 +292,8 @@ fn collect(dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
 pub fn build(repo: &Path) -> Result<ExitCode> {
     let job = Job::load(repo, None)?;
     let forge = Forge::from_env()?;
-    let server = std::env::var("GITHUB_SERVER_URL").unwrap_or_default();
     eprintln!("ccid release: {}", describe(&job));
     preflight(&job, &forge)?;
-    if let Refresh::Moved(new) = refresh_locks(&job, &forge, &server)? {
-        eprintln!(
-            "ccid release: the third-party locks moved; they are committed as {new} and the release starts again on it. This run releases nothing."
-        );
-        outputs(&[("released", "false".into()), ("legs", String::new())]);
-        return Ok(ExitCode::SUCCESS);
-    }
     let dir = tempfile::Builder::new().prefix("ccid-release-").tempdir()?;
     if !job.run_checks(&job.config.build, dir.path(), false)? {
         return Ok(ExitCode::from(1));
@@ -871,43 +687,6 @@ mod tests {
         .is_ok());
     }
 
-    fn git(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args([
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "init.defaultBranch=main",
-            ])
-            .args(args)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
-    }
-
-    fn repository_with_lock() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        git(dir.path(), &["init", "-q"]);
-        git(dir.path(), &["config", "user.name", "Lock Test"]);
-        git(
-            dir.path(),
-            &["config", "user.email", "lock@example.invalid"],
-        );
-        fs::write(dir.path().join("Cargo.lock"), "one\n").unwrap();
-        fs::write(dir.path().join("other.txt"), "x\n").unwrap();
-        git(dir.path(), &["add", "-A"]);
-        git(dir.path(), &["commit", "-q", "-m", "fixture"]);
-        dir
-    }
-
     #[test]
     fn a_release_check_gets_two_hours_or_what_the_job_allows() {
         assert_eq!(check_deadline(None), "7200");
@@ -917,56 +696,14 @@ mod tests {
     }
 
     #[test]
-    fn the_report_line_names_the_changed_locks() {
-        let report =
-            "noise\n{\"mode\":\"third-party\",\"changed\":[\"Cargo.lock\",\"x/Cargo.lock\"]}\n";
-        assert_eq!(
-            changed_locks(report).unwrap(),
-            vec!["Cargo.lock", "x/Cargo.lock"]
-        );
-        assert!(changed_locks("{\"changed\":[]}\n").unwrap().is_empty());
-        assert!(changed_locks("not json\n").is_err());
-    }
-
-    #[test]
-    fn a_refresh_is_one_lock_only_commit_pushed_to_main_and_never_two_in_a_row() {
-        let repo = repository_with_lock();
-        let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "-q", "--bare"]);
-        fs::write(repo.path().join("Cargo.lock"), "two\n").unwrap();
-        let version = crate::release::version::Version::parse("1.2.0").unwrap();
-        let new = commit_locks(repo.path(), &["Cargo.lock".to_owned()], &version).unwrap();
-        assert_eq!(new, git(repo.path(), &["rev-parse", "HEAD"]));
-        assert_eq!(
-            git(repo.path(), &["show", "--name-only", "--format=", "HEAD"]),
-            "Cargo.lock"
-        );
-        let message = git(repo.path(), &["log", "-1", "--format=%B"]);
+    fn the_release_never_moves_locks_or_pushes_to_main() {
+        // Decision log 2026-11-16: a release builds the committed locks; nothing in this module may push.
+        let source = include_str!("flow.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!code.contains("\"push\""), "the release flow must not push");
         assert!(
-            message.contains(REFRESH_TRAILER) && message.contains("1.2.0"),
-            "{message}"
+            !code.contains("lock-refresh"),
+            "the release flow must not refresh locks"
         );
-        push_head(
-            repo.path(),
-            &remote.path().display().to_string(),
-            "token12345",
-        )
-        .unwrap();
-        assert_eq!(git(remote.path(), &["rev-parse", "main"]), new);
-        // The lock moves again straight after a refresh: refused, nothing committed.
-        fs::write(repo.path().join("Cargo.lock"), "three\n").unwrap();
-        let again = commit_locks(repo.path(), &["Cargo.lock".to_owned()], &version);
-        assert!(again
-            .unwrap_err()
-            .to_string()
-            .contains("lock refresh already"));
-        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), new);
-    }
-
-    #[test]
-    fn a_push_that_the_remote_refuses_is_an_error_naming_the_way_out() {
-        let repo = repository_with_lock();
-        let error = push_head(repo.path(), "/nonexistent/remote.git", "token12345").unwrap_err();
-        assert!(error.to_string().contains("could not be pushed"), "{error}");
     }
 }

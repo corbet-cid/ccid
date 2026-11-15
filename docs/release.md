@@ -39,7 +39,7 @@ A suffix (`-rc.1`, `+build`), a leading zero, two numbers and `0.0.0` name no re
 
 ```text
 dispatch release on main
-  release (linux)          preflight, third-party lock refresh, the build checks, ONE draft build-<commit>
+  release (linux)          preflight, the build checks, ONE draft build-<commit>
   release-windows (windows) only if the version holds a Windows platform
   release-macos (macos)     only if it holds a macOS platform; after the Windows leg when both exist
   release-promote (linux)   after every leg that ran: seal, SHA256SUMS, the draft becomes v<version>
@@ -47,14 +47,13 @@ dispatch release on main
 
 The jobs are ordered by `needs`; the release job tells the legs whether they run (its outputs `legs` and
 `released`, written to `$GITHUB_OUTPUT`). A failed leg stops the promotion. Nothing polls and nothing is
-dispatched by a finishing step except the lock refresh below. A newer dispatch waits for the run that
+dispatched by a finishing step. A newer dispatch waits for the run that
 holds the draft (`cancel-in-progress: false`).
 
 **`ccid release build`** (the release job)
 
 1. Preflight: the source is the tip of `main`; neither a release nor a tag `v<version>` exists (a version
    is released once); the commit's `ccid/verdict` status is not red (an absent one is noted, not refused).
-2. The third-party lock refresh (below).
 3. The `build` checks run (`ccid check`) with the credentials removed from their environment; they leave the
    release's files in `$CCID_RELEASE_DIR`: one flat directory, plain file names, no `SHA256SUMS`.
 4. The draft `build-<commit>` is created (target: the commit) and every file is uploaded, checked by size on
@@ -154,17 +153,13 @@ A pack that fails stops the release run before the draft exists, so nothing beco
 datacenter side downloads the public release `v<version>` and uploads exactly these files, after checking them against
 its `SHA256SUMS`.
 
-## The third-party lock refresh
+## Locks
 
-Every release run starts with `ccid lock-refresh --third-party` (when the repository tracks a `Cargo.lock`).
-A lock that moves must be part of the commit that is released, so the run does not release: it commits the
-moved locks as one lock-only commit (trailer `CCID-Lock-Refresh: third-party`), pushes it to `main` with the
-job token (to the forge itself, not to a local copy a runner may route to), dispatches `release.yml` on
-`main` and ends green with `released=false`. The new run does the release; its own per-commit verify is the
-proof of the lock commit. Two refreshes in a row are refused (the lock would move on every run), and so is a
-refresh with no git identity (`GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`, or `user.name` and `user.email`) or a
-push the forge refuses (a protected `main`): the message says to commit the lock through the repository's
-flow and release again.
+A release never moves a lock and never pushes to `main` (decision log 2026-11-16): it builds the commit it was
+dispatched on, with the committed locks (`--locked`). Locks move only through the repository's normal flow:
+`ccid lock-refresh` (event-driven, or the daily run of R49) commits a lock-only change that lands like any
+other change, and its own verify run is the proof. A lock that is behind at release time is released as
+committed; advisories stay a check on every commit, so a vulnerable lock is red before any release.
 
 ## JSR
 
