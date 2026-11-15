@@ -408,6 +408,39 @@ fn stripped_profile_variables(declared: &BTreeMap<String, String>) -> Vec<&'stat
     .collect()
 }
 
+/// The read credential for staging siblings in a `--local` run: `CCID_FORGE_TOKEN` when set, else what `git credential fill`
+/// answers for the forge host without prompting (the helper the workstation already uses for it).
+#[cfg(unix)]
+fn local_read_token(server_url: &str, pace: &Pace) -> Result<String> {
+    use std::io::Write;
+    if let Some(token) = std::env::var("CCID_FORGE_TOKEN").ok().filter(|t| !t.is_empty()) {
+        return Ok(token);
+    }
+    let (scheme, rest) = server_url.split_once("://").unwrap_or(("https", server_url));
+    let host = rest.split('/').next().unwrap_or(rest);
+    let mut child = git(pace, Path::new("."))
+        .args(["credential", "fill"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| failure(format!("git credential fill: {error}")))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = write!(stdin, "protocol={scheme}\nhost={host}\n\n");
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| failure(format!("git credential fill: {error}")))?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("password=").map(str::to_owned))
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            failure("--local cannot stage sibling repositories: no read credential (set CCID_FORGE_TOKEN, or let the git credential helper answer for the forge host)")
+        })
+}
+
 /// Run the whole job: claim, fetch, check the adapters, exec the declared command. Does not return on success of the exec.
 #[cfg(unix)]
 pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
@@ -454,7 +487,20 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
             &options.job,
             None,
         )?;
-        return execute_job(options, &exe, plan, None, pace);
+        // A job that declares siblings stages them read-only from the forge, with the READ credential the workstation already has
+        // (CCID_FORGE_TOKEN, else the git credential helper's answer for the forge host); never a write token, never a prompt.
+        let staged = if plan.siblings.is_empty() {
+            None
+        } else {
+            Some((local_read_token(&options.server_url, pace)?, source.clone()))
+        };
+        return execute_job(
+            options,
+            &exe,
+            plan,
+            staged.as_ref().map(|(token, dir)| (token.as_str(), dir.as_path())),
+            pace,
+        );
     }
     let dir = match std::env::var_os("CCID_SOURCE_ROOT").filter(|value| !value.is_empty()) {
         Some(root) => {
