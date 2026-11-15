@@ -413,10 +413,15 @@ fn stripped_profile_variables(declared: &BTreeMap<String, String>) -> Vec<&'stat
 #[cfg(unix)]
 fn local_read_token(server_url: &str, pace: &Pace) -> Result<String> {
     use std::io::Write;
-    if let Some(token) = std::env::var("CCID_FORGE_TOKEN").ok().filter(|t| !t.is_empty()) {
+    if let Some(token) = std::env::var("CCID_FORGE_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty())
+    {
         return Ok(token);
     }
-    let (scheme, rest) = server_url.split_once("://").unwrap_or(("https", server_url));
+    let (scheme, rest) = server_url
+        .split_once("://")
+        .unwrap_or(("https", server_url));
     let host = rest.split('/').next().unwrap_or(rest);
     let mut child = git(pace, Path::new("."))
         .args(["credential", "fill"])
@@ -498,7 +503,9 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
             options,
             &exe,
             plan,
-            staged.as_ref().map(|(token, dir)| (token.as_str(), dir.as_path())),
+            staged
+                .as_ref()
+                .map(|(token, dir)| (token.as_str(), dir.as_path())),
             pace,
         );
     }
