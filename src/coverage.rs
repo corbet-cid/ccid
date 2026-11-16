@@ -732,18 +732,22 @@ fn emitted_branches(
     Ok(())
 }
 
-/// Gate emitted production lines and branches from one LLVM execution.
-///
-/// Pure: reads repository files for exclusion evidence but no process
-/// environment. The `Err` message is the text after `Coverage gate: `.
-pub fn gate(
+/// One LLVM execution's emitted production lines and branches: the raw JSON
+/// inventory, cross-checked against the LCOV report of the same execution.
+struct Evidence {
+    root: PathBuf,
+    files: BTreeSet<String>,
+    lines: BTreeMap<(String, u64), u64>,
+    branches: BTreeMap<(String, u64, u64, u64), u64>,
+}
+
+/// Read the raw JSON export and its LCOV report and cross-check them (the
+/// inventory part of [`gate`], shared with [`totals`]).
+fn evidence(
     lcov: &str,
     raw_json: &serde_json::Value,
-    annotated: &str,
     root: &Path,
-    exclusions: &[Exclusion],
-    target: Target,
-) -> std::result::Result<Report, String> {
+) -> std::result::Result<Evidence, String> {
     let root = resolve_root(root);
     if raw_json.get("type").and_then(|kind| kind.as_str()) != Some("llvm.coverage.json.export")
         || raw_json
@@ -959,10 +963,115 @@ pub fn gate(
             return Err("Missing emitted branch locations".to_owned());
         }
     }
+    Ok(Evidence {
+        root,
+        files,
+        lines,
+        branches,
+    })
+}
 
+/// The exclusions of one target, each validated and held to the evidence.
+struct Excluded<'a> {
+    /// How many exclusions name the target.
+    applied: usize,
+    lines: BTreeMap<(String, u64), &'a Exclusion>,
+    branches: BTreeMap<(String, u64, u64, u64), &'a Exclusion>,
+}
+
+/// Validate every exclusion and keep those of `target`: each must name an
+/// emitted, unexecuted line or branch arm of the evidence, and a line
+/// exclusion must come with every branch arm on its line.
+fn excluded<'a>(
+    exclusions: &'a [Exclusion],
+    target: Target,
+    root: &Path,
+    lines: &BTreeMap<(String, u64), u64>,
+    branches: &BTreeMap<(String, u64, u64, u64), u64>,
+) -> std::result::Result<Excluded<'a>, String> {
+    for entry in exclusions {
+        validate_exclusion(entry, root)?;
+    }
+    let mut applied: Vec<Applied<'_>> = Vec::new();
+    for entry in exclusions {
+        if entry.targets.iter().any(|name| name == target.as_str()) {
+            let branch = entry.branch.as_ref().map(|value| {
+                let table = value.as_table().expect("validated branch arm");
+                (
+                    table["block"].as_integer().unwrap_or(0) as u64,
+                    table["id"].as_integer().unwrap_or(0) as u64,
+                )
+            });
+            let absolute = absolutize(Path::new(&entry.file), root);
+            let file = production_path(&absolute, root)
+                .map_err(|_| "Exclusion must identify production Rust source".to_owned())?;
+            applied.push((entry, file, entry.line as u64, branch));
+        }
+    }
+    let mut allowed: BTreeMap<(String, u64), &Exclusion> = BTreeMap::new();
+    let mut allowed_branches: BTreeMap<(String, u64, u64, u64), &Exclusion> = BTreeMap::new();
+    for (entry, file, line, branch) in &applied {
+        if let Some((block, id)) = branch {
+            if allowed_branches
+                .insert((file.clone(), *line, *block, *id), *entry)
+                .is_some()
+            {
+                return Err("Duplicate branch exclusion".to_owned());
+            }
+        } else if allowed.insert((file.clone(), *line), *entry).is_some() {
+            return Err("Duplicate line exclusion".to_owned());
+        }
+    }
+
+    if !allowed.keys().all(|key| lines.contains_key(key)) {
+        return Err("Exclusion absent from actual LLVM evidence".to_owned());
+    }
+    if allowed.keys().any(|key| lines[key] != 0) {
+        return Err("Excluded line exercised; remove its exception".to_owned());
+    }
+    for key in branches.keys() {
+        if allowed.contains_key(&(key.0.clone(), key.1)) && !allowed_branches.contains_key(key) {
+            return Err("Line exception requires every contained branch arm".to_owned());
+        }
+    }
+    if !allowed_branches
+        .keys()
+        .all(|key| branches.contains_key(key))
+    {
+        return Err("Branch exclusion absent from actual LLVM evidence".to_owned());
+    }
+    if allowed_branches.keys().any(|key| branches[key] != 0) {
+        return Err("Excluded branch exercised; remove its exception".to_owned());
+    }
+    Ok(Excluded {
+        applied: applied.len(),
+        lines: allowed,
+        branches: allowed_branches,
+    })
+}
+
+/// Gate emitted production lines and branches from one LLVM execution.
+///
+/// Pure: reads repository files for exclusion evidence but no process
+/// environment. The `Err` message is the text after `Coverage gate: `.
+pub fn gate(
+    lcov: &str,
+    raw_json: &serde_json::Value,
+    annotated: &str,
+    root: &Path,
+    exclusions: &[Exclusion],
+    target: Target,
+) -> std::result::Result<Report, String> {
+    let Evidence {
+        root,
+        files,
+        mut lines,
+        mut branches,
+        ..
+    } = evidence(lcov, raw_json, root)?;
     let mut annotated_lines: BTreeMap<(String, u64), bool> = BTreeMap::new();
     let mut annotated_files: BTreeSet<String> = BTreeSet::new();
-    current = None;
+    let mut current: Option<String> = None;
     let has_heading = annotated
         .split('\n')
         .any(|row| row.starts_with('/') && row.ends_with(".rs:"));
@@ -1011,68 +1120,15 @@ pub fn gate(
         return Err("Inconsistent emitted line coverage".to_owned());
     }
 
-    for entry in exclusions {
-        validate_exclusion(entry, &root)?;
-    }
-    let mut applied: Vec<Applied<'_>> = Vec::new();
-    for entry in exclusions {
-        if entry.targets.iter().any(|name| name == target.as_str()) {
-            let branch = entry.branch.as_ref().map(|value| {
-                let table = value.as_table().expect("validated branch arm");
-                (
-                    table["block"].as_integer().unwrap_or(0) as u64,
-                    table["id"].as_integer().unwrap_or(0) as u64,
-                )
-            });
-            let absolute = absolutize(Path::new(&entry.file), &root);
-            let file = production_path(&absolute, &root)
-                .map_err(|_| "Exclusion must identify production Rust source".to_owned())?;
-            applied.push((entry, file, entry.line as u64, branch));
-        }
-    }
-    let mut allowed: BTreeMap<(String, u64), &Exclusion> = BTreeMap::new();
-    let mut allowed_branches: BTreeMap<(String, u64, u64, u64), &Exclusion> = BTreeMap::new();
-    for (entry, file, line, branch) in &applied {
-        if let Some((block, id)) = branch {
-            if allowed_branches
-                .insert((file.clone(), *line, *block, *id), *entry)
-                .is_some()
-            {
-                return Err("Duplicate branch exclusion".to_owned());
-            }
-        } else if allowed.insert((file.clone(), *line), *entry).is_some() {
-            return Err("Duplicate line exclusion".to_owned());
-        }
-    }
-
-    if !allowed.keys().all(|key| lines.contains_key(key)) {
-        return Err("Exclusion absent from actual LLVM evidence".to_owned());
-    }
-    if allowed.keys().any(|key| lines[key] != 0) {
-        return Err("Excluded line exercised; remove its exception".to_owned());
-    }
-    for key in branches.keys() {
-        if allowed.contains_key(&(key.0.clone(), key.1)) && !allowed_branches.contains_key(key) {
-            return Err("Line exception requires every contained branch arm".to_owned());
-        }
-    }
-    if !allowed_branches
-        .keys()
-        .all(|key| branches.contains_key(key))
-    {
-        return Err("Branch exclusion absent from actual LLVM evidence".to_owned());
-    }
-    if allowed_branches.keys().any(|key| branches[key] != 0) {
-        return Err("Excluded branch exercised; remove its exception".to_owned());
-    }
+    let excluded = excluded(exclusions, target, &root, &lines, &branches)?;
     let mut report = Report::default();
-    for ((file, line), entry) in &allowed {
+    for ((file, line), entry) in &excluded.lines {
         report
             .output
             .push(format!("Excluded line: {file}:{line} {}", entry.reason));
         lines.remove(&(file.clone(), *line));
     }
-    for ((file, line, block, id), entry) in &allowed_branches {
+    for ((file, line, block, id), entry) in &excluded.branches {
         report.output.push(format!(
             "Excluded branch: {file}:{line}:{block}:{id} {}",
             entry.reason
@@ -1099,7 +1155,7 @@ pub fn gate(
         report.output.push(format!(
             "lines: {covered_lines}/{}; exclusions: {}",
             lines.len(),
-            applied.len()
+            excluded.applied
         ));
     }
     report
@@ -1115,14 +1171,108 @@ pub fn gate(
     Ok(report)
 }
 
+/// The declared exclusions the totals gate accounts for, with the LCOV report
+/// of the same execution that shows each excluded line or arm unexecuted.
+pub struct TotalsExclusions<'a> {
+    pub lcov: &'a str,
+    /// Repository root the reports and exclusions resolve against.
+    pub root: &'a Path,
+    pub exclusions: &'a [Exclusion],
+    pub target: Target,
+}
+
+/// Emitted lines or branch arms of one file or unit: `[executed, emitted, excluded]`.
+type Tally = [i64; 3];
+
+/// Per unit of the raw JSON export, the line and branch-arm [`Tally`] the
+/// exclusions of the target are accounted in.
+///
+/// The raw JSON and LCOV reports are cross-checked as in [`gate`], and every
+/// exclusion is held to them as there: it names an emitted line or branch arm
+/// the execution left unexecuted. Per file, the emitted count must then equal
+/// the executed count plus the excluded one, so the excluded lines and arms
+/// are exactly the file's unexecuted ones: an exclusion balances one real gap
+/// and cannot stand in for another line, arm or file. The counts are those of
+/// the emitted inventory (LCOV `DA` and `BRDA`, one per line and arm), not the
+/// JSON summaries: those count a line once per function group that maps it
+/// (an async fn and its body closure share lines) and a group's arms by its
+/// best instantiation, so no exclusion of a line can balance them.
+fn accounted(
+    raw_json: &serde_json::Value,
+    declared: &TotalsExclusions<'_>,
+) -> std::result::Result<Vec<[Tally; 2]>, String> {
+    let evidence = evidence(declared.lcov, raw_json, declared.root)?;
+    let excluded = excluded(
+        declared.exclusions,
+        declared.target,
+        &evidence.root,
+        &evidence.lines,
+        &evidence.branches,
+    )?;
+    let mut per_file: BTreeMap<&str, [Tally; 2]> = BTreeMap::new();
+    for ((file, _), count) in &evidence.lines {
+        let tally = &mut per_file.entry(file.as_str()).or_default()[0];
+        tally[0] += i64::from(*count > 0);
+        tally[1] += 1;
+    }
+    for ((file, _, _, _), count) in &evidence.branches {
+        let tally = &mut per_file.entry(file.as_str()).or_default()[1];
+        tally[0] += i64::from(*count > 0);
+        tally[1] += 1;
+    }
+    for (file, _) in excluded.lines.keys() {
+        per_file.entry(file.as_str()).or_default()[0][2] += 1;
+    }
+    for (file, _, _, _) in excluded.branches.keys() {
+        per_file.entry(file.as_str()).or_default()[1][2] += 1;
+    }
+    let mut failures = Vec::new();
+    for (file, tallies) in &per_file {
+        for (metric, [executed, emitted, excluded]) in
+            [("lines", tallies[0]), ("branches", tallies[1])]
+        {
+            if executed + excluded != emitted {
+                failures.push(format!(
+                    "{metric}: {file}: {} uncovered, {excluded} excluded",
+                    emitted - executed
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
+    }
+    let mut units = Vec::new();
+    for unit in raw_json["data"].as_array().expect("checked data array") {
+        let mut sum = [[0i64; 3]; 2];
+        for item in unit["files"].as_array().expect("checked unit files") {
+            let name = item["filename"].as_str().expect("checked file name");
+            let file = source_path(name, &evidence.root)?;
+            let tallies = per_file.get(file.as_str()).copied().unwrap_or_default();
+            for (total, tally) in sum.iter_mut().zip(tallies) {
+                for (slot, value) in total.iter_mut().zip(tally) {
+                    *slot += value;
+                }
+            }
+        }
+        units.push(sum);
+    }
+    Ok(units)
+}
+
 /// Gate exact LLVM line and branch counts, without rounded percentages.
 ///
 /// With `require_sources`, every `**/*.rs` below that directory (resolved
 /// against the current directory) must appear among the report's file names.
-/// Each returned string is one stdout line.
+/// With `exclusions` of which at least one names its target, every emitted
+/// line and arm must be executed or excluded, each excluded one a real
+/// unexecuted one of the same execution (see [`accounted`]); otherwise every
+/// raw JSON count must be covered exactly. Each returned string is one stdout
+/// line.
 pub fn totals(
     raw_json: &serde_json::Value,
     require_sources: Option<&Path>,
+    exclusions: Option<&TotalsExclusions<'_>>,
 ) -> std::result::Result<Vec<String>, String> {
     if raw_json.get("type").and_then(|kind| kind.as_str()) != Some("llvm.coverage.json.export")
         || raw_json
@@ -1164,12 +1314,29 @@ pub fn totals(
             ));
         }
     }
+    let declared = exclusions.filter(|declared| {
+        declared.exclusions.iter().any(|entry| {
+            entry
+                .targets
+                .iter()
+                .any(|name| name == declared.target.as_str())
+        })
+    });
+    let accounted = match declared {
+        Some(declared) => Some(accounted(raw_json, declared)?),
+        None => None,
+    };
     let mut output = Vec::new();
     let mut failures = Vec::new();
     let mut lines = 0i64;
-    for unit in raw_json["data"].as_array().expect("checked data array") {
+    for (index, unit) in raw_json["data"]
+        .as_array()
+        .expect("checked data array")
+        .iter()
+        .enumerate()
+    {
         let unit_totals = unit.get("totals");
-        for metric in ["lines", "branches"] {
+        for (slot, metric) in ["lines", "branches"].into_iter().enumerate() {
             let value = unit_totals.and_then(|totals| totals.get(metric));
             let count = value
                 .and_then(|value| value.get("count"))
@@ -1186,9 +1353,20 @@ pub fn totals(
             if metric == "lines" {
                 lines += count;
             }
-            output.push(format!("{metric}: {covered}/{count}"));
-            if covered != count {
-                failures.push(format!("{metric}: {} uncovered", count - covered));
+            match &accounted {
+                // Every file balanced in `accounted`, so its unit does as well.
+                Some(units) => {
+                    let [executed, emitted, excluded] = units[index][slot];
+                    output.push(format!(
+                        "{metric}: {executed}/{emitted}; excluded: {excluded}"
+                    ));
+                }
+                None => {
+                    output.push(format!("{metric}: {covered}/{count}"));
+                    if covered != count {
+                        failures.push(format!("{metric}: {} uncovered", count - covered));
+                    }
+                }
             }
         }
     }
@@ -1567,7 +1745,7 @@ pub fn run(action: Action) -> Result<u8> {
                     return Ok(1);
                 }
             };
-            match totals(&raw, require_sources.as_deref()) {
+            match totals(&raw, require_sources.as_deref(), None) {
                 Ok(output) => {
                     for line in output {
                         println!("{line}");
@@ -1790,7 +1968,13 @@ fn run_gates(root: &Path, reports: &Path, config: &Config, gates: &[Gate], targe
                     .require_sources
                     .as_ref()
                     .map(|directory| root.join(directory));
-                totals(&raw, required.as_deref())
+                let declared = TotalsExclusions {
+                    lcov: &texts[1],
+                    root,
+                    exclusions: &config.exclusions,
+                    target,
+                };
+                totals(&raw, required.as_deref(), Some(&declared))
             }
             Gate::Source => gate(&texts[1], &raw, &texts[2], root, &config.exclusions, target)
                 .map(|report| report.output),

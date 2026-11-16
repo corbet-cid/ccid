@@ -1318,7 +1318,7 @@ fn totals_raw() -> serde_json::Value {
 #[test]
 fn totals_complete_counts_pass() {
     assert_eq!(
-        totals(&totals_raw(), None).expect("complete totals"),
+        totals(&totals_raw(), None, None).expect("complete totals"),
         ["lines: 2/2", "branches: 2/2"]
     );
 }
@@ -1327,21 +1327,21 @@ fn totals_complete_counts_pass() {
 fn totals_uncovered_invalid_or_empty_refuse() {
     let mut uncovered = totals_raw();
     uncovered["data"][0]["totals"]["lines"]["covered"] = serde_json::json!(1);
-    assert!(totals(&uncovered, None).is_err());
+    assert!(totals(&uncovered, None, None).is_err());
     let mut invalid = totals_raw();
     invalid["data"][0]["totals"]["lines"]["covered"] = serde_json::json!(3);
     assert_eq!(
-        refused(&totals(&invalid, None).map(|lines| Report { output: lines })),
+        refused(&totals(&invalid, None, None).map(|lines| Report { output: lines })),
         "Invalid lines counts"
     );
     let mut empty = totals_raw();
     empty["data"][0]["totals"]["lines"] = serde_json::json!({"count": 0, "covered": 0});
     empty["data"][0]["totals"]["branches"] = serde_json::json!({"count": 0, "covered": 0});
     assert_eq!(
-        refused(&totals(&empty, None).map(|lines| Report { output: lines })),
+        refused(&totals(&empty, None, None).map(|lines| Report { output: lines })),
         "Empty line coverage cannot pass"
     );
-    assert!(totals(&serde_json::json!({}), None).is_err());
+    assert!(totals(&serde_json::json!({}), None, None).is_err());
 }
 
 #[test]
@@ -1359,9 +1359,151 @@ fn totals_require_sources_lists_missing_files() {
              "files": [{"filename": root.join("src/lib.rs").display().to_string()}]},
         ],
     });
-    let error = totals(&raw, Some(root)).expect_err("missing source must refuse");
+    let error = totals(&raw, Some(root), None).expect_err("missing source must refuse");
     assert!(error.starts_with("Missing production sources: "), "{error}");
     assert!(error.contains("src/missing.rs"), "{error}");
+}
+
+/// The let-else fixture (lines 2, 4 and 5 unexecuted, line 3 unrecorded) with
+/// the unit totals its per-file summary adds up to.
+fn totals_excluded_case() -> CplcCase {
+    let mut case = let_else_case();
+    case.raw["data"][0]["totals"] = serde_json::json!({
+        "lines": {"count": 4, "covered": 1},
+        "branches": {"count": 2, "covered": 2},
+    });
+    case
+}
+
+fn excluded_totals(
+    case: &CplcCase,
+    raw: &serde_json::Value,
+    exclusions: &[Exclusion],
+) -> std::result::Result<Vec<String>, String> {
+    let declared = TotalsExclusions {
+        lcov: &case.lcov,
+        root: &case.root,
+        exclusions,
+        target: Target::Native,
+    };
+    totals(raw, Some(&case.root.join("src")), Some(&declared))
+}
+
+#[test]
+fn totals_account_for_exclusions_that_balance_real_gaps() {
+    let case = totals_excluded_case();
+    assert_eq!(
+        excluded_totals(&case, &case.raw, &let_else_exclusions())
+            .expect("every uncovered line is excluded"),
+        ["lines: 1/4; excluded: 3", "branches: 2/2; excluded: 0"]
+    );
+    // Without exclusions, or with none for this target, the totals stay exact.
+    assert_eq!(
+        excluded_totals(&case, &case.raw, &[]).expect_err("exact totals"),
+        "lines: 3 uncovered"
+    );
+    let wasm_only: Vec<Exclusion> = let_else_exclusions()
+        .into_iter()
+        .map(|entry| Exclusion {
+            targets: vec!["wasm".to_owned()],
+            ..entry
+        })
+        .collect();
+    assert_eq!(
+        excluded_totals(&case, &case.raw, &wasm_only).expect_err("exact totals"),
+        "lines: 3 uncovered"
+    );
+}
+
+#[test]
+fn totals_exclusions_cannot_hide_a_file_or_another_line() {
+    let case = totals_excluded_case();
+    // A source file the report never reached still refuses.
+    fs::write(case.root.join("src/missing.rs"), "fn other() {}\n").expect("missing source");
+    let error = excluded_totals(&case, &case.raw, &let_else_exclusions())
+        .expect_err("a missing source refuses");
+    assert!(
+        error.starts_with("Missing production sources: ") && error.contains("src/missing.rs"),
+        "{error}"
+    );
+    fs::remove_file(case.root.join("src/missing.rs")).expect("remove missing source");
+    // An uncovered line no exclusion names stays a gap.
+    let partial: Vec<Exclusion> = let_else_exclusions()
+        .into_iter()
+        .filter(|entry| entry.line != 5)
+        .collect();
+    assert_eq!(
+        excluded_totals(&case, &case.raw, &partial).expect_err("line 5 is uncovered"),
+        "lines: src/lib.rs: 3 uncovered, 2 excluded"
+    );
+    // An exclusion over a covered line cannot stand in for the uncovered one.
+    let mut over_covered = partial.clone();
+    over_covered.push(Exclusion {
+        line: 1,
+        source: Some(
+            LET_ELSE_SOURCE
+                .lines()
+                .next()
+                .expect("line 1")
+                .trim()
+                .to_owned(),
+        ),
+        ..cplc_exclusion()
+    });
+    assert_eq!(
+        excluded_totals(&case, &case.raw, &over_covered).expect_err("line 1 is covered"),
+        "Excluded line exercised; remove its exception"
+    );
+    // Nor can one over a line the execution does not record.
+    let mut unrecorded = partial;
+    unrecorded.push(Exclusion {
+        line: 3,
+        source: Some(
+            LET_ELSE_SOURCE
+                .lines()
+                .nth(2)
+                .expect("line 3")
+                .trim()
+                .to_owned(),
+        ),
+        ..cplc_exclusion()
+    });
+    assert_eq!(
+        excluded_totals(&case, &case.raw, &unrecorded).expect_err("line 3 is unrecorded"),
+        "Exclusion absent from actual LLVM evidence"
+    );
+    // The JSON summaries count a line once per function group that maps it
+    // (here the async fn and its body closure both map line 2) and so exceed
+    // the emitted inventory; the exclusions balance that inventory regardless.
+    let mut grouped = case.raw.clone();
+    let doubled = serde_json::json!({"count": 6, "covered": 2});
+    grouped["data"][0]["files"][0]["summary"]["lines"] = doubled.clone();
+    grouped["data"][0]["totals"]["lines"] = doubled;
+    let grouped_lcov = case.lcov.replace("LF:4\nLH:1", "LF:6\nLH:2");
+    let declared = TotalsExclusions {
+        lcov: &grouped_lcov,
+        root: &case.root,
+        exclusions: &let_else_exclusions(),
+        target: Target::Native,
+    };
+    assert_eq!(
+        totals(&grouped, None, Some(&declared)).expect("the emitted inventory balances"),
+        ["lines: 1/4; excluded: 3", "branches: 2/2; excluded: 0"]
+    );
+    // The reports are cross-checked as in the source gate: an LCOV summary
+    // the raw JSON disagrees with refuses.
+    let inconsistent = case.lcov.replace("LF:4", "LF:5");
+    let declared = TotalsExclusions {
+        lcov: &inconsistent,
+        root: &case.root,
+        exclusions: &let_else_exclusions(),
+        target: Target::Native,
+    };
+    let file = "src/lib.rs";
+    assert_eq!(
+        totals(&case.raw, None, Some(&declared)).expect_err("LCOV disagrees"),
+        format!("Inconsistent LF for {file}")
+    );
 }
 
 // Converter shapes and the three committed fixtures.

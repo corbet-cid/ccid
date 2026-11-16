@@ -358,6 +358,37 @@ fn run_both_gates_read_the_same_single_execution() {
 }
 
 #[test]
+fn run_totals_account_for_the_declared_exclusions_and_still_require_every_source() {
+    let manifest = "schema = 1\nproject = \"p\"\n[coverage]\ngates = [\"totals\", \"source\"]\n\
+        require_sources = \"src\"\n\
+        [[coverage.exclusions]]\nfile = \"src/lib.rs\"\nline = 2\nsource = \"second source line\"\n\
+        reason = \"unreachable\"\ntargets = [\"native\"]\n";
+    let fixture = Fixture::new(manifest);
+    fixture.reports(0);
+    let output = fixture.run();
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "cargo-llvm-cov 0.0.0-stub\nlines: 1/2; excluded: 1\nbranches: 2/2; excluded: 0\n\
+         Excluded line: src/lib.rs:2 unreachable\nlines: 1/1; exclusions: 1\nbranches: 2/2\n"
+    );
+    // A source file the execution never reached still refuses.
+    fs::write(
+        fixture.repo().join("src/unreached.rs"),
+        "fn unreached() {}\n",
+    )
+    .unwrap();
+    let output = fixture.run();
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Coverage gate: Missing production sources: ")
+            && stderr.contains("src/unreached.rs"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn run_tool_failure_is_exit_one_and_removes_the_target() {
     let fixture = Fixture::new("schema = 1\nproject = \"p\"\n");
     fixture.touch("fail_lcov");

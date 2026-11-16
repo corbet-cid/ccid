@@ -43,7 +43,7 @@ the shared verify scripts:
 | `report` | `["--branch", "--ignore-filename-regex", "/tests/"]` | Arguments of both reports |
 | `text` | `[]` | Extra arguments of the text report only (for example `["--show-instantiations"]`) |
 | `gates` | `["source"]` | Ordered subset of `"totals"`, `"source"`; empty, unknown or repeated names are refused |
-| `require_sources` | none | The totals gate's `--require-sources`, relative to `--repo`; needs `"totals"` in `gates` |
+| `require_sources` | none | The totals gate's `--require-sources`, relative to `--repo`; needs `"totals"` in `gates`; holds next to exclusions, which the totals gate accounts for (see [Totals gate](#totals-gate)) |
 | `wasm` | none | `[coverage.wasm]`: see below |
 | `artifacts` | `false` | Copy the reports that exist to `$ARTIFACT_ROOT` after the run, also on failure |
 
@@ -186,6 +186,28 @@ shortfall refuses. With `--require-sources`, every `**/*.rs` below `DIR`
 (resolved against the current directory) must appear among the report's file
 names, else `Missing production sources: <sorted absolute paths>`. Refusals
 print `Coverage gate: <message>` and exit 1.
+
+Inside `ccid coverage run`, the totals gate accounts for the declared
+exclusions when at least one names the run's target (the standalone command
+takes none). The raw JSON and LCOV reports of the execution are then
+cross-checked as in the source gate, and every exclusion is held to them the
+same way: validated, and naming an emitted line or arm the execution left
+unexecuted. Per file, the emitted count must equal the executed count plus
+the excluded one, for lines and for branch arms, so the excluded lines and
+arms are exactly the file's unexecuted ones; otherwise it refuses with
+`lines: <file>: <n> uncovered, <m> excluded` (or `branches: ...`). So an
+exclusion balances one real gap and never hides a missing file or another
+line, and `require_sources` stays meaningful next to approved exclusions.
+Each unit then prints `lines: <executed>/<emitted>; excluded: <n>` and
+`branches: <executed>/<emitted>; excluded: <n>`.
+
+These counts are the emitted inventory, one per LCOV `DA` line and `BRDA`
+arm, which the gate cross-checks against the raw JSON. The JSON summaries
+cannot be balanced by excluding lines: they count a line once per function
+group that maps it (an async fn and its body closure share lines) and a
+group's arms by its best instantiation. On a real report the summary said
+3497 lines and 468 arms for 3339 `DA` lines and 468 `BRDA` arms, of which
+3317 lines and 399 arms executed but only 367 arms by the summary.
 
 ## Converter
 
