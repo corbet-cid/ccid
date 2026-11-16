@@ -37,6 +37,7 @@ pub mod coverage;
 mod dependency;
 pub mod first_party;
 mod fixtures;
+mod heavy_lock;
 pub mod fleet;
 pub mod float;
 #[cfg(unix)]

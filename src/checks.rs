@@ -133,6 +133,8 @@ pub(crate) fn nix_check(check: &Check, runner: &mut Runner) -> Result<()> {
         ));
     }
     let mode = nix_mode(check)?;
+    // The inventory evaluation and the flake check are the heavy whole-flake steps: serialised per machine (heavy_lock.rs), held until this function returns.
+    let _heavy_lock = crate::heavy_lock::HeavyLock::acquire("nix flake check")?;
     if runner.nix_inventory.is_none() {
         let system = runner.run(
             &strings(&[
