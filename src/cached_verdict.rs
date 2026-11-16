@@ -2591,11 +2591,23 @@ mod own_tool_tests {
         let copy = dir.path().join("blocker");
         fs::copy(bash, &copy).unwrap();
         let expected = crate::sha256_file(&copy).unwrap();
-        let mut child = std::process::Command::new(&copy)
-            .args(["-c", "read line"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        // A concurrent test thread that forks while `fs::copy` still has the file open for writing keeps that descriptor in its child until the child's own exec, and
+        // executing the copy then fails with ETXTBSY ("Text file busy", os error 26). The condition ends within milliseconds: retry with a bounded backoff.
+        let mut attempt = 0;
+        let mut child = loop {
+            match std::process::Command::new(&copy)
+                .args(["-c", "read line"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(26) && attempt < 200 => {
+                    attempt += 1;
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => panic!("cannot start the copied binary: {error}"),
+            }
+        };
         fs::remove_file(&copy).unwrap();
         let link = PathBuf::from(format!("/proc/{}/exe", child.id()));
         assert_eq!(hash_running_exe(&link).unwrap(), expected);
