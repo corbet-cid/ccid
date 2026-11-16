@@ -141,10 +141,14 @@ impl HeavyLock {
     pub fn acquire(what: &str) -> crate::Result<HeavyLock> {
         let get = |name: &str| std::env::var(name).ok();
         let none = HeavyLock { _file: None };
-        // ccid's own unit tests drive nix_check with stub commands: they must never queue on the host's real lock (2026-11-16: the verify job waited 45 min on it and timed out)
-        if cfg!(test) {
-            return Ok(none);
-        }
+        // ccid's own unit tests drive nix_check with stubs: the lock code runs for real, but on a file of this test process (never the host's lock: 2026-11-16 the 3c6da8b verify job queued
+        // 45 min on the srv runner's real lock behind a congested queue). Integration tests (tests/it) compile the crate normally and see the declared environment as any caller does.
+        #[cfg(test)]
+        let path = std::env::temp_dir().join(format!(
+            "ccid-unit-test-{}.heavy-eval.lock",
+            std::process::id()
+        ));
+        #[cfg(not(test))]
         let Some(path) = lock_path(&get, Path::new("/etc/corbet/heavy-lock-path")) else {
             return Ok(none);
         };
@@ -287,13 +291,8 @@ mod tests {
             &proc_locks,
             &ancestors(std::process::id())
         ));
+        // No negative check after the drop: a sibling test thread that forks while these descriptors are open keeps the open file description, and so the lock, alive until its child execs.
         drop((fa, fb, second));
-        let proc_locks = fs::read_to_string("/proc/locks").unwrap();
-        assert!(!ancestor_holds(
-            &a,
-            &proc_locks,
-            &ancestors(std::process::id())
-        ));
         fs::remove_dir_all(&tmp).unwrap();
     }
 }
