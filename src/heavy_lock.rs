@@ -89,13 +89,17 @@ fn ancestor_holds(lock: &Path, proc_locks: &str, chain: &[u32]) -> bool {
     };
     let mut files: Vec<PathBuf> = vec![lock.to_path_buf()];
     files.extend(entries.flatten().map(|e| e.path()).filter(|p| {
-        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-            n.starts_with("heavy-eval") && n.ends_with(".lock")
-        })
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("heavy-eval") && n.ends_with(".lock"))
     }));
     files.iter().any(|file| {
         fs::metadata(file)
-            .map(|m| holders(proc_locks, m.ino()).iter().any(|h| chain.contains(h)))
+            .map(|m| {
+                holders(proc_locks, m.ino())
+                    .iter()
+                    .any(|h| chain.contains(h))
+            })
             .unwrap_or(false)
     })
 }
@@ -160,19 +164,25 @@ impl HeavyLock {
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => {}
             Err(rustix::io::Errno::WOULDBLOCK) => {
-                let note = fs::read_to_string(format!("{}.holder", path.display()))
-                    .unwrap_or_default();
+                let note =
+                    fs::read_to_string(format!("{}.holder", path.display())).unwrap_or_default();
                 eprintln!(
                     "ccid: waiting for the heavy-eval lock {} held by {}",
                     path.display(),
-                    note.trim().split('\n').next().filter(|n| !n.is_empty()).unwrap_or("unknown")
+                    note.trim()
+                        .split('\n')
+                        .next()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or("unknown")
                 );
                 loop {
                     match rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive) {
                         Ok(()) => break,
                         Err(rustix::io::Errno::INTR) => {
                             if crate::INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) {
-                                return Err(crate::failure("[heavy-lock] interrupted while waiting"));
+                                return Err(crate::failure(
+                                    "[heavy-lock] interrupted while waiting",
+                                ));
                             }
                         }
                         Err(e) => {
@@ -244,21 +254,42 @@ mod tests {
     fn two_callers_on_one_file_serialise_and_a_second_file_does_not_wait() {
         let tmp = std::env::temp_dir().join(format!("ccid-hl2-{}", std::process::id()));
         fs::create_dir_all(&tmp).unwrap();
-        let (a, b) = (tmp.join("heavy-eval-ci-0.lock"), tmp.join("heavy-eval-ci-1.lock"));
-        let open = |p: &Path| OpenOptions::new().append(true).create(true).open(p).unwrap();
+        let (a, b) = (
+            tmp.join("heavy-eval-ci-0.lock"),
+            tmp.join("heavy-eval-ci-1.lock"),
+        );
+        let open = |p: &Path| {
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(p)
+                .unwrap()
+        };
         let (fa, fb) = (open(&a), open(&b));
         rustix::fs::flock(&fa, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         // the same file refuses a second holder (flock locks belong to the open file description) ...
         let second = open(&a);
-        assert!(rustix::fs::flock(&second, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err());
+        assert!(rustix::fs::flock(
+            &second,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive
+        )
+        .is_err());
         // ... another pool file is free
         rustix::fs::flock(&fb, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         // an ancestor (here: this very process) holding a pool file makes a nested call pass through
         let proc_locks = fs::read_to_string("/proc/locks").unwrap();
-        assert!(ancestor_holds(&b, &proc_locks, &ancestors(std::process::id())));
+        assert!(ancestor_holds(
+            &b,
+            &proc_locks,
+            &ancestors(std::process::id())
+        ));
         drop((fa, fb, second));
         let proc_locks = fs::read_to_string("/proc/locks").unwrap();
-        assert!(!ancestor_holds(&a, &proc_locks, &ancestors(std::process::id())));
+        assert!(!ancestor_holds(
+            &a,
+            &proc_locks,
+            &ancestors(std::process::id())
+        ));
         fs::remove_dir_all(&tmp).unwrap();
     }
 }
