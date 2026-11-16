@@ -2034,7 +2034,8 @@ fn missing_emitted_branch_location_still_refuses() {
         check(&case.lcov, &beside_executed),
         "Missing emitted branch locations"
     );
-    // A folded region on a line LCOV does not report at all.
+    // A folded region on a line LCOV does not report at all, in an export
+    // without per-file segments: nothing shows the line unexecuted.
     let mut unreported = case.raw.clone();
     for index in [1, 2] {
         unreported["data"][0]["files"][0]["branches"][index] =
@@ -2070,6 +2071,180 @@ fn missing_emitted_branch_location_still_refuses() {
         check(&case.lcov, &listless),
         "Missing emitted branch locations"
     );
+}
+
+// A let-else pattern alone on its line (`let Some(record) =`) inside an async
+// fn that never ran: the folded branch region starts on that line, but no code
+// region does, so LCOV records no line for it at all. Minimized from a
+// downstream credential store's write path.
+
+const LET_ELSE_SOURCE: &str = "pub fn covered(flag: bool) -> u8 { if flag { 1 } else { 2 } }\n\
+    pub async fn write(&self) -> u8 { let store = self.store().await;\n\
+    let Some(record) =\n\
+    lookup(&store) else { return 0 };\n\
+    record }\n";
+
+fn let_else_case() -> CplcCase {
+    let directory = tempfile::tempdir().expect("let-else fixture");
+    let root = directory.path().canonicalize().expect("canonical root");
+    fs::create_dir_all(root.join("src")).expect("src");
+    fs::write(root.join("src/lib.rs"), LET_ELSE_SOURCE).expect("source");
+    let source = format!("{}/src/lib.rs", root.display());
+    let executed = serde_json::json!([1, 38, 1, 42, 2, 1, 0, 0, 4]);
+    let folded = serde_json::json!([3, 5, 3, 17, 0, 0, 0, 0, 4]);
+    let raw = serde_json::json!({
+        "type": "llvm.coverage.json.export",
+        "data": [{
+            "files": [{
+                "filename": source,
+                "branches": [executed, folded, folded],
+                // Line 2's last segment carries no count into line 3.
+                "segments": [
+                    [1, 1, 3, true, true, false],
+                    [1, 63, 0, false, false, false],
+                    [2, 33, 0, true, true, false],
+                    [2, 66, 0, false, false, false],
+                    [4, 1, 0, true, true, false],
+                    [4, 34, 0, false, false, false],
+                    [5, 1, 0, true, true, false],
+                    [5, 9, 0, false, false, false],
+                ],
+                "summary": {
+                    "lines": {"count": 4, "covered": 1},
+                    "branches": {"count": 2, "covered": 2},
+                },
+            }],
+            "functions": [
+                {
+                    "name": "covered",
+                    "count": 3,
+                    "filenames": [source],
+                    "regions": [[1, 1, 1, 63, 3, 0, 0, 0]],
+                    "branches": [executed],
+                    "mcdc_records": [],
+                },
+                {
+                    "name": "write",
+                    "count": 0,
+                    "filenames": [source],
+                    "regions": [[2, 33, 5, 9, 0, 0, 0, 0]],
+                    "branches": [],
+                    "mcdc_records": [],
+                },
+            ],
+        }],
+    });
+    let lcov = format!(
+        "SF:{source}\nDA:1,3\nDA:2,0\nDA:4,0\nDA:5,0\nLF:4\nLH:1\n\
+         BRDA:1,0,0,2\nBRDA:1,0,1,1\nBRF:2\nBRH:2\nend_of_record\n"
+    );
+    let rows: Vec<&str> = LET_ELSE_SOURCE.lines().collect();
+    let annotated = format!(
+        "{source}:\n    1| 3|{}\n    2| 0|{}\n    3|  |{}\n    4| 0|{}\n    5| 0|{}\n",
+        rows[0], rows[1], rows[2], rows[3], rows[4]
+    );
+    CplcCase {
+        _directory: directory,
+        root,
+        raw,
+        lcov,
+        annotated,
+    }
+}
+
+fn let_else_exclusions() -> Vec<Exclusion> {
+    [2, 4, 5]
+        .into_iter()
+        .map(|line| Exclusion {
+            line,
+            source: Some(
+                LET_ELSE_SOURCE
+                    .lines()
+                    .nth(line as usize - 1)
+                    .expect("source line")
+                    .trim()
+                    .to_owned(),
+            ),
+            reason: "never-run async fn".to_owned(),
+            ..cplc_exclusion()
+        })
+        .collect()
+}
+
+#[test]
+fn folded_branch_on_a_line_lcov_does_not_record_is_no_emitted_location() {
+    let case = let_else_case();
+    let check = |raw: &serde_json::Value, exclusions: &[Exclusion]| {
+        gate(
+            &case.lcov,
+            raw,
+            &case.annotated,
+            &case.root,
+            exclusions,
+            Target::Native,
+        )
+    };
+    let report = check(&case.raw, &let_else_exclusions())
+        .expect("a folded region on an unrecorded, uncounted line is no emitted branch");
+    assert_eq!(
+        report.output,
+        [
+            "Excluded line: src/lib.rs:2 never-run async fn",
+            "Excluded line: src/lib.rs:4 never-run async fn",
+            "Excluded line: src/lib.rs:5 never-run async fn",
+            "lines: 1/1; exclusions: 3",
+            "branches: 2/2",
+        ]
+    );
+    // Without the exclusions the never-run lines stay a real gap, never a pass.
+    assert_eq!(
+        refused(&check(&case.raw, &[])),
+        "Uncovered source lines: [('src/lib.rs', 2), ('src/lib.rs', 4), ('src/lib.rs', 5)]; \
+         branches: []"
+    );
+    let refuse = |raw: &serde_json::Value| refused(&check(raw, &let_else_exclusions()));
+    let with_segment = |segment: serde_json::Value| {
+        let mut raw = case.raw.clone();
+        raw["data"][0]["files"][0]["segments"]
+            .as_array_mut()
+            .expect("segments")
+            .push(segment);
+        raw
+    };
+    // A segment on the unrecorded line counts: the folded region may hide
+    // executed code, so it stays a missing branch.
+    let counted = with_segment(serde_json::json!([3, 21, 1, true, true, false]));
+    assert_eq!(refuse(&counted), "Missing emitted branch locations");
+    // A segment count on that line that cannot be read counts as well.
+    let unreadable = with_segment(serde_json::json!([3, 21, "1", true, true, false]));
+    assert_eq!(refuse(&unreadable), "Missing emitted branch locations");
+    // A segment whose line cannot be read leaves no line provably uncounted.
+    let lineless = with_segment(serde_json::json!(["3", 21, 0, true, true, false]));
+    assert_eq!(refuse(&lineless), "Missing emitted branch locations");
+    // A zero-count segment on the line keeps the folded region out.
+    let uncounted = with_segment(serde_json::json!([3, 21, 0, true, true, false]));
+    check(&uncounted, &let_else_exclusions()).expect("a zero-count segment counts nothing");
+    // Without per-file segments nothing shows the unrecorded line unexecuted.
+    let mut segmentless = case.raw.clone();
+    segmentless["data"][0]["files"][0]
+        .as_object_mut()
+        .expect("file")
+        .remove("segments");
+    assert_eq!(refuse(&segmentless), "Missing emitted branch locations");
+    // A folded region on an executed line still refuses, segments or not.
+    let mut beside_executed = case.raw.clone();
+    for index in [1, 2] {
+        beside_executed["data"][0]["files"][0]["branches"][index] =
+            serde_json::json!([1, 10, 1, 20, 0, 0, 0, 0, 4]);
+    }
+    assert_eq!(refuse(&beside_executed), "Missing emitted branch locations");
+    // A folded region with no valid start line refuses.
+    let mut lineless_branch = case.raw.clone();
+    for index in [1, 2] {
+        lineless_branch["data"][0]["files"][0]["branches"][index] =
+            serde_json::json!([0, 1, 0, 9, 0, 0, 0, 0, 4]);
+    }
+    assert_eq!(refuse(&lineless_branch), "Missing emitted branch locations");
 }
 
 fn locked_entry(fixture: &ExceptionFixture, version: &str, checksum: &str) -> Exclusion {

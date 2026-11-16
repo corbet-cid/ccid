@@ -570,8 +570,13 @@ struct RawFile {
     /// File-level locations with a nonzero or unreadable execution count.
     counted: BTreeSet<[i64; 4]>,
     /// File-level locations the function records omit (folded regions); each
-    /// must start on a line LCOV reports unexecuted.
+    /// must start on a line LCOV reports unexecuted, or on a line LCOV does
+    /// not record that no segment counts (see [`emitted_branches`]).
     folded: BTreeSet<[i64; 4]>,
+    /// Lines on which a per-file segment carries a nonzero or unreadable
+    /// count; `None` when the per-file segment list is absent or unreadable,
+    /// so no line LCOV does not record can be shown unexecuted.
+    counted_lines: Option<BTreeSet<i64>>,
     lines_count: Option<i64>,
     lines_covered: Option<i64>,
     branches_count: Option<i64>,
@@ -614,6 +619,28 @@ fn raw_file(item: &serde_json::Value) -> std::result::Result<RawFile, String> {
         }
         locations.push(location);
     }
+    // A segment is `[line, col, count, has_count, is_region_entry, is_gap_region]`.
+    let counted_lines = item
+        .get("segments")
+        .and_then(|segments| segments.as_array())
+        .and_then(|segments| {
+            segments
+                .iter()
+                .map(|segment| {
+                    let slots = segment.as_array()?;
+                    let line = slots.first()?.as_i64()?;
+                    let count = slots.get(2).and_then(|count| count.as_i64());
+                    Some((line, count != Some(0)))
+                })
+                .collect::<Option<Vec<(i64, bool)>>>()
+        })
+        .map(|segments| {
+            segments
+                .into_iter()
+                .filter(|(_, counted)| *counted)
+                .map(|(line, _)| line)
+                .collect()
+        });
     let summary = item.get("summary").ok_or("Invalid raw JSON summary")?;
     let pick =
         |metric: &str, field: &str| json_count(summary.get(metric).and_then(|m| m.get(field)));
@@ -621,6 +648,7 @@ fn raw_file(item: &serde_json::Value) -> std::result::Result<RawFile, String> {
         branches: locations,
         counted,
         folded: BTreeSet::new(),
+        counted_lines,
         lines_count: pick("lines", "count"),
         lines_covered: pick("lines", "covered"),
         branches_count: pick("branches", "count"),
@@ -643,12 +671,16 @@ fn raw_file(item: &serde_json::Value) -> std::result::Result<RawFile, String> {
 /// location; every per-file location the function records omit was never
 /// executed (both counts zero, as a folded region's are); and, checked in
 /// [`gate`] once LCOV is read, every omitted location starts on a line LCOV
-/// reports with count zero. The last condition keeps the line gate in charge
-/// of the omitted code: an uninstantiated function's lines are uncovered and
-/// refused unless a reviewed exclusion names them, while a folded region on an
-/// executed line (a never-called closure beside executed code) still refuses
-/// as a missing branch. A unit without function records keeps the per-file
-/// inventory.
+/// reports with count zero, or on a line LCOV does not record at all and on
+/// which no per-file segment carries a nonzero count. The last condition keeps
+/// the line gate in charge of the omitted code: an uninstantiated function's
+/// lines are uncovered and refused unless a reviewed exclusion names them,
+/// while a folded region on an executed line (a never-called closure beside
+/// executed code) still refuses as a missing branch. A line LCOV does not
+/// record starts no code region (a let-else pattern alone on its line starts
+/// only the branch region), so it carries no executed code unless a segment
+/// on it counts; without readable segments such a line refuses. A unit
+/// without function records keeps the per-file inventory.
 fn emitted_branches(
     functions: &serde_json::Value,
     files: &BTreeMap<PathBuf, String>,
@@ -908,14 +940,21 @@ pub fn gate(
     {
         return Err("Incomplete or empty source coverage inventory".to_owned());
     }
-    // A folded region leaves the branch inventory only where the line gate
-    // already sees its line unexecuted (see `emitted_branches`).
+    // A folded region leaves the branch inventory only where its line is
+    // unexecuted: LCOV reports it with count zero, or LCOV does not record it
+    // and no per-file segment on it counts (see `emitted_branches`).
     for (file, raw) in &expected {
         if raw.folded.iter().any(|location| {
-            u64::try_from(location[0])
-                .ok()
-                .and_then(|line| lines.get(&(file.clone(), line)))
-                != Some(&0)
+            let Some(line) = u64::try_from(location[0]).ok().filter(|line| *line > 0) else {
+                return true;
+            };
+            match lines.get(&(file.clone(), line)) {
+                Some(count) => *count != 0,
+                None => raw
+                    .counted_lines
+                    .as_ref()
+                    .is_none_or(|counted| counted.contains(&location[0])),
+            }
         }) {
             return Err("Missing emitted branch locations".to_owned());
         }
