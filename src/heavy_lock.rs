@@ -141,6 +141,10 @@ impl HeavyLock {
     pub fn acquire(what: &str) -> crate::Result<HeavyLock> {
         let get = |name: &str| std::env::var(name).ok();
         let none = HeavyLock { _file: None };
+        // ccid's own unit tests drive nix_check with stub commands: they must never queue on the host's real lock (2026-11-16: the verify job waited 45 min on it and timed out)
+        if cfg!(test) {
+            return Ok(none);
+        }
         let Some(path) = lock_path(&get, Path::new("/etc/corbet/heavy-lock-path")) else {
             return Ok(none);
         };
