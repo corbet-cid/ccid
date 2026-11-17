@@ -1433,6 +1433,7 @@ mod shim_runs {
 
 /// A channel bump must not turn a repository red (render_previous.rs): adapters drifted against this binary pass when the channel's
 /// PREVIOUS release (its own binary, digest-verified) accepts them, and only then.
+#[cfg(unix)]
 #[test]
 fn drifted_adapters_pass_when_the_previous_release_accepts_them_and_not_otherwise() {
     use std::os::unix::fs::PermissionsExt;
