@@ -9,7 +9,7 @@
     ".ci/jobs.json": "6ff3c07a1fc90e451e3762eeea7542674a9de3c1698f1efe4478d57410a082c8",
     ".forgejo/workflows/ci.yml": "98e663541a9b7f48d94d41e090c405512982beed19f5c6e04a5a202728df33a2",
     ".forgejo/workflows/downstream-check.yml": "0d5016c9a2f33f00166c1c858d5c76d3af4da70015c800c104f8d9cab150d406",
-    ".forgejo/workflows/upstream-sync.yml": "a632f50f849118ac45582f3415e48e5d61f39d09fad025736e18d8e93dc3ff20"
+    ".forgejo/workflows/upstream-sync.yml": "4778e7a0aa5247feb27aea9d36eb3c311f28f6b481e8d75b66aa4063614c4b26"
   },
   "manual-remote": {
     ".ci/jobs.json": "1f117574ddd8985c042460f19f088641688ea4a7a9a0b68a5e9c6e2f443ef6bc",
