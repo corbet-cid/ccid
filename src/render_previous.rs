@@ -2,13 +2,15 @@
 //!
 //! `job-run` refuses a repository whose generated adapters differ from what the running ccid renders. When a release changes the
 //! rendered bytes and the channel moves to it, every repository not yet re-rendered would fail at once (2026-11-17: infra's render
-//! job within seconds of the a37dbc7 bump, rolled back). The channel therefore also names the PREVIOUS release:
+//! job within seconds of the a37dbc7 bump, rolled back). The channel therefore also names the PREVIOUS releases, newest first, at most
+//! three (`MAX_PREVIOUS`); the single-object form of the first version is read as a list of one:
 //!
 //! ```json
-//! "previous": { "default": {"revision": "...", "sha256": "..."}, "classes": { "linux": {...} } }
+//! "previous": [ { "default": {"revision": "...", "sha256": "..."}, "classes": { "linux": {...} } }, ... ]
 //! ```
 //!
-//! and the adapters pass when they equal the render of the current release OR of the previous one. The previous one is asked, not
+//! and the adapters pass when they equal the render of the current release OR of ANY listed one (an entry leaves the list when the fleet
+//! has re-rendered past it). The previous one is asked, not
 //! reimplemented: its own binary (cached and sha256-verified by the shim at `$CCID_TOOL_ROOT/ccid/<rev>/<triple>/ccid`, or in the
 //! runner's `ccid-channel/tools` cache) runs `render --check` on the repository. A missing binary, a wrong digest, no `previous`
 //! entry, or an adapter set that matches neither refuses exactly as before. `previous` is dropped with the next bump.
@@ -21,6 +23,8 @@ use std::{
 };
 
 const DRIFT: &str = "Generated job adapters have drifted";
+/// Older releases whose output is still accepted; further entries of the channel list are ignored.
+const MAX_PREVIOUS: usize = 3;
 
 /// `render --check`, accepting the previous channel release's output as well.
 pub fn check(
@@ -31,8 +35,11 @@ pub fn check(
     match crate::render::render(repo, manifest, true) {
         Ok(report) => Ok(report),
         Err(error) if error.to_string().starts_with(DRIFT) => {
-            match previous_binary(environment, crate::SOURCE_REVISION) {
-                Some(binary) if run_check(&binary, repo, manifest) => {
+            match previous_binaries(environment, crate::SOURCE_REVISION)
+                .into_iter()
+                .find(|binary| run_check(binary, repo, manifest))
+            {
+                Some(binary) => {
                     eprintln!(
                         "ccid: the adapters match the previous channel release ({}), not this one ({}): accepted until the repository re-renders",
                         binary.display(),
@@ -45,7 +52,7 @@ pub fn check(
                         transitional: Vec::new(),
                     })
                 }
-                _ => Err(error),
+                None => Err(error),
             }
         }
         Err(error) => Err(error),
@@ -88,11 +95,12 @@ fn is_hex(text: &str, length: usize) -> bool {
     text.len() == length && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The verified binary of the channel's previous release for the class `own` belongs to.
-pub(crate) fn previous_binary(environment: &Environment, own: &str) -> Option<PathBuf> {
-    let channel = channel_document(environment)?;
-    let previous = channel.get("previous")?;
-    // the class whose CURRENT entry is this binary; the previous release of that class (else the previous default)
+/// The verified binaries of the channel's previous releases (newest first, at most `MAX_PREVIOUS`) for the class `own` belongs to.
+pub(crate) fn previous_binaries(environment: &Environment, own: &str) -> Vec<PathBuf> {
+    let Some(channel) = channel_document(environment) else {
+        return Vec::new();
+    };
+    // the class whose CURRENT entry is this binary
     let class = channel
         .get("classes")
         .and_then(Value::as_object)
@@ -102,12 +110,35 @@ pub(crate) fn previous_binary(environment: &Environment, own: &str) -> Option<Pa
                 .find(|(_, entry)| entry["revision"] == own)
                 .map(|(name, _)| name.clone())
         });
-    let entry = class
-        .as_deref()
-        .and_then(|name| previous.get("classes")?.get(name))
-        .or_else(|| previous.get("default"))?;
-    let revision = entry.get("revision")?.as_str()?;
-    let sha256 = entry.get("sha256")?.as_str()?;
+    let entries: Vec<&Value> = match channel.get("previous") {
+        Some(Value::Array(list)) => list.iter().collect(),
+        Some(single @ Value::Object(_)) => vec![single],
+        _ => Vec::new(),
+    };
+    entries
+        .into_iter()
+        .take(MAX_PREVIOUS)
+        .filter_map(|previous| {
+            let entry = class
+                .as_deref()
+                .and_then(|name| previous.get("classes")?.get(name))
+                .or_else(|| previous.get("default"))?;
+            verified_binary(
+                environment,
+                own,
+                entry.get("revision")?.as_str()?,
+                entry.get("sha256")?.as_str()?,
+            )
+        })
+        .collect()
+}
+
+fn verified_binary(
+    environment: &Environment,
+    own: &str,
+    revision: &str,
+    sha256: &str,
+) -> Option<PathBuf> {
     if !is_hex(revision, 40) || !is_hex(sha256, 64) || revision == own {
         return None;
     }
@@ -173,13 +204,16 @@ mod tests {
     #[test]
     fn the_previous_release_is_found_when_its_digest_matches() {
         let (_dir, environment) = world("#!/bin/sh\nexit 0\n", false);
-        assert!(previous_binary(&environment, OWN).is_some());
+        assert!(previous_binaries(&environment, OWN).len() == 1);
     }
 
     #[test]
     fn a_wrong_digest_or_a_missing_binary_or_no_previous_entry_finds_nothing() {
         let (_dir, environment) = world("#!/bin/sh\nexit 0\n", true);
-        assert!(previous_binary(&environment, OWN).is_none(), "wrong digest");
+        assert!(
+            previous_binaries(&environment, OWN).is_empty(),
+            "wrong digest"
+        );
         let (dir, environment) = world("#!/bin/sh\nexit 0\n", false);
         fs::remove_file(
             dir.path()
@@ -190,7 +224,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            previous_binary(&environment, OWN).is_none(),
+            previous_binaries(&environment, OWN).is_empty(),
             "missing binary"
         );
         let (dir, environment) = world("#!/bin/sh\nexit 0\n", false);
@@ -199,21 +233,39 @@ mod tests {
         channel.as_object_mut().unwrap().remove("previous");
         fs::write(&file, channel.to_string()).unwrap();
         assert!(
-            previous_binary(&environment, OWN).is_none(),
+            previous_binaries(&environment, OWN).is_empty(),
             "no previous entry"
         );
         // the previous entry naming this very binary is no second opinion
         let (_dir, environment) = world("#!/bin/sh\nexit 0\n", false);
-        assert!(previous_binary(&environment, OLD).is_none());
+        assert!(previous_binaries(&environment, OLD).is_empty());
     }
 
     #[test]
     fn the_previous_binary_decides_by_its_exit_status() {
         let (dir, environment) = world("#!/bin/sh\nexit 0\n", false);
-        let binary = previous_binary(&environment, OWN).unwrap();
+        let binary = previous_binaries(&environment, OWN).remove(0);
         assert!(run_check(&binary, dir.path(), Path::new(".ci/ccid.toml")));
         let (dir, environment) = world("#!/bin/sh\nexit 2\n", false);
-        let binary = previous_binary(&environment, OWN).unwrap();
+        let binary = previous_binaries(&environment, OWN).remove(0);
         assert!(!run_check(&binary, dir.path(), Path::new(".ci/ccid.toml")));
+    }
+
+    #[test]
+    fn the_list_is_read_newest_first_capped_at_three_and_a_single_object_is_a_list_of_one() {
+        let (dir, environment) = world("#!/bin/sh\nexit 0\n", false);
+        let file = dir.path().join("channel.json");
+        let mut channel: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        let single = channel["previous"].clone();
+        assert_eq!(
+            previous_binaries(&environment, OWN).len(),
+            1,
+            "the single-object form"
+        );
+        // four copies of the same (valid) entry: only MAX_PREVIOUS are considered
+        channel["previous"] =
+            Value::Array(vec![single.clone(), single.clone(), single.clone(), single]);
+        fs::write(&file, channel.to_string()).unwrap();
+        assert_eq!(previous_binaries(&environment, OWN).len(), MAX_PREVIOUS);
     }
 }

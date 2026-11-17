@@ -1503,3 +1503,57 @@ fn drifted_adapters_pass_when_the_previous_release_accepts_them_and_not_otherwis
         "a previous binary with the wrong digest is not trusted"
     );
 }
+
+/// The channel lists up to three previous releases: a repository rendered two releases back passes (the second entry), one rendered three
+/// releases back is refused (the fourth entry is never asked).
+#[cfg(unix)]
+#[test]
+fn a_repository_two_releases_back_passes_and_three_back_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = forgejo_repository(&forgejo_manifest("runs_on='heavy'\npaths=['src/**']\n"));
+    render(root.path(), false).unwrap();
+    let workflow = root.path().join(".forgejo/workflows/ci.yml");
+    let drifted = format!(
+        "{}# rendered by an older release\n",
+        fs::read_to_string(&workflow).unwrap()
+    );
+    fs::write(&workflow, drifted).unwrap();
+    let revisions: Vec<String> = (1..=4).map(|n| format!("{n}").repeat(40)).collect();
+    // each fake release accepts or refuses by its exit status; `accepting` names the one that renders this repository
+    let run = |accepting: usize| {
+        let tools = tempfile::tempdir().unwrap();
+        let triple = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
+        let mut list = Vec::new();
+        for (index, revision) in revisions.iter().enumerate() {
+            let directory = tools.path().join("ccid").join(revision).join(&triple);
+            fs::create_dir_all(&directory).unwrap();
+            let binary = directory.join("ccid");
+            let exit = if index == accepting { 0 } else { 2 };
+            fs::write(&binary, format!("#!/bin/sh\nexit {exit}\n")).unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+            let sha = ccid::sha256_file(&binary).unwrap();
+            list.push(serde_json::json!({"default": {"revision": revision, "sha256": sha}}));
+        }
+        fs::write(
+            tools.path().join("channel.json"),
+            serde_json::json!({"default": {"revision": "9".repeat(40), "sha256": "a".repeat(64)}, "previous": list}).to_string(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ccid"))
+            .args(["render", "--check", "--repo"])
+            .arg(root.path())
+            .env("CCID_CHANNEL_FILE", tools.path().join("channel.json"))
+            .env("CCID_TOOL_ROOT", tools.path())
+            .output()
+            .unwrap();
+        output.status.code()
+    };
+    assert_eq!(run(0), Some(0), "one release back");
+    assert_eq!(run(1), Some(0), "two releases back");
+    assert_eq!(
+        run(2),
+        Some(0),
+        "three releases back is still the third entry"
+    );
+    assert_eq!(run(3), Some(2), "the fourth entry is never asked");
+}
