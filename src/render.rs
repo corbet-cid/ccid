@@ -1536,8 +1536,10 @@ fn forgejo_workflow(
     if wants("manual") {
         out.push_str("  workflow_dispatch:\n");
     }
+    // On the default branch a RUNNING run is never cancelled (a busy main would otherwise cancel every push's run and no commit would get a full verdict); only the newest pending
+    // run waits. Pull requests and other refs keep cancel-in-progress. Proven on Forgejo Actions with a throwaway repository (2026-11-17): the expression is evaluated there.
     out.push_str(&format!(
-        "concurrency:\n  group: ccid-{workflow}-${{{{ github.ref }}}}\n  cancel-in-progress: true\n"
+        "concurrency:\n  group: ccid-{workflow}-${{{{ github.ref }}}}\n  cancel-in-progress: ${{{{ github.ref != format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n"
     ));
     // No CARGO_PROFILE_* or CARGO_TERM_COLOR in the workflow environment: a CARGO_* variable is hashed into every
     // compile-cache key, so the shared build profile arrives as cargo config instead - profiles/dev.toml through `cargo

@@ -2,27 +2,27 @@
   "dead-label": {
     ".ci/check-shell.nix": "d13e76b16ecbde0a06b49d0131e1e81d92e62f0dd414f2984db9941407e48d9f",
     ".ci/jobs.json": "a2ccb534c7b4f32e79f9a383accab840dc49b5dd92b6fe7c90615cf0b8cb6ef8",
-    ".forgejo/workflows/ci.yml": "f4873eace4424c7e3fd5ab3cd037dd4320b38c72337b7600d4ebd181ef28db30",
-    ".forgejo/workflows/deep.yml": "bf04ddbcb801870ddf6305966f83461e32b2e4335cbaf769b2c49d5da75eefa6"
+    ".forgejo/workflows/ci.yml": "8b82a2e132f89d2204d24d5ff9742aaeab7f0c9b52325d8874b2191e10d4f8f8",
+    ".forgejo/workflows/deep.yml": "c406e151875588809b5f7d53f4b62ea83d3eeecc301db5f4ed2a4fa125f59fa8"
   },
   "default-upstream": {
     ".ci/jobs.json": "6ff3c07a1fc90e451e3762eeea7542674a9de3c1698f1efe4478d57410a082c8",
-    ".forgejo/workflows/ci.yml": "a214ae8b32c6456751b1b4a969ff545eb280d5df1ec6b468190fc2c59fd3db7a",
-    ".forgejo/workflows/downstream-check.yml": "bf4fc80ab39994e04e9d4d5b782bf3a2b880af00761e846b668a30ffd5189e6f",
+    ".forgejo/workflows/ci.yml": "98e663541a9b7f48d94d41e090c405512982beed19f5c6e04a5a202728df33a2",
+    ".forgejo/workflows/downstream-check.yml": "0d5016c9a2f33f00166c1c858d5c76d3af4da70015c800c104f8d9cab150d406",
     ".forgejo/workflows/upstream-sync.yml": "a632f50f849118ac45582f3415e48e5d61f39d09fad025736e18d8e93dc3ff20"
   },
   "manual-remote": {
     ".ci/jobs.json": "1f117574ddd8985c042460f19f088641688ea4a7a9a0b68a5e9c6e2f443ef6bc",
-    ".forgejo/workflows/ci.yml": "24fc2fa47d31a78b1cbb235b6a303bfb4f8112ba56a956272e4fa863b2ef2a3b"
+    ".forgejo/workflows/ci.yml": "f2653dbbdaabaf5b0bcbde7e65dc294d50b0d8e3fcb73c38f11e4176d615d578"
   },
   "pinned-crow": {
     ".ci/jobs.json": "950ebca3baa7605b36f483eeb55fe03925280dc14f123d6b97e0384cbb37dcf3",
     ".crow/legacy.yaml": "e19087969190b23bb8d6d3f409dcec5444e3ce0864921b10cf9f6a2146fbeb4d",
-    ".forgejo/workflows/ci.yml": "b77d62c31b22e6aeab659c6e24976f8ae89887f771d3ad598ebab808b0b9fb13"
+    ".forgejo/workflows/ci.yml": "b7cdd0c8e693a00e1edc53f1a85dc2da87cbae4f2f87ed5aae996c38a90a74a0"
   },
   "push-pr": {
     ".ci/jobs.json": "20702ec416d18623dc58ae130da5f6472e13e7d83fa520b2f7db34267a8245e1",
-    ".forgejo/workflows/ci.yml": "b219a6a53bcc8a1cc5831c95b5f92e76fddd30bf270148aa14c9eef5633541cd",
-    ".forgejo/workflows/pr.yml": "e61f8e5dc1c553eec730b4dd286c17f2012cc5157deb820bb9121a1e15f78238"
+    ".forgejo/workflows/ci.yml": "24c8bfdac88698f6eec9c236e776924c783d36c485e10d3552f1d4ecdc28a9af",
+    ".forgejo/workflows/pr.yml": "e8d2bc3e2d8c2e966615ab21d646c1efea79a29758539f463e674c801fc586e7"
   }
 }

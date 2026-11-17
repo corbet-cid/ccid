@@ -667,7 +667,9 @@ fn forgejo_jobs_render_one_native_workflow_per_workflow_name_and_no_crow_adapter
     assert!(text.contains("name: ci\n"));
     assert!(text.contains("branches: [main]"));
     assert!(text.contains("  pull_request:\n  workflow_dispatch:\n"));
-    assert!(text.contains("cancel-in-progress: true"));
+    assert!(text.contains(
+        "cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}\n"
+    ));
     assert!(text.contains("CARGO_INCREMENTAL: \"1\""));
     // The shared build profile is cargo config (profiles/dev.toml) or the CARGO_HOME include, never a CARGO_* variable: those
     // are hashed into every compile-cache key and split lanes from CI.
