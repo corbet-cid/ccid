@@ -396,7 +396,12 @@ fn main() -> ExitCode {
             repo,
             manifest,
             check,
-        } => ccid::render::render(&repo, &manifest, check).and_then(|report| {
+        } => (if check {
+            ccid::render_previous::check(&repo, &manifest, &std::env::vars_os().collect())
+        } else {
+            ccid::render::render(&repo, &manifest, check)
+        })
+        .and_then(|report| {
             println!("{}", serde_json::to_string(&report)?);
             Ok(())
         }),

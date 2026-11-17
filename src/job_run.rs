@@ -16,7 +16,7 @@
 //! The module does not know the forge's name or any operator address: the caller passes the server URL and the token
 //! comes from the environment.
 
-use crate::{failure, jobs, render, Result};
+use crate::{failure, jobs, Result};
 use std::{
     collections::BTreeMap,
     fs, io,
@@ -571,7 +571,8 @@ fn execute_job(
         extra.insert("CCID_SIBLINGS_REVISIONS".into(), revisions);
     }
     // The generated adapters must be the ones this binary renders (a stale render fails here, with the fix named).
-    render::render(Path::new("."), manifest, true)?;
+    // (or by the channel's previous release: a channel bump must not turn every repository red, see render_previous.rs)
+    crate::render_previous::check(Path::new("."), manifest, &std::env::vars_os().collect())?;
     // [runtime]: the persistent job environment the repository's job script used to set up. Its
     // locks are held from here until the job command exits (they outlive the exec below).
     let runtime = match &plan.runtime {

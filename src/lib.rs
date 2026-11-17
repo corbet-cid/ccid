@@ -51,6 +51,7 @@ pub mod push;
 pub mod read_set;
 pub mod release;
 pub mod render;
+pub mod render_previous;
 pub mod resolve_lock;
 pub mod resolver;
 mod runner;

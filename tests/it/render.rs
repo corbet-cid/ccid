@@ -1430,3 +1430,75 @@ mod shim_runs {
         );
     }
 }
+
+/// A channel bump must not turn a repository red (render_previous.rs): adapters drifted against this binary pass when the channel's
+/// PREVIOUS release (its own binary, digest-verified) accepts them, and only then.
+#[test]
+fn drifted_adapters_pass_when_the_previous_release_accepts_them_and_not_otherwise() {
+    use std::os::unix::fs::PermissionsExt;
+    const OLD: &str = "0a46dc33f98a6820b789586ed7b5f2eff8db9aa2";
+    let root = forgejo_repository(&forgejo_manifest("runs_on='heavy'\npaths=['src/**']\n"));
+    render(root.path(), false).unwrap();
+    let workflow = root.path().join(".forgejo/workflows/ci.yml");
+    let drifted = format!("{}# hand edit\n", fs::read_to_string(&workflow).unwrap());
+    fs::write(&workflow, drifted).unwrap();
+    assert!(
+        render(root.path(), true).is_err(),
+        "drift against this binary"
+    );
+
+    let setup = |script: &str, wrong_digest: bool| {
+        let tools = tempfile::tempdir().unwrap();
+        let triple = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
+        let directory = tools.path().join("ccid").join(OLD).join(triple);
+        fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("ccid");
+        fs::write(&binary, script).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let sha = if wrong_digest {
+            "0".repeat(64)
+        } else {
+            ccid::sha256_file(&binary).unwrap()
+        };
+        let channel = tools.path().join("channel.json");
+        fs::write(
+            &channel,
+            serde_json::json!({
+                "default": {"revision": "1".repeat(40), "sha256": "a".repeat(64)},
+                "previous": {"default": {"revision": OLD, "sha256": sha}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        tools
+    };
+    let run = |tools: &tempfile::TempDir| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_ccid"))
+            .args(["render", "--check", "--repo"])
+            .arg(root.path())
+            .env("CCID_CHANNEL_FILE", tools.path().join("channel.json"))
+            .env("CCID_TOOL_ROOT", tools.path())
+            .output()
+            .unwrap()
+    };
+    let accepted = run(&setup("#!/bin/sh\nexit 0\n", false));
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&accepted.stderr).contains("match the previous channel release")
+    );
+    let refused = run(&setup("#!/bin/sh\nexit 2\n", false));
+    assert_eq!(refused.status.code(), Some(2), "matches neither release");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("Generated job adapters have drifted")
+    );
+    let tampered = run(&setup("#!/bin/sh\nexit 0\n", true));
+    assert_eq!(
+        tampered.status.code(),
+        Some(2),
+        "a previous binary with the wrong digest is not trusted"
+    );
+}
