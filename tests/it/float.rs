@@ -424,6 +424,34 @@ fn cached_builds_the_float_through_the_executor_and_never_writes_the_checkout() 
     assert_eq!(world.declared(), declared);
 }
 
+/// A float that cannot resolve (the dependency's repository is gone or unreadable) must say why on stderr before it exits 2: a run that dies silently leaves a CI log that ends at
+/// the `scratch-root` event (careervector-cli runs 76 and 77, 2026-11-16).
+#[test]
+fn a_float_failure_prints_the_reason_and_exits_two() {
+    let world = World::new(&["forge.example"]);
+    fs::remove_dir_all(world.temp.path().join("git/dep.git")).unwrap();
+    for arguments in [
+        &["cached", "--repo", ".", "--check", "show", "--force"][..],
+        &["check", "--repo", ".", "--check", "show"][..],
+    ] {
+        let output = world.run(arguments);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{arguments:?}: {}",
+            text(&output)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line.starts_with("ccid: Dependency float cannot resolve")),
+            "{arguments:?} exited 2 without saying why: {}",
+            text(&output)
+        );
+    }
+}
+
 #[test]
 fn the_resolution_digest_follows_the_dependency_and_never_the_checkout() {
     let world = World::new(&["forge.example"]);
