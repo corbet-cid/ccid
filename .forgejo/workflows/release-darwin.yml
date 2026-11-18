@@ -32,8 +32,8 @@ jobs:
         run: |
           set -eu
           cd src
-          if command -v zig > /dev/null; then exec bash .ci/release-darwin-cross.sh; fi
-          exec nix-shell -p zig --run 'bash .ci/release-darwin-cross.sh'
+          if command -v zig > /dev/null && command -v cargo-zigbuild > /dev/null; then exec bash .ci/release-darwin-cross.sh; fi
+          exec nix-shell -p zig cargo-zigbuild --run 'bash .ci/release-darwin-cross.sh'
   release-darwin:
     needs: cross-build
     runs-on: macos
