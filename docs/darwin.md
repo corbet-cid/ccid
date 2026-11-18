@@ -6,19 +6,28 @@ workflow. This is how the binary is built, tested and put on the channel, and wh
 
 ## The binary
 
-`x86_64-apple-darwin` is built natively in the clone (the clone is x86_64). It is not cross-built and not
-built anywhere else: the Command Line Tools and the macOS SDK exist only there.
+`x86_64-apple-darwin` is built on Linux, not in the clone: the build is the owner's rule (build on Linux whatever
+technically can be; the macOS clone only tests). `cargo zigbuild` (zig) links against the macOS SDK that the Linux
+slots mount (`CI_MACOS_SDK`, the `SDKROOT`). The clone tests what was built.
 
 ```sh
-.forgejo/workflows/release-darwin.yml   # dispatch it on the commit that is being released (label macos)
-.ci/release-darwin.sh                   # what it runs: build, test, leave the binary in the draft darwin-<commit>
-.ci/release-darwin-publish.sh COMMIT    # where the registry credential lives: publish it, delete the draft
+.forgejo/workflows/release-darwin.yml   # dispatch it on the commit that is being released: job cross-build (linux), then job release-darwin (macos)
+.ci/release-darwin-cross.sh             # the Linux job: build the binary and the test executables, leave both in the draft darwin-<commit>
+.ci/release-darwin.sh                   # the macOS job: run the test executables (RUST_TEST_THREADS=4), add the attestation to the draft
+.ci/release-darwin-publish.sh COMMIT    # where the registry credential lives: publish the attested binary, delete the draft
 ```
 
-The job holds the job token only. Publishing to the registry the tool channel reads takes a package-write
-credential that never enters a job, so the job leaves `ccid-x86_64-apple-darwin` and its `.sha256` in the draft
+The test executables bake absolute paths in (`CARGO_MANIFEST_DIR`, `CARGO_BIN_EXE_ccid`), so the Linux job builds in
+the fixed root `/var/tmp/ccid-xtest` and the bundle `macos-tests-x86_64.tar.gz` (source tree, binary, executables)
+is unpacked at the same root in the clone. The binary must embed the commit (`source-revision`) and the bytes the
+clone tests must be those of the draft (`ccid-x86_64-apple-darwin.sha256`). A passing suite adds
+`ccid-x86_64-apple-darwin.tested` (the binary's digest line); the publisher publishes only a binary whose digest
+matches it.
+
+The jobs hold the job token only. Publishing to the registry the tool channel reads takes a package-write
+credential that never enters a job, so they leave `ccid-x86_64-apple-darwin`, its `.sha256` and its `.tested` in the draft
 release `darwin-<commit>` of this repository (the job token may write releases) and the publisher, on the host
-that holds `CFRG_RELEASE_TOKEN`, reads the draft (the runner's read credential), checks the digest and runs
+that holds `CFRG_RELEASE_TOKEN`, reads the draft (the runner's read credential), checks the attestation and runs
 `cfrg release publish --name ccid-x86_64-apple-darwin --commit COMMIT`, which puts the file next to the Linux
 binary of the same commit in the generic package registry. Registry files are immutable per commit.
 

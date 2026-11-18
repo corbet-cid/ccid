@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish the macOS binary that .ci/release-darwin.sh left in the draft `darwin-<commit>` to the registry the tool
+# Publish the macOS binary that .ci/release-darwin-cross.sh built and .ci/release-darwin.sh tested on macOS (its `.tested` attestation) left in the draft `darwin-<commit>` to the registry the tool
 # channel reads (the generic package registry, next to the Linux binary of the same commit), then delete the draft.
 # Run it where the package-write credential lives, never in a job.
 #
@@ -27,11 +27,12 @@ api=${GITHUB_API_URL:-${GITHUB_SERVER_URL%/}/api/v1}/repos/$GITHUB_REPOSITORY
 tag=darwin-$sha
 curl -q --silent --show-error --fail --max-time 120 -K "$scratch/auth" -o "$scratch/release.json" "$api/releases/tags/$tag"
 [ "$(jq -r .draft "$scratch/release.json")" = true ] || { echo "release-darwin-publish: $tag is not a draft" >&2; exit 1; }
-for file in "$name" "$name.sha256"; do
+for file in "$name" "$name.tested"; do
   url=$(jq -er --arg n "$file" '.assets[] | select(.name == $n) | .browser_download_url' "$scratch/release.json")
   curl -q --silent --show-error --fail --max-time 600 -K "$scratch/auth" -o "$scratch/$file" "$url"
 done
-(cd "$scratch" && sha256sum --check --strict "$name.sha256")
+# only a binary the macOS leg attested is published: the attestation is the digest line of the tested bytes
+(cd "$scratch" && sha256sum --check --strict "$name.tested")
 args=(release --config .ci/release.json publish --file "$scratch/$name" --commit "$sha" --name "$name")
 [ "$dry" = --dry-run ] && args+=(--dry-run)
 cfrg "${args[@]}"

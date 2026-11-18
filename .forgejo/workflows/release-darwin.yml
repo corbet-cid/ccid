@@ -1,6 +1,6 @@
 # Written by hand: ccid has no macOS binary yet, and the rendered shim of a job on the label `macos` starts by finding one.
 #
-# The macOS binary of ccid, for the tool channel: built natively and tested in the macOS build clone, left in the
+# The macOS binary of ccid, for the tool channel: cross-built on Linux, tested in the macOS build clone, left in the
 # draft release `darwin-<commit>` (.ci/release-darwin.sh). Dispatch it on the commit that is being released, then
 # run .ci/release-darwin-publish.sh where the registry credential lives. See docs/darwin.md.
 #
@@ -14,7 +14,27 @@ concurrency:
   group: release-darwin-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  # The build runs on Linux (cross-compiled with cargo-zigbuild against the macOS SDK); the macOS clone only tests.
+  cross-build:
+    runs-on: linux
+    steps:
+      - name: Check out the exact commit
+        env:
+          CCID_COMMIT: ${{ github.sha }}
+        run: |
+          set -eu
+          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" src
+          cd src
+          git checkout --quiet --force "$CCID_COMMIT"
+          test "$(git rev-parse HEAD)" = "$CCID_COMMIT"
+      - name: Cross-build the binary and the test bundle into the draft
+        run: |
+          set -eu
+          cd src
+          if command -v zig > /dev/null; then exec bash .ci/release-darwin-cross.sh; fi
+          exec nix-shell -p zig --run 'bash .ci/release-darwin-cross.sh'
   release-darwin:
+    needs: cross-build
     runs-on: macos
     steps:
       - name: Check out the exact commit
@@ -31,7 +51,7 @@ jobs:
           git reset --quiet --hard "$CCID_COMMIT"
           test "$(git rev-parse HEAD)" = "$CCID_COMMIT"
           git log --oneline -1
-      - name: Build, test and leave the binary in the draft
+      - name: Test the cross-built binary and attest it in the draft
         run: |
           set -eu
           cd "$CI_SOURCE_ROOT/ccid"
