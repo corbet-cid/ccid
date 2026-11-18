@@ -23,9 +23,10 @@ jobs:
           CCID_COMMIT: ${{ github.sha }}
         run: |
           set -eu
-          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" src
+          git init --quiet src
           cd src
-          git checkout --quiet --force "$CCID_COMMIT"
+          git fetch --quiet --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CCID_COMMIT"
+          git checkout --quiet --force FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$CCID_COMMIT"
       - name: Cross-build the binary and the test bundle into the draft
         run: |
