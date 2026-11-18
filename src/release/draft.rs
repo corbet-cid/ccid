@@ -169,6 +169,16 @@ impl<'a> Draft<'a> {
         Ok(())
     }
 
+    /// Delete the asset `name` from the draft (a no-op when it is absent).
+    pub fn delete_asset(&mut self, name: &str) -> Result<()> {
+        let Some(held) = self.release.asset(name).cloned() else {
+            return Ok(());
+        };
+        self.require_draft()?;
+        self.forge.delete_asset(self.release.id, held.id)?;
+        self.reload()
+    }
+
     /// Remove a wrong-size asset of `name` (a part of an interrupted upload). Returns whether one went.
     fn drop_wrong_size(&mut self, name: &str, size: u64) -> Result<bool> {
         let Some(held) = self.release.asset(name).cloned() else {

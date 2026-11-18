@@ -169,6 +169,10 @@ pub struct Config {
     /// The files `seal` derives: the only assets (besides `SHA256SUMS`) promotion may replace.
     #[serde(default)]
     pub manifests: Vec<String>,
+    /// Draft-only ("scratch") assets: globs over plain asset file names. They are uploaded and fetched like
+    /// any release file, but promotion deletes them from the draft before the seal checks and `SHA256SUMS`.
+    #[serde(default)]
+    pub scratch: Vec<String>,
     #[serde(default)]
     pub registries: Vec<Registry>,
     /// A file of the repository whose text is the body of the release (default: one generated line).
@@ -253,6 +257,20 @@ impl Config {
                 return Err(failure(format!(
                     "[release] manifests: {name:?} is not a plain asset name (and {SUMS} is written by ccid)"
                 )));
+            }
+        }
+        for glob in &self.scratch {
+            if glob.is_empty() || glob.contains('/') {
+                return Err(failure(format!(
+                    "[release] scratch: {glob:?} is not a glob over plain asset names"
+                )));
+            }
+            for name in self.manifests.iter().map(String::as_str).chain([SUMS]) {
+                if self.is_scratch(name) {
+                    return Err(failure(format!(
+                        "[release] scratch: {glob:?} matches {name:?}, which is a manifest or {SUMS} and ships"
+                    )));
+                }
             }
         }
         match self.kind {
@@ -360,6 +378,13 @@ impl Config {
     }
 
     /// What `version` releases: a patch is `linux-x86_64`, every other version the declared platforms.
+    /// Whether `name` is a draft-only asset.
+    pub fn is_scratch(&self, name: &str) -> bool {
+        self.scratch
+            .iter()
+            .any(|glob| crate::render::surface::glob_match(glob, name))
+    }
+
     pub fn plan(&self, version: version::Version) -> Plan {
         let platforms = match self.kind {
             Kind::Library => Vec::new(),
@@ -535,6 +560,29 @@ mod tests {
             "kind = \"binary\"\nversion = \"Cargo.toml\"\nknob = 1\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn scratch_globs_parse_and_match_plain_names() {
+        let c = config(&format!("{BINARY}scratch = [\"macos-tests-*\"]\n"));
+        assert!(c.is_scratch("macos-tests-x86_64.tar.gz"));
+        assert!(!c.is_scratch("ccvl-macos-x86_64"));
+    }
+
+    #[test]
+    fn a_scratch_glob_may_not_match_a_manifest_or_the_sums() {
+        let text = |scratch: &str| {
+            let t = format!(
+                "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.pack]\nkind = \"pack\"\ncrates = \".\"\n[checks.again]\nkind = \"commands\"\ncommands = [[\"true\"]]\n\n[release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\"]\nseal = [\"again\"]\nmanifests = [\"m.json\"]\nregistries = [\"crates\"]\nscratch = [{scratch}]\n"
+            );
+            crate::parse_manifest(t.as_bytes())
+        };
+        for bad in ["\"m.*\"", "\"SHA256*\"", "\"*\"", "\"a/b\""] {
+            let m = text(bad).unwrap();
+            assert!(validated(&m).is_err(), "{bad}");
+        }
+        let m = text("\"tests-*\"").unwrap();
+        assert!(validated(&m).is_ok());
     }
 
     fn library(registries: &str, pack: &str, extra: &str) -> crate::Manifest {

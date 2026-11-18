@@ -446,6 +446,19 @@ pub fn promote(repo: &Path) -> Result<ExitCode> {
         .prefix("ccid-release-seal-")
         .tempdir()?;
     draft.fetch_all(work.path())?;
+    // Scratch assets served the legs only: they leave the draft before the seal and the sums see it.
+    let scratch: Vec<String> = draft
+        .release()
+        .assets
+        .iter()
+        .map(|asset| asset.name.clone())
+        .filter(|name| job.config.is_scratch(name))
+        .collect();
+    for name in &scratch {
+        eprintln!("ccid release: removing the scratch asset {name} from the draft");
+        draft.delete_asset(name)?;
+        fs::remove_file(work.path().join(name))?;
+    }
     let before = draft::snapshot(work.path())?;
     if !job.config.seal.is_empty() && !job.run_checks(&job.config.seal, work.path(), false)? {
         eprintln!("ccid release: the seal checks refused the draft; nothing is promoted");
@@ -685,6 +698,18 @@ mod tests {
             &manifests
         )
         .is_ok());
+    }
+
+    #[test]
+    fn scratch_assets_are_gone_before_the_sums_are_computed() {
+        let config: Config = toml::from_str(
+            "kind = \"binary\"\nversion = \"Cargo.toml\"\nscratch = [\"macos-tests-*\"]\n",
+        )
+        .unwrap();
+        let mut held = map(&[("a.bin", "1"), ("macos-tests-x86_64.tar.gz", "2")]);
+        held.retain(|name, _| !config.is_scratch(name));
+        let sums = draft::sums_text(&held);
+        assert!(sums.contains("a.bin") && !sums.contains("macos-tests"));
     }
 
     #[test]

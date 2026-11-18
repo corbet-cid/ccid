@@ -14,6 +14,7 @@ build = ["release-build"]            # checks the release job runs; they leave t
 legs = { windows = "release-windows", macos = "release-macos" }   # the check each leg runs on its label
 seal = ["release-seal"]              # checks promotion runs on the complete draft to derive the manifests
 manifests = ["manifest.json"]        # the only files promotion may replace (besides SHA256SUMS)
+scratch = ["macos-tests-*"]           # draft-only: deleted by promotion before the seal, never in SHA256SUMS
 registries = ["crates"]              # crates | npm | pypi | aur
 notes = "CHANGELOG.md"               # optional: the text of the release (default: one generated line)
 ```
@@ -77,6 +78,10 @@ file with the same bytes is left alone. A public release is final.
 **`ccid release promote`** (the promotion)
 
 1. The draft of the commit is downloaded (the runner's read credential; the job token cannot read a draft).
+   Draft-only assets are then deleted from the draft: `[release] scratch = ["macos-tests-*"]` lists globs over
+   plain asset names for files that only the legs need (a test bundle built on Linux). They are uploaded and
+   fetched like any file, but never reach the seal, `SHA256SUMS` or the public release. A glob that also matches
+   a declared manifest or `SHA256SUMS` is a config error.
 2. The `seal` checks run on that directory. They derive the declared `manifests` from the evidence and
    refuse (exit non-zero) a release whose evidence is incomplete. They may change nothing else: a changed,
    removed or added file that is not a declared manifest stops the promotion.
