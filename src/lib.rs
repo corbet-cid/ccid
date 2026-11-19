@@ -824,6 +824,12 @@ fn run_checks_inner(
                 .environment
                 .remove(std::ffi::OsStr::new(fleet::FLEET_KEYED_ENV));
         }
+        // The standard portable-paths check starts this very binary: its path is the one thing the check cannot know.
+        if name == portable_paths::CHECK {
+            if let Ok(exe) = std::env::current_exe() {
+                set(&mut runner.environment, "CCID_BIN", exe.as_os_str());
+            }
+        }
         let started = Instant::now();
         event(json!({"event":"check-start","check":name}));
         // Declared fixtures live exactly as long as this check (docs/fixtures.md).
