@@ -46,6 +46,7 @@ pub mod jobs;
 pub mod lock_refresh;
 mod narrowing;
 mod pack;
+pub mod portable_paths;
 pub mod push;
 #[cfg(unix)]
 pub mod read_set;

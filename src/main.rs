@@ -224,6 +224,8 @@ enum Action {
     },
     /// Check locked content pins (fixture digests, native artifact versions).
     ContentPins(ccid::content_pins::Options),
+    /// Tracked file names that work on every system (characters, case, Windows device names, lengths, symlinks).
+    PortablePaths(ccid::portable_paths::Options),
     /// Require main declarations and one resolved revision per first-party crate.
     FirstParty(ccid::first_party::Options),
     /// Float the first-party branch-tracking git dependencies outside the repository: resolve
@@ -820,6 +822,15 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid content-pins: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::PortablePaths(options) => {
+            return match ccid::portable_paths::run(&options) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid portable-paths: {error}");
                     ExitCode::from(2)
                 }
             };
