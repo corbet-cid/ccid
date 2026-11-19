@@ -390,7 +390,7 @@ fn add_standard_checks(manifest: &mut Manifest) -> Result<()> {
                 return Ok(());
             }
             let job: jobs::Job = toml::from_str(
-                "scheduler = \"forgejo\"\nchecks = [\"portable-paths\"]\nworkflow = \"portable-paths\"\ncommand = [\"ccid:run-declared-checks\"]\narchive_inputs = false\n",
+                "scheduler = \"forgejo\"\nchecks = [\"portable-paths\"]\nworkflow = \"portable-paths\"\ncommand = [\"ccid:run-declared-checks\"]\nruns_on = \"linux\"\narchive_inputs = false\n",
             )?;
             manifest.jobs.insert(portable_paths::CHECK.to_owned(), job);
         }

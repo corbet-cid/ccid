@@ -629,6 +629,7 @@ mod tests {
         let m = crate::parse_manifest(own_command.as_bytes()).unwrap();
         assert!(!m.jobs["verify"].names_check(CHECK));
         assert!(m.jobs[CHECK].names_check(CHECK));
+        assert!(format!("{:?}", m.jobs[CHECK]).contains("runs_on: Some(\"linux\")"));
         // no render_schema (the repository pins its own ccid): left alone
         let none = "schema = 1\nproject = \"demo\"\n\n[checks.test]\nkind = \"commands\"\ncommands = [[\"true\"]]\n";
         assert!(!crate::parse_manifest(none.as_bytes())
