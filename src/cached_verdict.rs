@@ -2610,6 +2610,17 @@ mod own_tool_tests {
         };
         fs::remove_file(&copy).unwrap();
         let link = PathBuf::from(format!("/proc/{}/exe", child.id()));
+        // The child may still be between fork and exec on a loaded host (then `exe` is this test binary): wait until it
+        // names the deleted copy, which is the state the identity must survive.
+        let mut waited = 0;
+        while !fs::read_link(&link)
+            .map(|target| target.to_string_lossy().contains("blocker"))
+            .unwrap_or(false)
+            && waited < 400
+        {
+            thread::sleep(Duration::from_millis(25));
+            waited += 1;
+        }
         assert_eq!(hash_running_exe(&link).unwrap(), expected);
         child.kill().unwrap();
         child.wait().unwrap();
