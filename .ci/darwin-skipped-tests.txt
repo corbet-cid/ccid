@@ -25,3 +25,10 @@ job_runtime::
 # directory as the test spells it; macOS spells it /private/var where the test says /var (suspected, not investigated). It was the
 # only test that failed on macOS at 7c3b50b (the first run that printed the failing names, 2026-11-13); the product code is not involved.
 cached_verdict::tests::the_traced_run_has_no_compile_cache_and_writes_the_receipt_the_executor_would
+# /proc/locks is read to find the pool file an ancestor process holds (Linux only).
+heavy_lock::tests::two_callers_on_one_file_serialise_and_a_second_file_does_not_wait
+# The test spells /bin/true; macOS keeps true in /usr/bin, and the self-check compares the test executable's path as the OS spells it (not investigated).
+rustc_diag::tests::resolve_compiler_composes_chain_without_recursion
+# The rendered shim these tests run verifies the previous release with `sha256sum --check --strict`; the BSD sha256sum has neither option.
+render::a_repository_two_releases_back_passes_and_three_back_is_refused
+render::drifted_adapters_pass_when_the_previous_release_accepts_them_and_not_otherwise
