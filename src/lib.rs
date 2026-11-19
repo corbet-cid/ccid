@@ -371,8 +371,14 @@ fn add_standard_checks(manifest: &mut Manifest) -> Result<()> {
     }
     // This very binary runs the check: the job's environment names it in CCID_BIN (a PATH need not hold a ccid), and the
     // command stays the same text for every binary, so the rendered adapters do not depend on where ccid lives.
+    // Report mode never fails the job, not even when ccid cannot be started (a job without CCID_BIN or a PATH ccid).
+    let script = if mode == "report" {
+        "\\\"${CCID_BIN:-ccid}\\\" portable-paths --mode report || echo \\\"portable-paths: not run (report mode never fails the job)\\\" >&2; exit 0"
+    } else {
+        "exec \\\"${CCID_BIN:-ccid}\\\" portable-paths --mode enforce"
+    };
     let check: Check = toml::from_str(&format!(
-        "kind = \"commands\"\ncache = false\ncommands = [[\"sh\", \"-c\", \"exec \\\"${{CCID_BIN:-ccid}}\\\" portable-paths --mode {mode}\"]]\n"
+        "kind = \"commands\"\ncache = false\ncommands = [[\"/bin/sh\", \"-c\", \"{script}\"]]\n"
     ))?;
     manifest
         .checks
