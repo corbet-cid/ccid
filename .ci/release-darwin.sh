@@ -41,9 +41,16 @@ call() { # METHOD URL [curl args]: the body lands in $scratch/response, prints t
 cp "$scratch/response" "$scratch/release.json"
 id=$(jq -r .id "$scratch/release.json")
 mkdir "$scratch/in"
+readauth=auth
+if [ -n "${CCID_FORGE_READ_TOKEN_FILE:-}" ] && [ -r "$CCID_FORGE_READ_TOKEN_FILE" ]; then
+  printf 'header = "Authorization: token %s"\n' "$(tr -d '\n' < "$CCID_FORGE_READ_TOKEN_FILE")" > "$scratch/readauth"
+  chmod 0600 "$scratch/readauth"
+  readauth=readauth
+fi
 for file in "$name" "$bundle" "$name.sha256"; do
-  url=$(jq -er --arg n "$file" '.assets[] | select(.name == $n) | .browser_download_url' "$scratch/release.json")
-  curl -q --silent --show-error --fail --max-time 900 -K "$scratch/auth" -o "$scratch/in/$file" "$url"
+  # A draft is read through the API (the browser URL of a draft asset answers 404); the read credential, when the clone has one, reads it.
+  aid=$(jq -er --arg n "$file" '.assets[] | select(.name == $n) | .id' "$scratch/release.json")
+  curl -q --silent --show-error --fail --max-time 900 -K "$scratch/${readauth}" -H 'Accept: application/octet-stream' -o "$scratch/in/$file" "$api/releases/$id/assets/$aid"
 done
 (cd "$scratch/in" && shasum -a 256 -c "$name.sha256")
 
