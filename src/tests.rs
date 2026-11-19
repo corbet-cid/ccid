@@ -504,8 +504,28 @@ fn history_checks_are_commit_keyed_or_uncached() {
         .contains("history = true"));
     for ok in ["cache_commit = true", "cache = false"] {
         let manifest = parse_manifest(format!("{head}history = true\n{ok}\n").as_bytes()).unwrap();
-        assert!(manifest.checks["r"].history);
+        assert!(manifest.checks["r"].history.is_some());
     }
+    for (text, mode) in [
+        ("history = \"push\"", HistoryMode::Push),
+        ("history = \"full\"", HistoryMode::Full),
+        ("history = true", HistoryMode::Full),
+        ("history = false", HistoryMode::None),
+    ] {
+        let manifest =
+            parse_manifest(format!("{head}{text}\ncache_commit = true\n").as_bytes()).unwrap();
+        assert_eq!(manifest.checks["r"].history, mode, "{text}");
+        // a check that reads history is never served from a staged copy or the result cache
+        if mode.is_some() {
+            assert!(
+                !crate::checks::cache_eligible(&manifest.checks["r"]),
+                "{text}"
+            );
+        }
+    }
+    assert!(
+        parse_manifest(format!("{head}history = \"some\"\ncache = false\n").as_bytes()).is_err()
+    );
     let plain = parse_manifest(head.as_bytes()).unwrap();
     assert!(serde_json::to_value(&plain.checks["r"])
         .unwrap()

@@ -14,6 +14,64 @@ use std::{
 
 pub const SOURCE_REVISION: &str = env!("CCID_SOURCE_REVISION");
 
+/// What a check reads of git history (`history` in `.ci/ccid.toml`). A check that reads history runs in the job's own
+/// checkout, never in a staged copy (a staged copy has no `.git`), so it is never served from the result cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryMode {
+    #[default]
+    None,
+    /// The commits between the push's previous tip and the commit: `CCID_PUSH_BEFORE..HEAD` resolves.
+    Push,
+    /// The whole history of the commit.
+    Full,
+}
+
+impl HistoryMode {
+    pub fn is_none(&self) -> bool {
+        *self == HistoryMode::None
+    }
+    pub fn is_some(&self) -> bool {
+        !self.is_none()
+    }
+}
+
+impl<'de> Deserialize<'de> for HistoryMode {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Flag(bool),
+            Name(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Flag(false) => Ok(HistoryMode::None),
+            Raw::Flag(true) => Ok(HistoryMode::Full),
+            Raw::Name(name) => match name.as_str() {
+                "push" => Ok(HistoryMode::Push),
+                "full" => Ok(HistoryMode::Full),
+                other => Err(serde::de::Error::custom(format!(
+                    "history is true, false, \"push\" or \"full\", not {other:?}"
+                ))),
+            },
+        }
+    }
+}
+
+impl serde::Serialize for HistoryMode {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            HistoryMode::None => serializer.serialize_bool(false),
+            HistoryMode::Push => serializer.serialize_str("push"),
+            HistoryMode::Full => serializer.serialize_bool(true),
+        }
+    }
+}
+
 /// The shared build profile (profiles/dev.toml) as a cargo config fragment. See the file for why it is config and never CARGO_PROFILE_* environment.
 pub const DEV_PROFILE: &str = include_str!("../profiles/dev.toml");
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -272,8 +330,9 @@ pub struct Check {
     /// The check reads git history (a push range, signatures): `ccid job-run` fetches the full history of the commit
     /// and exports the push's previous tip as `CCID_PUSH_BEFORE` (never part of a key). Such a check is commit-keyed
     /// (`cache_commit = true`) or uncached (`cache = false`), because the range is not a property of the tree.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    history: bool,
+    /// `true` and `"full"` fetch the whole history of the commit; `"push"` only the commits of the push (`CCID_PUSH_BEFORE..HEAD`).
+    #[serde(skip_serializing_if = "HistoryMode::is_none")]
+    history: HistoryMode,
     cache_inputs: Option<Vec<String>>,
     /// Names of the declared `[fixtures.*]` this check runs with; they live for the whole check.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -316,7 +375,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
     fleet::normalise(&mut parsed.checks)?;
     fixtures::validate(&parsed.fixtures, &parsed.checks)?;
     for (name, check) in &parsed.checks {
-        if check.history && !check.cache_commit && check.cache != Some(false) {
+        if check.history.is_some() && !check.cache_commit && check.cache != Some(false) {
             return Err(failure(format!(
                 "check {name} declares history = true: it must also declare cache_commit = true or cache = false (a history result is not a property of the tree)"
             )));

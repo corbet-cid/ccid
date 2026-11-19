@@ -231,8 +231,18 @@ commands = [
 
 ## Checks that read git history (`history = true`)
 
-A check such as a push-range or signature gate judges commits, not the tree. Declare `history = true` on it. It must
+A check such as a push-range or signature gate judges commits, not the tree. Declare `history = true` (or the
+explicit `history = "full"`) on it, or `history = "push"` when it needs only the commits of the push (below). It must
 also declare `cache_commit = true` or `cache = false` (a range is not a property of the tree; the manifest is refused
 otherwise). `ccid job-run` then fetches the full history of the commit instead of the depth-1 checkout, and exports
 `CCID_PUSH_BEFORE` (the previous tip of the push, from the event payload `GITHUB_EVENT_PATH`; absent for a new branch,
 a manual run or `--local`). The variable is never part of a key. A manifest without `history` renders and keys exactly as before.
+
+`history = "push"` fetches only what `CCID_PUSH_BEFORE..HEAD` needs: `job-run` deepens the depth-1 checkout in steps
+(50, 500, 5000 commits) until the push's previous tip is an ancestor of the commit, and takes the whole history only when
+a step does not reach it (a force push, a very long push). It applies when every history check of the job says `"push"`
+and the event names the previous tip; otherwise the job behaves as `"full"`. `history = true`, `"full"` and the default
+(no history, the cheap depth-1 checkout) are unchanged.
+
+A check that reads history always runs in the job's own checkout: it is never served from the result cache and never
+runs in the staged copy of `ccid cached` (a staged copy has no `.git`, so `CCID_PUSH_BEFORE` could not resolve there).

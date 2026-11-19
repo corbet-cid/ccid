@@ -281,6 +281,33 @@ pub fn fetch(dir: &Path, want: &str, token: &str, pace: &Pace) -> Result<()> {
     fetch_depth(dir, want, token, pace, "1")
 }
 
+/// Deepen the checkout until `before` is an ancestor of the commit, so `before..HEAD` resolves, asking for more history in
+/// growing steps (a push is a handful of commits) and for everything when a step does not reach it.
+pub fn fetch_push_range(
+    dir: &Path,
+    want: &str,
+    before: &str,
+    token: &str,
+    pace: &Pace,
+) -> Result<()> {
+    let reached = |dir: &Path| {
+        git(pace, dir)
+            .args(["merge-base", "--is-ancestor", before, want])
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    };
+    for depth in ["50", "500", "5000"] {
+        fetch_depth(dir, want, token, pace, depth)?;
+        if reached(dir) {
+            return Ok(());
+        }
+    }
+    // The previous tip is not an ancestor (a force push) or far away: the whole history, as `history = "full"`.
+    fetch_depth(dir, want, token, pace, "2147483647")
+}
+
 /// `fetch` with a chosen depth: `1` for the checkout, `2147483647` (git's "everything", it also converts a shallow copy
 /// into a complete one) for a check that declares `history = true`. Same routing: the near copy once, then the forge once.
 pub fn fetch_depth(dir: &Path, want: &str, token: &str, pace: &Pace, depth: &str) -> Result<()> {
@@ -654,8 +681,12 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     let manifest = Path::new(".ci/ccid.toml");
     let plan = jobs::plan(Path::new("."), manifest, &options.job, None)?;
     if plan.history {
-        // A check that reads git history (push range, signatures) gets the whole history of the commit, not the depth-1 checkout.
-        fetch_depth(&dir, &options.sha, &token, pace, "2147483647")?;
+        // A check that reads git history (push range, signatures) gets history, not the depth-1 checkout: only the commits
+        // of the push when every such check says `"push"` and the event names the previous tip, else the whole history.
+        match push_before(&options.sha).filter(|_| plan.history_push_only) {
+            Some(before) => fetch_push_range(&dir, &options.sha, &before, &token, pace)?,
+            None => fetch_depth(&dir, &options.sha, &token, pace, "2147483647")?,
+        }
     }
     execute_job(options, &exe, plan, Some((&token, &dir)), pace)
 }
@@ -1210,5 +1241,65 @@ mod tests {
             "v2 7 A boot-1"
         );
         assert_eq!(owner_line(7, &host(None, true, None)), "v2 7 - -");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_push_range_is_reached_by_deepening_a_shallow_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |dir: &Path, args: &[&str]| -> String {
+            let output = Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        let source = root.join("source");
+        fs::create_dir_all(&source).unwrap();
+        run(&source, &["init", "--quiet", "-b", "main"]);
+        let mut shas = Vec::new();
+        for n in 0..4 {
+            fs::write(source.join("f"), n.to_string()).unwrap();
+            run(&source, &["add", "f"]);
+            run(&source, &["commit", "--quiet", "-m", &format!("c{n}")]);
+            shas.push(run(&source, &["rev-parse", "HEAD"]));
+        }
+        run(
+            &source,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        let checkout = root.join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        run(&checkout, &["init", "--quiet"]);
+        run(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", source.display()),
+            ],
+        );
+        fetch_depth(&checkout, &shas[3], "t", &quick(), "1").unwrap();
+        run(&checkout, &["checkout", "--quiet", "--detach", &shas[3]]);
+        // the shallow checkout has no parent: the range does not resolve
+        assert!(Command::new("git")
+            .current_dir(&checkout)
+            .args(["rev-list", &format!("{}..HEAD", shas[1])])
+            .output()
+            .map(|o| !o.status.success() || o.stdout.is_empty())
+            .unwrap());
+        fetch_push_range(&checkout, &shas[3], &shas[1], "t", &quick()).unwrap();
+        let range = run(&checkout, &["rev-list", &format!("{}..HEAD", shas[1])]);
+        assert_eq!(range.lines().count(), 2, "{range}");
     }
 }

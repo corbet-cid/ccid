@@ -106,6 +106,7 @@ pub(crate) fn job_plan(
         job: name.to_owned(),
         scheduler: crate::jobs::Scheduler::Forgejo,
         history: false,
+        history_push_only: false,
         checks,
         workflow: WORKFLOW.to_owned(),
         command: vec![command.to_owned()],

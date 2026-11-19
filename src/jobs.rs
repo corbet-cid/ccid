@@ -154,6 +154,10 @@ pub struct Plan {
     /// skipped when false so existing inventories render byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub history: bool,
+    /// Every history check of the job is `history = "push"`: `job-run` fetches only the commits of the push. Skipped when
+    /// false, so inventories of manifests that do not use `"push"` render byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_push_only: bool,
     /// Forgejo: archive the locked flake inputs after the checks; skipped when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub archive_inputs: bool,
@@ -492,13 +496,19 @@ pub(crate) fn plan_parsed(
             "runs_on, paths, events, siblings and archive_inputs belong to Forgejo jobs",
         ));
     }
-    let history = checks
+    let modes: Vec<crate::HistoryMode> = checks
         .iter()
-        .any(|check| manifest.checks.get(check).is_some_and(|c| c.history));
+        .filter_map(|check| manifest.checks.get(check))
+        .map(|c| c.history)
+        .filter(|mode| mode.is_some())
+        .collect();
+    let history = !modes.is_empty();
+    let history_push_only = history && modes.iter().all(|mode| *mode == crate::HistoryMode::Push);
     Ok(Plan {
         job: name.into(),
         scheduler: effective,
         history,
+        history_push_only,
         checks,
         workflow: job.workflow.clone(),
         command: job.command.clone(),

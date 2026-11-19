@@ -354,6 +354,7 @@ pub(crate) fn validate_cached_contract(check: &Check) -> Result<()> {
 /// by the cache runtime and degrade to an uncached run with a receipt.
 pub(crate) fn cache_eligible(check: &Check) -> bool {
     if check.cache == Some(false)
+        || check.history.is_some()
         || check.cache_pure == Some(false)
         || validate_cached_contract(check).is_err()
     {
