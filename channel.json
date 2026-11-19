@@ -1,27 +1,63 @@
 {
   "_doc": "The central ccid release channel. Workflows rendered with render_schema = 2 read this file (the runner names its URL in CCID_CHANNEL_URL) and run the release it selects. `classes` overrides `default` per runs-on label (canary: change one class first). A bump is a commit to this file; a rollback is a revert. The release must be published in the corbet-cid generic package registry. `fleet` is fleet data (first-party owner prefixes and their legacy aliases) that checks with `fleet = true` read; an org move is an edit of this object.",
   "default": {
-    "revision": "20bbdb34eb2106b23ba45c984e76a4a1d353a5d0",
-    "sha256": "6a5e70f4a2ab9aae0ed32d6fb049b62fefa5b4ae1536dcabc41379e5c3a252ec"
+    "revision": "d8f072cbc716a22d2e8f4b90915c479974eba1d5",
+    "sha256": "c63aabf7f38a1804e7e676c7f792e241ef91e82542e505a10365180f9a2cb9d7"
   },
   "classes": {
     "linux": {
-      "revision": "20bbdb34eb2106b23ba45c984e76a4a1d353a5d0",
-      "sha256": "6a5e70f4a2ab9aae0ed32d6fb049b62fefa5b4ae1536dcabc41379e5c3a252ec"
+      "revision": "d8f072cbc716a22d2e8f4b90915c479974eba1d5",
+      "sha256": "c63aabf7f38a1804e7e676c7f792e241ef91e82542e505a10365180f9a2cb9d7"
     },
     "macos": {
-      "revision": "20bbdb34eb2106b23ba45c984e76a4a1d353a5d0",
-      "sha256": "4f7846594a8a03f71e9f7ad143655e53f3bfea28f2ef91bcb5f939b5558a2c05"
+      "revision": "d8f072cbc716a22d2e8f4b90915c479974eba1d5",
+      "sha256": "4fedbf8f9f8793695958b56f01e1acc07d650ca36ea3a52f0eebbac4b8e3eb39"
     }
   },
   "previous": [
-    {"default": {"revision": "a01d3c86e2c2fa1781ab21f5f08da26ad7c400a0", "sha256": "c0337e3155970c602a1d3482b456669205505f27691c0fa024cfb701ade1b7d0"}, "classes": {"linux": {"revision": "a01d3c86e2c2fa1781ab21f5f08da26ad7c400a0", "sha256": "c0337e3155970c602a1d3482b456669205505f27691c0fa024cfb701ade1b7d0"}}},
-    {"default": {"revision": "ad24cb3bf99f257ce5f60322c8247809979dfe4d", "sha256": "3496b70313173247b8d4c3b79ea697d70b1d2ff435ce5d8649ba94c9daf6c6d2"}, "classes": {"linux": {"revision": "ad24cb3bf99f257ce5f60322c8247809979dfe4d", "sha256": "3496b70313173247b8d4c3b79ea697d70b1d2ff435ce5d8649ba94c9daf6c6d2"}}},
-    {"default": {"revision": "0a46dc33f98a6820b789586ed7b5f2eff8db9aa2", "sha256": "f379a94ebd32f1b88f5dfc865a22c40fba8adf67f296677d86b0aa0492d3c74f"}, "classes": {"linux": {"revision": "0a46dc33f98a6820b789586ed7b5f2eff8db9aa2", "sha256": "f379a94ebd32f1b88f5dfc865a22c40fba8adf67f296677d86b0aa0492d3c74f"}}}
+    {
+      "default": {
+        "revision": "20bbdb34eb2106b23ba45c984e76a4a1d353a5d0",
+        "sha256": "6a5e70f4a2ab9aae0ed32d6fb049b62fefa5b4ae1536dcabc41379e5c3a252ec"
+      },
+      "classes": {
+        "linux": {
+          "revision": "20bbdb34eb2106b23ba45c984e76a4a1d353a5d0",
+          "sha256": "6a5e70f4a2ab9aae0ed32d6fb049b62fefa5b4ae1536dcabc41379e5c3a252ec"
+        }
+      }
+    },
+    {
+      "default": {
+        "revision": "a01d3c86e2c2fa1781ab21f5f08da26ad7c400a0",
+        "sha256": "c0337e3155970c602a1d3482b456669205505f27691c0fa024cfb701ade1b7d0"
+      },
+      "classes": {
+        "linux": {
+          "revision": "a01d3c86e2c2fa1781ab21f5f08da26ad7c400a0",
+          "sha256": "c0337e3155970c602a1d3482b456669205505f27691c0fa024cfb701ade1b7d0"
+        }
+      }
+    },
+    {
+      "default": {
+        "revision": "ad24cb3bf99f257ce5f60322c8247809979dfe4d",
+        "sha256": "3496b70313173247b8d4c3b79ea697d70b1d2ff435ce5d8649ba94c9daf6c6d2"
+      },
+      "classes": {
+        "linux": {
+          "revision": "ad24cb3bf99f257ce5f60322c8247809979dfe4d",
+          "sha256": "3496b70313173247b8d4c3b79ea697d70b1d2ff435ce5d8649ba94c9daf6c6d2"
+        }
+      }
+    }
   ],
   "fleet": {
     "schema": 1,
-    "forge_hosts": ["git.corbet.ch", "forge.corbet.ch"],
+    "forge_hosts": [
+      "git.corbet.ch",
+      "forge.corbet.ch"
+    ],
     "first_party": [
       "https://git.corbet.ch/cmtymeet/",
       "https://git.corbet.ch/cmtymt/",
