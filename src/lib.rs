@@ -369,14 +369,10 @@ fn add_standard_checks(manifest: &mut Manifest) -> Result<()> {
             "[portable_paths] mode is \"report\" or \"enforce\"",
         ));
     }
-    // This very binary runs the check (a job's PATH need not hold a ccid): its absolute path, else the name.
-    let exe = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.to_str().map(str::to_owned))
-        .unwrap_or_else(|| "ccid".to_owned());
+    // This very binary runs the check: the job's environment names it in CCID_BIN (a PATH need not hold a ccid), and the
+    // command stays the same text for every binary, so the rendered adapters do not depend on where ccid lives.
     let check: Check = toml::from_str(&format!(
-        "kind = \"commands\"\ncache = false\ncommands = [[{}, \"portable-paths\", \"--mode\", \"{mode}\"]]\n",
-        serde_json::to_string(&exe)?
+        "kind = \"commands\"\ncache = false\ncommands = [[\"sh\", \"-c\", \"exec \\\"${{CCID_BIN:-ccid}}\\\" portable-paths --mode {mode}\"]]\n"
     ))?;
     manifest
         .checks
