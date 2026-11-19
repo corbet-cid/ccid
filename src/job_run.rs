@@ -72,44 +72,163 @@ impl Default for Pace {
     }
 }
 
-/// Start time of a process (field 22 of `/proc/<pid>/stat`), the pid's identity across reuse.
+/// Start time of a process: field 22 of `/proc/<pid>/stat` where there is a /proc, else what `ps -o lstart=` prints
+/// (macOS has no /proc). It is the pid's identity across reuse.
 fn start_time(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name may hold spaces and parentheses: fields start after the last ')'.
-    let rest = &stat[stat.rfind(')')? + 1..];
-    // After ')' the first field is the state (field 3), so field 22 is index 19.
-    rest.split_whitespace().nth(19).map(str::to_owned)
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // The command name may hold spaces and parentheses: fields start after the last ')'.
+        let rest = &stat[stat.rfind(')')? + 1..];
+        // After ')' the first field is the state (field 3), so field 22 is index 19.
+        return rest.split_whitespace().nth(19).map(str::to_owned);
+    }
+    if Path::new("/proc/self/stat").exists() {
+        return None; // there is a /proc and this pid is not in it
+    }
+    let output = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.split_whitespace().collect::<Vec<_>>().join("_");
+    (output.status.success() && !text.is_empty()).then_some(text)
 }
 
-fn owner_line(pid: u32) -> String {
-    format!("{pid} {}", start_time(pid).unwrap_or_default())
+/// When this boot began, in seconds since the epoch (`btime` of /proc/stat, else `sysctl kern.boottime`).
+fn boot_seconds() -> Option<u64> {
+    if let Ok(stat) = fs::read_to_string("/proc/stat") {
+        if let Some(line) = stat.lines().find_map(|line| line.strip_prefix("btime ")) {
+            return line.trim().parse().ok();
+        }
+    }
+    let output = Command::new("sysctl")
+        .args(["-n", "kern.boottime"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    // `{ sec = 1763500000, usec = 123456 } Wed Nov 19 ...`
+    let after = &text[text.find("sec =")? + 5..];
+    after
+        .trim_start()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The identity of this boot: Linux's boot id, else the boot time (macOS).
+fn boot_identity() -> Option<String> {
+    if let Ok(id) = fs::read_to_string("/proc/sys/kernel/random/boot_id") {
+        let id = id.trim();
+        if !id.is_empty() {
+            return Some(id.to_owned());
+        }
+    }
+    boot_seconds().map(|seconds| format!("boot-{seconds}"))
+}
+
+/// Whether a process with this pid exists (`kill(pid, 0)`: EPERM still means it exists).
+#[cfg(unix)]
+fn pid_exists(pid: u32) -> bool {
+    use rustix::io::Errno;
+    let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
+        return false;
+    };
+    !matches!(rustix::process::test_kill_process(pid), Err(Errno::SRCH))
+}
+
+#[cfg(not(unix))]
+fn pid_exists(pid: u32) -> bool {
+    start_time(pid).is_some()
+}
+
+/// What the liveness of a slot owner is judged against; tests replace it.
+struct Host {
+    boot: Option<String>,
+    boot_seconds: Option<u64>,
+    start_time: fn(u32) -> Option<String>,
+    pid_exists: fn(u32) -> bool,
+}
+
+impl Host {
+    fn real() -> Host {
+        Host {
+            boot: boot_identity(),
+            boot_seconds: boot_seconds(),
+            start_time,
+            pid_exists,
+        }
+    }
+}
+
+/// `v2 <pid> <start time or -> <boot identity or ->`: the owner of a slot lock.
+fn owner_line(pid: u32, host: &Host) -> String {
+    let start = (host.start_time)(pid).unwrap_or_else(|| "-".into());
+    let boot = host.boot.clone().unwrap_or_else(|| "-".into());
+    format!("v2 {pid} {start} {boot}")
+}
+
+/// Whether the owner recorded in `held` is gone. An empty line is a claim in progress, not a dead one. A lock from another
+/// boot is dead, so is a pid that does not exist, and a pid whose start time differs (the pid was reused). A line without a
+/// boot identity (the old `<pid> <start time>` format) with no start time cannot name a process: it is dead when the pid
+/// is absent or when the lock was made before this boot (`lock_mtime`, seconds since the epoch).
+fn owner_gone(held: &str, lock_mtime: Option<u64>, host: &Host) -> bool {
+    let mut parts = held.split_whitespace().peekable();
+    let versioned = parts.peek() == Some(&"v2");
+    if versioned {
+        parts.next();
+    }
+    let Some(owner) = parts.next().and_then(|text| text.parse::<u32>().ok()) else {
+        return false;
+    };
+    let started = parts.next().filter(|text| *text != "-").map(str::to_owned);
+    let recorded_boot = if versioned {
+        parts.next().filter(|text| *text != "-").map(str::to_owned)
+    } else {
+        None
+    };
+    if let (Some(recorded), Some(current)) = (&recorded_boot, &host.boot) {
+        if recorded != current {
+            return true;
+        }
+    }
+    if !(host.pid_exists)(owner) {
+        return true;
+    }
+    match (&started, (host.start_time)(owner)) {
+        (Some(then), now) => now.as_ref() != Some(then),
+        (None, _) => match (recorded_boot, lock_mtime, host.boot_seconds) {
+            // An old line cannot tell the boot: a lock older than this boot is dead.
+            (None, Some(made), Some(boot)) => made + 2 < boot,
+            _ => false,
+        },
+    }
 }
 
 /// Claim one of `slots` source directories below `base`; returns the claimed `slot-N` directory.
 pub fn claim_slot(base: &Path, slots: usize, pid: u32, pace: &Pace) -> Result<PathBuf> {
     fs::create_dir_all(base)?;
     let deadline = Instant::now() + pace.slot_timeout;
+    let host = Host::real();
     loop {
         for n in 1..=slots {
             let lock = base.join(format!("slot-{n}.lock"));
             loop {
                 match fs::create_dir(&lock) {
                     Ok(()) => {
-                        fs::write(lock.join("owner"), owner_line(pid))?;
+                        fs::write(lock.join("owner"), owner_line(pid, &host))?;
                         let dir = base.join(format!("slot-{n}"));
                         fs::create_dir_all(&dir)?;
                         return Ok(dir);
                     }
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         let held = fs::read_to_string(lock.join("owner")).unwrap_or_default();
-                        let mut parts = held.split_whitespace();
-                        let owner = parts.next().and_then(|text| text.parse::<u32>().ok());
-                        let started = parts.next().map(str::to_owned);
-                        let gone = match owner {
-                            // An empty owner file is a claim in progress, not a dead one.
-                            None => false,
-                            Some(owner) => start_time(owner) != started,
-                        };
+                        let made = fs::metadata(&lock)
+                            .and_then(|meta| meta.modified())
+                            .ok()
+                            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|elapsed| elapsed.as_secs());
+                        let gone = owner_gone(&held, made, &host);
                         if !gone {
                             break;
                         }
@@ -983,5 +1102,113 @@ mod tests {
         let stripped = stripped_profile_variables(&declared);
         assert_eq!(stripped.len(), 3);
         assert!(!stripped.contains(&"CARGO_PROFILE_DEV_DEBUG"));
+    }
+
+    fn host(boot: Option<&str>, alive: bool, start: Option<&'static str>) -> Host {
+        // fn pointers: the fake process table is two constants picked by the test.
+        fn alive_yes(_: u32) -> bool {
+            true
+        }
+        fn alive_no(_: u32) -> bool {
+            false
+        }
+        fn start_a(_: u32) -> Option<String> {
+            Some("A".into())
+        }
+        fn start_b(_: u32) -> Option<String> {
+            Some("B".into())
+        }
+        fn start_none(_: u32) -> Option<String> {
+            None
+        }
+        Host {
+            boot: boot.map(str::to_owned),
+            boot_seconds: Some(1_000),
+            start_time: match start {
+                Some("A") => start_a,
+                Some(_) => start_b,
+                None => start_none,
+            },
+            pid_exists: if alive { alive_yes } else { alive_no },
+        }
+    }
+
+    #[test]
+    fn an_owner_of_another_boot_or_a_missing_pid_is_gone() {
+        // the same boot and a live pid with the recorded start time: held
+        assert!(!owner_gone(
+            "v2 7 A boot-1",
+            Some(2_000),
+            &host(Some("boot-1"), true, Some("A"))
+        ));
+        // another boot: gone, whatever the pid says
+        assert!(owner_gone(
+            "v2 7 A boot-1",
+            Some(2_000),
+            &host(Some("boot-2"), true, Some("A"))
+        ));
+        // no such pid (macOS has no /proc: kill(pid, 0) is the test)
+        assert!(owner_gone(
+            "v2 7 - boot-1",
+            Some(2_000),
+            &host(Some("boot-1"), false, None)
+        ));
+        // the pid was reused: another start time
+        assert!(owner_gone(
+            "v2 7 A boot-1",
+            Some(2_000),
+            &host(Some("boot-1"), true, Some("B"))
+        ));
+        // a start time that cannot be read now (no ps entry) while one was recorded: gone
+        assert!(owner_gone(
+            "v2 7 A boot-1",
+            Some(2_000),
+            &host(Some("boot-1"), true, None)
+        ));
+        // no start time recorded (macOS without ps data), same boot, live pid: held
+        assert!(!owner_gone(
+            "v2 7 - boot-1",
+            Some(2_000),
+            &host(Some("boot-1"), true, None)
+        ));
+        // a claim in progress is never dead
+        assert!(!owner_gone("", Some(1), &host(Some("boot-1"), false, None)));
+    }
+
+    #[test]
+    fn an_old_format_line_is_dead_by_pid_or_by_a_lock_older_than_the_boot() {
+        // `<pid> ` written on macOS: the start time is empty
+        assert!(owner_gone(
+            "7 ",
+            Some(2_000),
+            &host(Some("boot-1"), false, None)
+        ));
+        assert!(!owner_gone(
+            "7 ",
+            Some(2_000),
+            &host(Some("boot-1"), true, None)
+        ));
+        // the pid exists (reused after a reboot) but the lock was made before this boot (1000 s)
+        assert!(owner_gone(
+            "7 ",
+            Some(500),
+            &host(Some("boot-1"), true, None)
+        ));
+        // old Linux line with a start time: the start time decides, as before
+        assert!(!owner_gone(
+            "7 A",
+            Some(2_000),
+            &host(None, true, Some("A"))
+        ));
+        assert!(owner_gone("7 A", Some(2_000), &host(None, true, Some("B"))));
+    }
+
+    #[test]
+    fn the_owner_line_names_the_pid_the_start_time_and_the_boot() {
+        assert_eq!(
+            owner_line(7, &host(Some("boot-1"), true, Some("A"))),
+            "v2 7 A boot-1"
+        );
+        assert_eq!(owner_line(7, &host(None, true, None)), "v2 7 - -");
     }
 }
