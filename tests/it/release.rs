@@ -368,6 +368,90 @@ fn the_preflight_refuses_a_stale_source_a_taken_version_and_a_red_verdict() {
 }
 
 #[test]
+fn a_get_the_line_drops_is_asked_again_and_a_post_that_may_have_landed_is_not() {
+    let fixture = Fixture::new(LIBRARY, "1.2.0");
+    fixture.forge.state.lock().unwrap().drop_gets = 3;
+    let built = fixture.ccid(&["release", "build"], &[]);
+    assert!(built.status.success(), "{}", text(&built));
+    assert!(text(&built).contains("trying again"), "{}", text(&built));
+    // a dropped POST (it may have been applied) is not repeated blindly: the run fails, naming the request
+    let second = Fixture::new(LIBRARY, "1.2.0");
+    second.forge.state.lock().unwrap().drop_posts = 1;
+    let refused = second.ccid(&["release", "build"], &[]);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(text(&refused).contains("POST"), "{}", text(&refused));
+}
+
+/// A library whose build writes a receipt that carries the run's own identity (the pid of the writing shell).
+fn receipted(extra: &str) -> String {
+    format!(
+        "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n\
+         [checks.pack]\nkind = \"commands\"\ncache = false\ncommands = [[\"sh\", \"-c\", \"printf notes > \\\"$CCID_RELEASE_DIR/NOTES.txt\\\"; printf '{{\\\"source\\\":\\\"abc\\\",\\\"run\\\":%s}}' $$ > \\\"$CCID_RELEASE_DIR/a.receipt.json\\\"\"]]\n\
+         [checks.test]\nkind = \"commands\"\ncommands = [[\"true\"]]\n\n\
+         [jobs.verify]\nscheduler = \"forgejo\"\nchecks = [\"test\"]\nworkflow = \"ci\"\ncommand = [\"ccid:run-declared-checks\"]\n\n\
+         [release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\"]\n{extra}"
+    )
+}
+
+#[test]
+fn a_resumed_draft_compares_receipts_by_content_and_keeps_the_evidence_of_a_leg() {
+    let with = receipted("receipts = [\"*.receipt.json\"]\nreceipt_identity = [\"source\"]\n");
+    let fixture = Fixture::new(&with, "1.2.0");
+    assert!(fixture.ccid(&["release", "build"], &[]).status.success());
+    // a leg added its evidence (a file the build never produces) to the draft
+    {
+        let mut state = fixture.forge.state.lock().unwrap();
+        let tag = fixture.draft_tag();
+        let release = state.releases.iter_mut().find(|r| r.tag == tag).unwrap();
+        let id = release.assets.iter().map(|a| a.id).max().unwrap() + 100;
+        release.assets.push(crate::fake_forge::Asset {
+            id,
+            name: "windows.receipt.json".into(),
+            bytes: b"{\"source\":\"abc\"}".to_vec(),
+        });
+    }
+    let again = fixture.ccid(&["release", "build"], &[]);
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(fixture
+        .forge
+        .names(&fixture.draft_tag())
+        .contains(&"windows.receipt.json".to_owned()));
+    // without the declaration the same rerun is refused: the receipt carries another run's identity
+    let plain = receipted("");
+    let other = Fixture::new(&plain, "1.2.0");
+    assert!(other.ccid(&["release", "build"], &[]).status.success());
+    let refused = other.ccid(&["release", "build"], &[]);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("differs from this run's"),
+        "{}",
+        text(&refused)
+    );
+}
+
+#[test]
+fn a_held_asset_that_grew_is_not_called_truncated() {
+    let with = receipted("receipts = [\"*.receipt.json\"]\nreceipt_identity = [\"source\"]\n");
+    let fixture = Fixture::new(&with, "1.2.0");
+    assert!(fixture.ccid(&["release", "build"], &[]).status.success());
+    {
+        let mut state = fixture.forge.state.lock().unwrap();
+        let tag = fixture.draft_tag();
+        let release = state.releases.iter_mut().find(|r| r.tag == tag).unwrap();
+        let asset = release
+            .assets
+            .iter_mut()
+            .find(|a| a.name == "a.receipt.json")
+            .unwrap();
+        asset.bytes =
+            b"{\"source\":\"abc\",\"run\":1,\"more\":\"evidence added by a leg\"}".to_vec();
+    }
+    let again = fixture.ccid(&["release", "build"], &[]);
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(!text(&again).contains("truncated"), "{}", text(&again));
+}
+
+#[test]
 fn an_interrupted_upload_leaves_a_part_that_is_replaced_and_a_rerun_resumes() {
     let fixture = Fixture::new(LIBRARY, "1.2.0");
     fixture.forge.state.lock().unwrap().truncate_next_upload = Some(3);

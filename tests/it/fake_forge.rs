@@ -44,6 +44,10 @@ pub struct State {
     next: u64,
     /// The next upload stores this many bytes and then answers 500 (a connection that broke part-way).
     pub truncate_next_upload: Option<usize>,
+    /// The next this-many GETs are closed without a reply (curl 52: a line that stalls).
+    pub drop_gets: usize,
+    /// The next this-many POSTs are closed without a reply (the request may or may not have been applied).
+    pub drop_posts: usize,
 }
 
 pub struct Forge {
@@ -190,6 +194,14 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<State>>, base: &str) -> std::i
     state
         .requests
         .push(format!("{} {}", request.method, request.path));
+    if request.method == "GET" && state.drop_gets > 0 {
+        state.drop_gets -= 1;
+        return Ok(());
+    }
+    if request.method == "POST" && state.drop_posts > 0 {
+        state.drop_posts -= 1;
+        return Ok(());
+    }
     let writer = request.token == JOB_TOKEN || request.token == READ_TOKEN;
     // Downloads of release assets: a draft's only with the read credential.
     if let Some(rest) = request

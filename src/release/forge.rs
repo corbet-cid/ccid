@@ -44,6 +44,7 @@ impl Release {
 }
 
 /// The body of a request.
+#[derive(Clone, Copy)]
 pub enum Body<'a> {
     Json(&'a serde_json::Value),
     File(&'a Path),
@@ -189,6 +190,10 @@ impl Forge {
         format!("{}/repos/{}/{}", self.api, self.repository, path)
     }
 
+    /// One request, repeated while curl itself fails on a transient transport error (7 refused, 28 timed out, 35 TLS
+    /// reset, 52 empty reply, 56 receive failure, 6 and 55 and 18 on a stalled line). A GET or HEAD repeats always; any
+    /// other method repeats only on 7 (refused: nothing was sent), because a reset after the request left may have been
+    /// applied (callers that upload or delete look at the draft afterwards). Five attempts, `retry_delay` times the attempt.
     fn curl(
         &self,
         auth: &Path,
@@ -198,6 +203,37 @@ impl Forge {
         max_time: u64,
         output: &Path,
     ) -> Result<u16> {
+        let mut attempt = 1;
+        loop {
+            match self.curl_once(auth, method, url, body, max_time, output) {
+                Err((code, error)) => {
+                    let safe = matches!(method, "GET" | "HEAD") || code == Some(7);
+                    if attempt >= 5 || !safe || !code.is_some_and(is_transient) {
+                        return Err(error);
+                    }
+                    eprintln!(
+                        "ccid release: {method} {} failed (curl {}), attempt {attempt} of 5: {}; trying again",
+                        url.strip_prefix(&self.api).unwrap_or(url),
+                        code.unwrap_or(0),
+                        error
+                    );
+                    std::thread::sleep(self.retry_delay * attempt);
+                    attempt += 1;
+                }
+                Ok(status) => return Ok(status),
+            }
+        }
+    }
+
+    fn curl_once(
+        &self,
+        auth: &Path,
+        method: &str,
+        url: &str,
+        body: Option<Body<'_>>,
+        max_time: u64,
+        output: &Path,
+    ) -> std::result::Result<u16, (Option<i32>, Box<dyn std::error::Error + Send + Sync>)> {
         let mut command = Command::new("curl");
         command
             .args(["-q", "--silent", "--show-error", "--max-time"])
@@ -211,7 +247,12 @@ impl Forge {
         match body {
             Some(Body::Json(value)) => {
                 staged = self.scratch.path().join("request.json");
-                fs::write(&staged, serde_json::to_vec(value)?)?;
+                fs::write(
+                    &staged,
+                    serde_json::to_vec(value)
+                        .map_err(|e| (None, Box::<dyn std::error::Error + Send + Sync>::from(e)))?,
+                )
+                .map_err(|e| (None, Box::<dyn std::error::Error + Send + Sync>::from(e)))?;
                 command
                     .args(["-H", "Content-Type: application/json", "--data-binary"])
                     .arg(format!("@{}", staged.display()));
@@ -230,18 +271,26 @@ impl Forge {
         command.arg(url);
         let result = command
             .output()
-            .map_err(|error| failure(format!("cannot run curl: {error}")))?;
+            .map_err(|error| (None, failure(format!("cannot run curl: {error}"))))?;
         if !result.status.success() {
-            return Err(failure(format!(
-                "request failed: {method} {}: {}",
-                url.strip_prefix(&self.api).unwrap_or(url),
-                String::from_utf8_lossy(&result.stderr).trim()
-            )));
+            return Err((
+                result.status.code(),
+                failure(format!(
+                    "request failed: {method} {}: {}",
+                    url.strip_prefix(&self.api).unwrap_or(url),
+                    String::from_utf8_lossy(&result.stderr).trim()
+                )),
+            ));
         }
         String::from_utf8_lossy(&result.stdout)
             .trim()
             .parse()
-            .map_err(|_| failure(format!("curl reported no HTTP status for {method} {url}")))
+            .map_err(|_| {
+                (
+                    None,
+                    failure(format!("curl reported no HTTP status for {method} {url}")),
+                )
+            })
     }
 
     /// One request with the job token.
@@ -470,4 +519,9 @@ impl Forge {
         )
         .map(|_| ())
     }
+}
+
+/// curl exit codes of a transport that may work a moment later.
+fn is_transient(code: i32) -> bool {
+    matches!(code, 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56)
 }

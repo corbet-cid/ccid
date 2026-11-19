@@ -189,6 +189,15 @@ ccid release leg windows|macos [--repo .]          (the jobs; started by ccid jo
 ccid release put FILE... | fetch [NAME...] --into DIR | discard | sums DIR
 ```
 
+**Resuming a draft.** A rerun of `release` for a commit whose draft exists keeps what is compatible and refuses the
+rest: an asset with this run's bytes stays; a truncated part of an interrupted upload (shorter, and a byte prefix of this
+run's file) is removed and uploaded again; a declared manifest stays whatever the legs added to it; a receipt stays when
+`[release] receipts` (globs) names it and its `receipt_identity` keys (source commit, platform, checksum) agree, because
+run, job and time keys are the run's own identity; the receipts of the legs, which the build never writes, stay.
+Everything else is refused as before. All forge calls of the release path retry a transient transport error (curl 6, 7,
+18, 28, 35, 52, 55, 56) up to five times with growing pauses: GET and HEAD always, any other method only on 7 (refused,
+nothing sent), since a reset after a POST left may have been applied.
+
 `discard` deletes the draft of the commit (never a public release); use it when a failed run left a draft
 whose bytes the next run will not match (a receipt that carries the run's identity).
 

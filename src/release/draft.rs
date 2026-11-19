@@ -253,15 +253,47 @@ impl<'a> Draft<'a> {
         Ok(names)
     }
 
-    /// Every asset already held must be one of `files` with exactly its bytes; a wrong-size one (an interrupted
-    /// upload) is removed first. Anything else is refused: a draft never mixes two runs' bytes.
-    pub fn settle_existing(&mut self, files: &BTreeMap<String, PathBuf>) -> Result<()> {
+    /// A resumed draft. What it may hold:
+    /// * an asset of this run's files with exactly its bytes (kept);
+    /// * a truncated part of one (shorter, and a byte prefix of this run's file): removed, then uploaded again;
+    /// * a declared manifest (seal and the legs add their evidence to it) or a receipt whose content identity matches
+    ///   (`receipt_identity`; run, job and time keys are the run's own): kept as it is;
+    /// * a receipt this run does not produce (the evidence of a leg): kept.
+    ///
+    /// Anything else is refused: a draft never mixes two runs' bytes.
+    pub fn settle_existing(
+        &mut self,
+        files: &BTreeMap<String, PathBuf>,
+        config: &super::Config,
+    ) -> Result<()> {
+        let mut dropped = Vec::new();
         for (name, path) in files {
-            self.drop_wrong_size(name, fs::metadata(path)?.len())?;
+            let Some(held) = self.release.asset(name).cloned() else {
+                continue;
+            };
+            let size = fs::metadata(path)?.len();
+            if held.size >= size {
+                continue;
+            }
+            // Shorter: a part of an interrupted upload only when it is a prefix of this run's bytes.
+            let scratch = tempfile::tempdir()?;
+            let copy = scratch.path().join("held");
+            self.forge.download(&held, &copy)?;
+            let ours = fs::read(path)?;
+            if fs::read(&copy)? == ours[..held.size as usize] {
+                dropped.push(name.clone());
+            }
+        }
+        for name in dropped {
+            let size = fs::metadata(&files[&name])?.len();
+            self.drop_wrong_size(&name, size)?;
         }
         let held: Vec<Asset> = self.release.assets.clone();
         for asset in held {
             let Some(path) = files.get(&asset.name) else {
+                if config.is_receipt(&asset.name) {
+                    continue; // the evidence of a leg
+                }
                 return Err(failure(format!(
                     "the draft {} holds {}, which this run does not produce: delete the draft (ccid release discard) and release again",
                     self.release.tag_name, asset.name
@@ -275,12 +307,21 @@ impl<'a> Draft<'a> {
                     asset.name
                 ))
             })?;
-            if sha256_file(&copy)? != sha256_file(path)? {
-                return Err(failure(format!(
-                    "the draft's {} differs from this run's: delete the draft (ccid release discard) and release again",
-                    asset.name
-                )));
+            if sha256_file(&copy)? == sha256_file(path)? {
+                continue;
             }
+            if config.manifests.contains(&asset.name) {
+                continue; // seal and the legs change the manifests
+            }
+            if config.is_receipt(&asset.name)
+                && same_identity(&copy, path, &config.receipt_identity)
+            {
+                continue;
+            }
+            return Err(failure(format!(
+                "the draft's {} differs from this run's: delete the draft (ccid release discard) and release again",
+                asset.name
+            )));
         }
         Ok(())
     }
@@ -337,6 +378,19 @@ impl<'a> Draft<'a> {
         self.require_draft()?;
         self.forge.delete_release(self.release.id)
     }
+}
+
+/// Whether two receipts (JSON objects) agree on every identity key: each key present in both with the same value, and
+/// present in at least one of them.
+pub(crate) fn same_identity(held: &Path, ours: &Path, keys: &[String]) -> bool {
+    let read = |path: &Path| -> Option<serde_json::Value> {
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
+    };
+    let (Some(held), Some(ours)) = (read(held), read(ours)) else {
+        return false;
+    };
+    keys.iter().all(|key| held.get(key) == ours.get(key))
+        && keys.iter().any(|key| ours.get(key).is_some())
 }
 
 #[cfg(test)]

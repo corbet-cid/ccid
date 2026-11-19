@@ -173,6 +173,15 @@ pub struct Config {
     /// any release file, but promotion deletes them from the draft before the seal checks and `SHA256SUMS`.
     #[serde(default)]
     pub scratch: Vec<String>,
+    /// Globs over plain asset names of the receipts: evidence that carries the identity of the run that wrote it. A resumed
+    /// release (the draft of the commit exists) compares a receipt by `receipt_identity` only, and leaves the receipts of
+    /// the legs (which the build never produces) alone.
+    #[serde(default)]
+    pub receipts: Vec<String>,
+    /// The top-level keys of a receipt that name its content (source commit, platform, checksum of the binary); every
+    /// other key (run, job, time) is the run's own identity and is ignored when a draft is resumed.
+    #[serde(default)]
+    pub receipt_identity: Vec<String>,
     #[serde(default)]
     pub registries: Vec<Registry>,
     /// A file of the repository whose text is the body of the release (default: one generated line).
@@ -256,6 +265,18 @@ impl Config {
             if !plain_asset_name(name) || name == SUMS {
                 return Err(failure(format!(
                     "[release] manifests: {name:?} is not a plain asset name (and {SUMS} is written by ccid)"
+                )));
+            }
+        }
+        if self.receipts.is_empty() != self.receipt_identity.is_empty() {
+            return Err(failure(
+                "[release] receipts and receipt_identity go together: the receipts to compare and the keys that name their content",
+            ));
+        }
+        for glob in &self.receipts {
+            if glob.is_empty() || glob.contains('/') {
+                return Err(failure(format!(
+                    "[release] receipts: {glob:?} is not a glob over plain asset names"
                 )));
             }
         }
@@ -381,6 +402,13 @@ impl Config {
     /// Whether `name` is a draft-only asset.
     pub fn is_scratch(&self, name: &str) -> bool {
         self.scratch
+            .iter()
+            .any(|glob| crate::render::surface::glob_match(glob, name))
+    }
+
+    /// Whether `name` is a receipt.
+    pub fn is_receipt(&self, name: &str) -> bool {
+        self.receipts
             .iter()
             .any(|glob| crate::render::surface::glob_match(glob, name))
     }
@@ -560,6 +588,24 @@ mod tests {
             "kind = \"binary\"\nversion = \"Cargo.toml\"\nknob = 1\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn receipts_and_their_identity_keys_go_together() {
+        let ok =
+            format!("{BINARY}receipts = [\"*.receipt.json\"]\nreceipt_identity = [\"source\"]\n");
+        assert!(config(&ok).is_receipt("cv-windows.receipt.json"));
+        assert!(!config(&ok).is_receipt("manifest.json"));
+        let lone = format!("{BINARY}receipts = [\"*.receipt.json\"]\n");
+        let m = crate::parse_manifest(
+            format!(
+                "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.pack]\nkind = \"pack\"\ncrates = \".\"\n\n[release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\"]\nregistries = [\"crates\"]\nreceipts = [\"*.json\"]\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(validated(&m).is_err());
+        let _ = lone;
     }
 
     #[test]

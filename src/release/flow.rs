@@ -300,11 +300,14 @@ pub fn build(repo: &Path) -> Result<ExitCode> {
     }
     let files = collect(dir.path())?;
     let mut draft = Draft::ensure(&forge, &job.sha, &job.title(), &job.notes()?)?;
-    draft.settle_existing(&files)?;
+    draft.settle_existing(&files, &job.config)?;
     draft.upload_missing(&files)?;
     for (name, path) in &files {
         let size = fs::metadata(path)?.len();
-        if draft.release().asset(name).map(|asset| asset.size) != Some(size) {
+        // A manifest or a receipt the legs added to may legitimately differ in size (settle_existing judged it).
+        let evolves = job.config.manifests.contains(name) || job.config.is_receipt(name);
+        let held = draft.release().asset(name).map(|asset| asset.size);
+        if held != Some(size) && !(evolves && held.is_some()) {
             return Err(failure(format!(
                 "the draft does not hold {name} as it should"
             )));
