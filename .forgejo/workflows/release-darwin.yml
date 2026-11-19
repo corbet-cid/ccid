@@ -25,7 +25,12 @@ jobs:
           set -eu
           git init --quiet src
           cd src
-          git fetch --quiet --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CCID_COMMIT"
+          # a push is visible on the fetch side after a moment: ask again for up to two minutes
+          for attempt in 1 2 3 4 5 6 7 8; do
+            git fetch --quiet --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$CCID_COMMIT" && break
+            [ "$attempt" = 8 ] && exit 1
+            sleep 15
+          done
           git checkout --quiet --force FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$CCID_COMMIT"
       - name: Cross-build the binary and the test bundle into the draft
