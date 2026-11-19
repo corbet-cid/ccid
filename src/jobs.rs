@@ -338,6 +338,19 @@ pub fn is_self_checks_command(command: &[String]) -> bool {
 }
 
 impl Job {
+    /// Whether the job runs the declared checks and has some (the job the standard checks join).
+    pub(crate) fn runs_declared_checks(&self) -> bool {
+        is_self_checks_command(&self.command) && !self.checks.is_empty()
+    }
+
+    pub(crate) fn names_check(&self, name: &str) -> bool {
+        self.checks.iter().any(|check| check == name)
+    }
+
+    pub(crate) fn add_check(&mut self, name: &str) {
+        self.checks.push(name.to_owned());
+    }
+
     /// The workflow the job belongs to.
     pub(crate) fn workflow(&self) -> &str {
         &self.workflow

@@ -183,6 +183,9 @@ struct Manifest {
     #[serde(default)]
     #[allow(dead_code)]
     content_pins: Vec<content_pins::Pin>,
+    /// `[portable_paths]`: the standard file-name check every repository's `verify` job runs (`mode`, default report).
+    #[serde(default)]
+    portable_paths: Option<portable_paths::Config>,
     /// The release flow (`render_schema = 3`): `ccid release` and the rendered `release.yml`.
     #[serde(default)]
     release: Option<release::Config>,
@@ -320,6 +323,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
         }
     }
     runtime::validate(parsed.runtime.as_ref(), parsed.toolchain.as_ref())?;
+    add_standard_checks(&mut parsed)?;
     let slug = &parsed.project;
     if parsed.schema != 1
         || slug.is_empty()
@@ -333,6 +337,51 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
         ));
     }
     Ok(parsed)
+}
+
+/// The standard checks every repository runs without declaring them: today `portable-paths`, joined to the `verify` job
+/// (when it runs the declared checks). A check of the same name the repository declares itself wins; `[portable_paths]
+/// mode = "enforce"` makes it fail the job, the default `report` never does.
+fn add_standard_checks(manifest: &mut Manifest) -> Result<()> {
+    // Only the repositories on the central channel (`render_schema` 2 and 3) get a check they did not declare;
+    // a repository that pins its own ccid (no schema) keeps rendering byte for byte as before.
+    let schema = manifest
+        .render
+        .as_ref()
+        .and_then(|render| render.render_schema);
+    if !matches!(schema, Some(2 | 3)) || manifest.checks.contains_key(portable_paths::CHECK) {
+        return Ok(());
+    }
+    let Some(job) = manifest.jobs.get_mut("verify") else {
+        return Ok(());
+    };
+    if !job.runs_declared_checks() || job.names_check(portable_paths::CHECK) {
+        return Ok(());
+    }
+    let mode = manifest
+        .portable_paths
+        .as_ref()
+        .map(|config| config.mode.as_str())
+        .unwrap_or("report");
+    if !matches!(mode, "report" | "enforce") {
+        return Err(failure(
+            "[portable_paths] mode is \"report\" or \"enforce\"",
+        ));
+    }
+    // This very binary runs the check (a job's PATH need not hold a ccid): its absolute path, else the name.
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "ccid".to_owned());
+    let check: Check = toml::from_str(&format!(
+        "kind = \"commands\"\ncache = false\ncommands = [[{}, \"portable-paths\", \"--mode\", \"{mode}\"]]\n",
+        serde_json::to_string(&exe)?
+    ))?;
+    manifest
+        .checks
+        .insert(portable_paths::CHECK.to_owned(), check);
+    job.add_check(portable_paths::CHECK);
+    Ok(())
 }
 
 /// Resolve comma-separated selectors to declared check names and validate the

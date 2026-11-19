@@ -29,6 +29,25 @@ use std::{
     process::Command,
 };
 
+/// The name of the standard check.
+pub const CHECK: &str = "portable-paths";
+
+/// `[portable_paths]` of `.ci/ccid.toml`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// `report` (the default: prints, never fails) or `enforce`.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+}
+
+fn default_mode() -> String {
+    "report".into()
+}
+
+/// Built-in allowlist presets, switched on by `presets = [...]` in `.ci/portable-paths.toml`.
+pub const PRESETS: [&str; 1] = ["sveltekit-routes"];
+
 pub const RULES: [&str; 8] = [
     "chars",
     "case",
@@ -70,6 +89,10 @@ pub struct Options {
 pub struct Allowlist {
     #[serde(default)]
     pub allow: Vec<Allow>,
+    /// Built-in presets: `sveltekit-routes` allows `+`, `[`, `]`, `(` and `)` (and nothing else) in names under a
+    /// `routes` directory: the SvelteKit routing convention (`+page.svelte`, `[slug]`, `(group)`).
+    #[serde(default)]
+    pub presets: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +108,12 @@ impl Allowlist {
     pub fn parse(text: &str) -> Result<Allowlist> {
         let list: Allowlist = toml::from_str(text)
             .map_err(|error| failure(format!("the portable-paths allowlist: {error}")))?;
+        if let Some(preset) = list.presets.iter().find(|p| !PRESETS.contains(&p.as_str())) {
+            return Err(failure(format!(
+                "the portable-paths allowlist: {preset:?} is not a preset ({})",
+                PRESETS.join(", ")
+            )));
+        }
         for entry in &list.allow {
             if entry.pattern.trim().is_empty() || entry.reason.trim().is_empty() {
                 return Err(failure(
@@ -103,6 +132,26 @@ impl Allowlist {
             }
         }
         Ok(list)
+    }
+
+    /// Whether a preset allows this violation (a `chars` violation whose every offending character is a
+    /// SvelteKit routing character, under a `routes` directory).
+    fn preset_covers(&self, violation: &Violation) -> bool {
+        self.presets.iter().any(|preset| match preset.as_str() {
+            "sveltekit-routes" => {
+                violation.rule == "chars"
+                    && !violation.chars.is_empty()
+                    && violation
+                        .chars
+                        .iter()
+                        .all(|c| matches!(c, '+' | '[' | ']' | '(' | ')'))
+                    && violation
+                        .path
+                        .rsplit_once('/')
+                        .is_some_and(|(dirs, _)| dirs.split('/').any(|part| part == "routes"))
+            }
+            _ => false,
+        })
     }
 
     fn covers(&self, violation: &Violation) -> Option<usize> {
@@ -127,6 +176,8 @@ pub struct Violation {
     pub rule: &'static str,
     pub path: String,
     pub detail: String,
+    /// `chars` only: the offending characters.
+    pub chars: Vec<char>,
 }
 
 fn is_reserved_stem(component: &str) -> bool {
@@ -156,6 +207,7 @@ pub fn judge(entries: &[Entry]) -> Vec<Violation> {
             rule,
             path: path.to_owned(),
             detail,
+            chars: Vec::new(),
         });
     };
     // case: every distinct prefix (directories and files), keyed by its lowercase spelling
@@ -256,6 +308,19 @@ pub fn judge(entries: &[Entry]) -> Vec<Violation> {
             }
         }
     }
+    for violation in out.iter_mut().filter(|v| v.rule == "chars") {
+        let mut seen: Vec<char> = Vec::new();
+        for c in violation
+            .path
+            .chars()
+            .filter(|c| *c != '/' && !good_char(*c))
+        {
+            if !seen.contains(&c) {
+                seen.push(c);
+            }
+        }
+        violation.chars = seen;
+    }
     out.sort_by(|a, b| (&a.path, a.rule).cmp(&(&b.path, b.rule)));
     out.dedup();
     out
@@ -319,6 +384,7 @@ pub fn run(options: &Options) -> Result<u8> {
             Some(index) => {
                 used.insert(index);
             }
+            None if list.preset_covers(violation) => {}
             None => open.push(violation),
         }
     }
@@ -516,6 +582,53 @@ mod tests {
         // the entry waives `chars` only: a trailing space is still a violation
         let miss = judge(&entries(&["src/routes/a /+page.svelte"]));
         assert!(miss.iter().any(|v| list.covers(v).is_none()));
+    }
+
+    #[test]
+    fn the_sveltekit_routes_preset_allows_routing_characters_under_routes_only() {
+        let list = Allowlist::parse("presets = [\"sveltekit-routes\"]\n").unwrap();
+        let open = |paths: &[&str]| -> Vec<String> {
+            judge(&entries(paths))
+                .into_iter()
+                .filter(|v| list.covers(v).is_none() && !list.preset_covers(v))
+                .map(|v| v.path)
+                .collect()
+        };
+        assert!(open(&[
+            "src/routes/+page.svelte",
+            "src/routes/[slug]/+page.ts",
+            "a/routes/(app)/x.ts"
+        ])
+        .is_empty());
+        // outside a routes directory, or with any other bad character, the violation stays
+        assert_eq!(open(&["src/lib/+page.svelte"]).len(), 1);
+        assert_eq!(open(&["src/routes/a b/+page.svelte"]).len(), 1);
+        assert_eq!(open(&["src/routes/+page me.svelte"]).len(), 1);
+        assert!(Allowlist::parse("presets = [\"nope\"]\n").is_err());
+    }
+
+    #[test]
+    fn the_standard_check_joins_the_verify_job_in_the_mode_of_the_manifest() {
+        let base = "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.test]\nkind = \"commands\"\ncommands = [[\"true\"]]\n\n[jobs.verify]\nscheduler = \"forgejo\"\nchecks = [\"test\"]\nworkflow = \"ci\"\ncommand = [\"ccid:run-declared-checks\"]\n";
+        let m = crate::parse_manifest(base.as_bytes()).unwrap();
+        assert!(m.checks.contains_key(CHECK));
+        assert!(m.jobs["verify"].names_check(CHECK));
+        let enforce = format!("{base}\n[portable_paths]\nmode = \"enforce\"\n");
+        let m = crate::parse_manifest(enforce.as_bytes()).unwrap();
+        assert!(format!("{:?}", m.checks[CHECK]).contains("enforce"));
+        let bad = format!("{base}\n[portable_paths]\nmode = \"x\"\n");
+        assert!(crate::parse_manifest(bad.as_bytes()).is_err());
+        // a repository's own check of that name wins; a job of another kind is left alone
+        let own = format!(
+            "{base}\n[checks.portable-paths]\nkind = \"commands\"\ncommands = [[\"true\"]]\n"
+        );
+        let m = crate::parse_manifest(own.as_bytes()).unwrap();
+        assert!(!m.jobs["verify"].names_check(CHECK));
+        let other = base.replace("[jobs.verify]", "[jobs.other]");
+        assert!(!crate::parse_manifest(other.as_bytes())
+            .unwrap()
+            .checks
+            .contains_key(CHECK));
     }
 
     fn git_repo(files: &[&str]) -> tempfile::TempDir {

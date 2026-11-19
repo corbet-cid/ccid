@@ -10,13 +10,21 @@ ccid portable-paths --mode enforce          # exits 1 when a violation is not co
 ccid portable-paths --summary               # only the per-rule counts
 ```
 
-A repository declares the check like any command check:
+## In every repository
+
+A repository on the central channel (`render_schema` 2 or 3) runs the check without declaring it: ccid adds the check
+`portable-paths` to the repository's `verify` job (when that job runs the declared checks), in report mode, so it never
+fails CI. A repository switches to enforce with one line, once its report is empty:
 
 ```toml
-[checks.portable-paths]
-kind = "commands"
-commands = [["ccid", "portable-paths", "--mode", "report"]]   # "enforce" once the repository is clean
+[portable_paths]
+mode = "enforce"      # default "report"
 ```
+
+A repository that declares its own `[checks.portable-paths]` keeps it (it wins); a repository that pins its own ccid
+(no `render_schema`) declares the command check itself: `commands = [["ccid", "portable-paths", "--mode", "report"]]`.
+Adding the check changes the rendered adapters, so the release that brings it lists the previous releases in the
+channel's `previous`.
 
 ## The rules
 
@@ -45,6 +53,10 @@ pattern = "src/routes/**/+page.svelte"
 reason = "SvelteKit routing convention"
 rules = ["chars"]
 ```
+
+Built-in presets switch on a whole convention with one line, `presets = ["sveltekit-routes"]`: it allows `+`, `[`, `]`,
+`(` and `)` (and no other character) in names below a `routes` directory (`+page.svelte`, `[slug]`, `(group)`), and
+nothing outside one.
 
 An entry that matches nothing is noted on stderr so the list shrinks with the repository. An empty reason, an unknown
 rule or an unknown key is an operational error.

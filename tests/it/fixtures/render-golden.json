@@ -1,12 +1,12 @@
 {
   "dead-label": {
     ".ci/check-shell.nix": "d13e76b16ecbde0a06b49d0131e1e81d92e62f0dd414f2984db9941407e48d9f",
-    ".ci/jobs.json": "a2ccb534c7b4f32e79f9a383accab840dc49b5dd92b6fe7c90615cf0b8cb6ef8",
+    ".ci/jobs.json": "9d1b7040e097cdf76eb96aae6a3a8634c5d705e9b47be5c2210dc8a144e258ea",
     ".forgejo/workflows/ci.yml": "8b82a2e132f89d2204d24d5ff9742aaeab7f0c9b52325d8874b2191e10d4f8f8",
     ".forgejo/workflows/deep.yml": "c406e151875588809b5f7d53f4b62ea83d3eeecc301db5f4ed2a4fa125f59fa8"
   },
   "default-upstream": {
-    ".ci/jobs.json": "6ff3c07a1fc90e451e3762eeea7542674a9de3c1698f1efe4478d57410a082c8",
+    ".ci/jobs.json": "7fc7d923bbc8a16672f118c3d57ee4c1664c6f0429b149972acfe5ef5a1eb429",
     ".forgejo/workflows/ci.yml": "98e663541a9b7f48d94d41e090c405512982beed19f5c6e04a5a202728df33a2",
     ".forgejo/workflows/downstream-check.yml": "0d5016c9a2f33f00166c1c858d5c76d3af4da70015c800c104f8d9cab150d406",
     ".forgejo/workflows/upstream-sync.yml": "4778e7a0aa5247feb27aea9d36eb3c311f28f6b481e8d75b66aa4063614c4b26"
