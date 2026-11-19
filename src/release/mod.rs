@@ -596,16 +596,12 @@ mod tests {
             format!("{BINARY}receipts = [\"*.receipt.json\"]\nreceipt_identity = [\"source\"]\n");
         assert!(config(&ok).is_receipt("cv-windows.receipt.json"));
         assert!(!config(&ok).is_receipt("manifest.json"));
-        let lone = format!("{BINARY}receipts = [\"*.receipt.json\"]\n");
         let m = crate::parse_manifest(
-            format!(
-                "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.pack]\nkind = \"pack\"\ncrates = \".\"\n\n[release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\"]\nregistries = [\"crates\"]\nreceipts = [\"*.json\"]\n"
-            )
+            "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.pack]\nkind = \"pack\"\ncrates = \".\"\n\n[release]\nkind = \"library\"\nversion = \"Cargo.toml\"\nbuild = [\"pack\"]\nregistries = [\"crates\"]\nreceipts = [\"*.json\"]\n"
             .as_bytes(),
         )
         .unwrap();
         assert!(validated(&m).is_err());
-        let _ = lone;
     }
 
     #[test]
