@@ -352,10 +352,11 @@ fn add_standard_checks(manifest: &mut Manifest) -> Result<()> {
     if !matches!(schema, Some(2 | 3)) || manifest.checks.contains_key(portable_paths::CHECK) {
         return Ok(());
     }
-    let Some(job) = manifest.jobs.get_mut("verify") else {
-        return Ok(());
-    };
-    if !job.runs_declared_checks() || job.names_check(portable_paths::CHECK) {
+    if manifest
+        .jobs
+        .get("verify")
+        .is_some_and(|job| job.names_check(portable_paths::CHECK))
+    {
         return Ok(());
     }
     let mode = manifest
@@ -380,7 +381,20 @@ fn add_standard_checks(manifest: &mut Manifest) -> Result<()> {
     manifest
         .checks
         .insert(portable_paths::CHECK.to_owned(), check);
-    job.add_check(portable_paths::CHECK);
+    // It joins the `verify` job when that job runs the declared checks; otherwise (a job with its own command) the
+    // check is a small job of its own, with its own workflow, which never archives flake inputs.
+    match manifest.jobs.get_mut("verify") {
+        Some(job) if job.runs_declared_checks() => job.add_check(portable_paths::CHECK),
+        _ => {
+            if manifest.jobs.contains_key(portable_paths::CHECK) {
+                return Ok(());
+            }
+            let job: jobs::Job = toml::from_str(
+                "scheduler = \"forgejo\"\nchecks = [\"portable-paths\"]\nworkflow = \"portable-paths\"\ncommand = [\"ccid:run-declared-checks\"]\narchive_inputs = false\n",
+            )?;
+            manifest.jobs.insert(portable_paths::CHECK.to_owned(), job);
+        }
+    }
     Ok(())
 }
 

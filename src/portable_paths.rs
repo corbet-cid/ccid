@@ -624,8 +624,14 @@ mod tests {
         );
         let m = crate::parse_manifest(own.as_bytes()).unwrap();
         assert!(!m.jobs["verify"].names_check(CHECK));
-        let other = base.replace("[jobs.verify]", "[jobs.other]");
-        assert!(!crate::parse_manifest(other.as_bytes())
+        // a verify job with its own command: the check becomes a job of its own
+        let own_command = base.replace("[\"ccid:run-declared-checks\"]", "[\"bash\", \"run.sh\"]");
+        let m = crate::parse_manifest(own_command.as_bytes()).unwrap();
+        assert!(!m.jobs["verify"].names_check(CHECK));
+        assert!(m.jobs[CHECK].names_check(CHECK));
+        // no render_schema (the repository pins its own ccid): left alone
+        let none = "schema = 1\nproject = \"demo\"\n\n[checks.test]\nkind = \"commands\"\ncommands = [[\"true\"]]\n";
+        assert!(!crate::parse_manifest(none.as_bytes())
             .unwrap()
             .checks
             .contains_key(CHECK));
