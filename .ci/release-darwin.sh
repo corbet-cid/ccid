@@ -41,16 +41,15 @@ call() { # METHOD URL [curl args]: the body lands in $scratch/response, prints t
 cp "$scratch/response" "$scratch/release.json"
 id=$(jq -r .id "$scratch/release.json")
 mkdir "$scratch/in"
-readauth=auth
-if [ -n "${CCID_FORGE_READ_TOKEN_FILE:-}" ] && [ -r "$CCID_FORGE_READ_TOKEN_FILE" ]; then
-  printf 'header = "Authorization: token %s"\n' "$(tr -d '\n' < "$CCID_FORGE_READ_TOKEN_FILE")" > "$scratch/readauth"
-  chmod 0600 "$scratch/readauth"
-  readauth=readauth
-fi
+# A draft is read with the runner's read credential only (the job token cannot): the file CCID_FORGE_READ_TOKEN_FILE, else
+# $CREDENTIALS_DIRECTORY/forgejo-ci-read, as `ccid release fetch` finds it.
+readfile=${CCID_FORGE_READ_TOKEN_FILE:-${CREDENTIALS_DIRECTORY:+$CREDENTIALS_DIRECTORY/forgejo-ci-read}}
+[ -n "$readfile" ] && [ -r "$readfile" ] || { echo 'release-darwin: this runner has no read credential for a draft (CCID_FORGE_READ_TOKEN_FILE)' >&2; exit 2; }
+printf 'header = "Authorization: token %s"\n' "$(tr -d '\n' < "$readfile")" > "$scratch/readauth"
+chmod 0600 "$scratch/readauth"
 for file in "$name" "$bundle" "$name.sha256"; do
-  # A draft is read through the API (the browser URL of a draft asset answers 404); the read credential, when the clone has one, reads it.
-  aid=$(jq -er --arg n "$file" '.assets[] | select(.name == $n) | .id' "$scratch/release.json")
-  curl -q --silent --show-error --fail --max-time 900 -K "$scratch/${readauth}" -H 'Accept: application/octet-stream' -o "$scratch/in/$file" "$api/releases/$id/assets/$aid"
+  url=$(jq -er --arg n "$file" '.assets[] | select(.name == $n) | .browser_download_url' "$scratch/release.json")
+  curl -q --silent --show-error --fail --location --max-time 900 -K "$scratch/readauth" -o "$scratch/in/$file" "$url"
 done
 (cd "$scratch/in" && shasum -a 256 -c "$name.sha256")
 
