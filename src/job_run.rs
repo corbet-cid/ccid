@@ -419,17 +419,22 @@ pub fn checkout(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Resu
     if dir.join(".gitmodules").is_file() {
         let header = format!("http.extraHeader=Authorization: token {token}");
         run_ok(
-            git(pace, dir).env("GIT_LFS_SKIP_SMUDGE", "1").args([
-                "-c",
-                &header,
-                "submodule",
-                "update",
-                "--init",
-                "--recursive",
-                "--depth",
-                "1",
-                "--quiet",
-            ]),
+            // The runner's near-copy rewrite (a file URL) is for the checkout itself; submodules come from the forge.
+            git(pace, dir)
+                .env("GIT_LFS_SKIP_SMUDGE", "1")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_CONFIG_COUNT", "0")
+                .args([
+                    "-c",
+                    &header,
+                    "submodule",
+                    "update",
+                    "--init",
+                    "--recursive",
+                    "--depth",
+                    "1",
+                    "--quiet",
+                ]),
             "git submodule update",
         )?;
     }
