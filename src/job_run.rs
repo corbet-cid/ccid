@@ -413,7 +413,27 @@ pub fn checkout(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Resu
     run_ok(
         git(pace, dir).args(["clean", "--quiet", "-ffdx"]),
         "git clean",
-    )
+    )?;
+    // Submodules are part of the commit's tree: check them out (after the clean, which would remove them), shallow, with the
+    // job token for the forge's own URLs.
+    if dir.join(".gitmodules").is_file() {
+        let header = format!("http.extraHeader=Authorization: token {token}");
+        run_ok(
+            git(pace, dir).env("GIT_LFS_SKIP_SMUDGE", "1").args([
+                "-c",
+                &header,
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+                "--depth",
+                "1",
+                "--quiet",
+            ]),
+            "git submodule update",
+        )?;
+    }
+    Ok(())
 }
 
 /// Stage sibling repositories read-only as `<checkout>.siblings/<name>`; returns `(dir, "name=sha,...")`.
