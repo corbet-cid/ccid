@@ -539,6 +539,19 @@ fn command_environment(
         env.insert(key.clone(), value.clone());
     }
     env.insert("CI_COMMIT_SHA".into(), options.sha.clone());
+    // The retained store (ccid retained): content-addressed, repository-independent, under the runner's persistent cache.
+    if let Some(root) = std::env::var_os("CI_RETAINED_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("CI_CACHE_ROOT")
+                .filter(|v| !v.is_empty())
+                .map(|v| PathBuf::from(v).join("retained"))
+        })
+        .filter(|root| root.is_absolute())
+    {
+        env.insert("CI_RETAINED_ROOT".into(), root.display().to_string());
+    }
     if plan.history {
         if let Some(before) = push_before(&options.sha) {
             env.insert("CCID_PUSH_BEFORE".into(), before);

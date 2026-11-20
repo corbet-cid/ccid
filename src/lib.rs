@@ -113,6 +113,7 @@ pub mod render;
 pub mod render_previous;
 pub mod resolve_lock;
 pub mod resolver;
+pub mod retained;
 mod runner;
 pub mod runtime;
 pub mod rustc_diag;

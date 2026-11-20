@@ -224,6 +224,8 @@ enum Action {
     },
     /// Check locked content pins (fixture digests, native artifact versions).
     ContentPins(ccid::content_pins::Options),
+    /// The content-addressed retained store: captures kept write-once under their digest, independent of any repository.
+    Retained(ccid::retained::Options),
     /// Tracked file names that work on every system (characters, case, Windows device names, lengths, symlinks).
     PortablePaths(ccid::portable_paths::Options),
     /// Require main declarations and one resolved revision per first-party crate.
@@ -822,6 +824,15 @@ fn main() -> ExitCode {
                 Ok(code) => ExitCode::from(code),
                 Err(error) => {
                     eprintln!("ccid content-pins: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        Action::Retained(options) => {
+            return match ccid::retained::run(&options) {
+                Ok(code) => ExitCode::from(code),
+                Err(error) => {
+                    eprintln!("ccid retained: {error}");
                     ExitCode::from(2)
                 }
             };
