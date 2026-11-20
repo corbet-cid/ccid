@@ -853,7 +853,7 @@ fn scan_refs(root: &Path) -> Result<BTreeMap<String, ScannedGit>> {
     let mut manifest: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
     let manifest_path = root.join("Cargo.toml");
     if manifest_path.is_file() {
-        let text = std::fs::read_to_string(&manifest_path)?;
+        let text = String::from_utf8(crate::read_named(&manifest_path)?)?;
         if text.len() > 1024 * 1024 {
             return Err(failure("Cargo manifest too large"));
         }

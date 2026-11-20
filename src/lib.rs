@@ -362,8 +362,13 @@ pub struct Check {
     pypi: Option<String>,
 }
 /// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
+/// Read a file, naming it in the error: a bare "No such file or directory" says nothing about a manifest that is missing.
+pub(crate) fn read_named(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).map_err(|error| failure(format!("cannot read {}: {error}", path.display())))
+}
+
 fn load_manifest(root: &Path, manifest: &Path) -> Result<(Manifest, Vec<u8>)> {
-    let bytes = fs::read(root.join(manifest))?;
+    let bytes = read_named(&root.join(manifest))?;
     let parsed = parse_manifest(&bytes)?;
     Ok((parsed, bytes))
 }

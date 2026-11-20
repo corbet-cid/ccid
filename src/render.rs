@@ -1246,7 +1246,7 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         transitional.extend(accepted.into_keys());
     }
     transitional.sort();
-    if fs::read(repo.join(manifest))? != bytes {
+    if crate::read_named(&repo.join(manifest))? != bytes {
         return Err(failure("Manifest changed during job rendering"));
     }
     if check && (!drift.is_empty() || !obsolete.is_empty() || !security_drift.is_empty()) {
@@ -1336,7 +1336,7 @@ pub fn surface_plan(repo: &Path, manifest: &Path) -> surface::Plan {
         if manifest != Path::new(".ci/ccid.toml") {
             return Err(failure("Job adapters require .ci/ccid.toml"));
         }
-        let bytes = fs::read(repo.join(manifest))?;
+        let bytes = crate::read_named(&repo.join(manifest))?;
         let mut value: toml::Value = toml::from_str(std::str::from_utf8(&bytes)?)?;
         plan.project = value
             .get("project")
@@ -1539,7 +1539,7 @@ fn forgejo_workflow(
     // On the default branch a RUNNING run is never cancelled (a busy main would otherwise cancel every push's run and no commit would get a full verdict); only the newest pending
     // run waits. Pull requests and other refs keep cancel-in-progress. Proven on Forgejo Actions with a throwaway repository (2026-11-17): the expression is evaluated there.
     out.push_str(&format!(
-        "concurrency:\n  group: ccid-{workflow}-${{{{ github.ref }}}}\n  cancel-in-progress: ${{{{ github.ref != format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n"
+        "concurrency:\n  group: ccid-{workflow}-${{{{ github.ref }}}}\n  # prettier-ignore\n  cancel-in-progress: ${{{{ github.ref != format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n"
     ));
     // No CARGO_PROFILE_* or CARGO_TERM_COLOR in the workflow environment: a CARGO_* variable is hashed into every
     // compile-cache key, so the shared build profile arrives as cargo config instead - profiles/dev.toml through `cargo

@@ -1370,10 +1370,12 @@ mod tests {
         // The chain is checked on resolved paths: /tmp is a link on macOS.
         let tmp = Path::new("/tmp").canonicalize().unwrap();
         assert!(
+            // /tmp is judged first: world-writable, or (in a sandbox where it is owned by an unmapped uid) not owned by
+            // root or this user. Either way the refusal names /tmp as the ancestor.
             reason.contains(&format!(
                 "ancestor {} is writable by group or others",
                 tmp.display()
-            )),
+            )) || reason.contains(&format!("ancestor {} is owned by uid", tmp.display())),
             "{reason}"
         );
     }

@@ -822,7 +822,10 @@ impl Fleet for Live<'_> {
         )?;
         git(&dir, &["clean", "-fdxq"])?;
         let manifest_path = dir.join(".ci/ccid.toml");
-        let pinned = pin_manifest(&fs::read_to_string(&manifest_path)?, revision)?;
+        let pinned = pin_manifest(
+            &String::from_utf8(crate::read_named(&manifest_path)?)?,
+            revision,
+        )?;
         fs::write(&manifest_path, pinned)?;
         let renderer = {
             let _turn = self
