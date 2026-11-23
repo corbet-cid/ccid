@@ -52,6 +52,8 @@ pub struct Pace {
     pub lfs_storage: Option<PathBuf>,
     pub slot_poll: Duration,
     pub slot_timeout: Duration,
+    /// The wait before round N+1 of a fetch is N times this (a commit a push created seconds ago may not be visible yet).
+    pub fetch_wait: Duration,
 }
 
 impl Default for Pace {
@@ -68,6 +70,7 @@ impl Default for Pace {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(2700),
             ),
+            fetch_wait: Duration::from_secs(5),
         }
     }
 }
@@ -327,15 +330,28 @@ pub fn fetch_depth(dir: &Path, want: &str, token: &str, pace: &Pace, depth: &str
             .map(|status| status.success())
             .unwrap_or(false)
     };
-    if attempt(false) {
-        return Ok(());
-    }
-    eprintln!("local copy lacks {want}, fetching from the forge");
-    if attempt(true) {
-        return Ok(());
+    // A commit a push created seconds ago may not be visible to the fetch yet ("upload-pack: not our ref": the nightly Renovate branches were red for exactly that on 2026-11-19 to
+    // 11-23, 12 pull requests, each run started 4-6 s after its push, nothing ever reran them). Each round asks the near copy, then the forge itself; the wait before the next round
+    // grows (5, 10, 15, 20, 25 s: a wait, not a limit), so a commit that appears within about 75 s is fetched and only a commit that is really gone fails the job.
+    for round in 0..FETCH_ROUNDS {
+        if round > 0 {
+            std::thread::sleep(pace.fetch_wait * round as u32);
+        }
+        if attempt(false) {
+            return Ok(());
+        }
+        if round == 0 {
+            eprintln!("local copy lacks {want}, fetching from the forge");
+        }
+        if attempt(true) {
+            return Ok(());
+        }
     }
     Err(failure(format!("cannot fetch {want}")))
 }
+
+/// Rounds of `fetch_depth` (near copy, then the forge): see there.
+const FETCH_ROUNDS: u64 = 6;
 
 /// Check out the exact commit in `dir` (initialising it), with Git LFS content when the repository tracks files with LFS.
 pub fn checkout(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Result<()> {
@@ -888,6 +904,7 @@ mod tests {
             lfs_storage: None,
             slot_poll: Duration::from_millis(5),
             slot_timeout: Duration::from_millis(200),
+            fetch_wait: Duration::from_millis(1),
         }
     }
 
@@ -1001,10 +1018,10 @@ mod tests {
         assert_eq!(fetch_calls(&log).len(), 1);
     }
 
-    /// A forge that cannot serve the commit either is a failure after exactly two fetches: the forge is authoritative, so nothing is repeated.
+    /// A commit neither the copy nor the forge ever serves is a failure after FETCH_ROUNDS rounds of two fetches each.
     #[cfg(unix)]
     #[test]
-    fn fetch_fails_after_one_fetch_on_the_copy_and_one_on_the_forge() {
+    fn fetch_fails_after_the_rounds_on_the_copy_and_on_the_forge() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
@@ -1020,7 +1037,7 @@ mod tests {
         pace.git = bin.join("git").into();
         let error = fetch(&work, "abc", "token", &pace).unwrap_err();
         assert!(error.to_string().contains("cannot fetch abc"), "{error}");
-        assert_eq!(fetch_calls(&log).len(), 2);
+        assert_eq!(fetch_calls(&log).len(), 2 * FETCH_ROUNDS as usize, "every round asks the copy, then the forge");
     }
 
     /// The real race, with real git: the runner's system configuration rewrites the forge's URL to a local copy (`insteadOf`, which has no
@@ -1339,5 +1356,56 @@ mod tests {
         fetch_push_range(&checkout, &shas[3], &shas[1], "t", &quick()).unwrap();
         let range = run(&checkout, &["rev-list", &format!("{}..HEAD", shas[1])]);
         assert_eq!(range.lines().count(), 2, "{range}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_that_appears_seconds_after_the_first_ask_is_still_fetched() {
+        // "upload-pack: not our ref" right after a push: the commit reaches the origin a moment after the job started (2026-11-19 to 11-23, the nightly Renovate pull requests).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let git = |cwd: &Path, args: &[&str]| -> String {
+            let output = Command::new("git")
+                .current_dir(cwd)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        let source = root.join("source");
+        let staging = root.join("staging");
+        for repo in [&source, &staging] {
+            fs::create_dir_all(repo).unwrap();
+            git(repo, &["init", "--quiet", "-b", "main"]);
+        }
+        git(&source, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+        fs::write(staging.join("f"), "late").unwrap();
+        git(&staging, &["add", "f"]);
+        git(&staging, &["commit", "--quiet", "-m", "late"]);
+        let late = git(&staging, &["rev-parse", "HEAD"]);
+        let checkout = root.join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        git(&checkout, &["init", "--quiet"]);
+        git(&checkout, &["remote", "add", "origin", &format!("file://{}", source.display())]);
+        let (source_for_push, staging_for_push, sha) = (source.clone(), staging.clone(), late.clone());
+        let pusher = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let ok = Command::new("git")
+                .current_dir(&source_for_push)
+                .args(["fetch", "--quiet", staging_for_push.to_str().unwrap(), &sha])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+        });
+        let mut pace = quick();
+        pace.fetch_wait = std::time::Duration::from_secs(1);
+        fetch_depth(&checkout, &late, "t", &pace, "1").unwrap();
+        pusher.join().unwrap();
+        git(&checkout, &["checkout", "--quiet", "--detach", &late]);
     }
 }
