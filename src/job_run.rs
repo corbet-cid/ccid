@@ -663,7 +663,14 @@ fn renovate_artifacts_failure(options: &Options, token: &str) -> Option<String> 
         options.sha
     );
     let output = Command::new("curl")
-        .args(["-fsS", "-m", "20", "-H", &format!("Authorization: token {token}"), &url])
+        .args([
+            "-fsS",
+            "-m",
+            "20",
+            "-H",
+            &format!("Authorization: token {token}"),
+            &url,
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -685,11 +692,25 @@ fn artifacts_failure_reason(statuses: &serde_json::Value) -> Option<String> {
     let newest = statuses
         .as_array()?
         .iter()
-        .filter(|status| status.get("context").and_then(|c| c.as_str()) == Some("renovate/artifacts"))
+        .filter(|status| {
+            status.get("context").and_then(|c| c.as_str()) == Some("renovate/artifacts")
+        })
         .max_by_key(|status| status.get("id").and_then(|i| i.as_u64()).unwrap_or(0))?;
     (newest.get("status").and_then(|s| s.as_str()) == Some("failure")).then(|| {
         "renovate/artifacts failed on this commit: Renovate could not regenerate the lock file (its comment on the pull request names the error), so the manifest and the lock disagree and this run would fail after a full checkout and build; not running it".to_owned()
     })
+}
+
+/// The result of a job that ran its own command and then the folded `portable-paths` check: the command's own failure wins; in `enforce` mode a failing check fails a job that passed; `report`
+/// never fails it.
+fn folded_exit_code(command_code: i32, mode: &str, check_ok: bool) -> i32 {
+    if command_code != 0 {
+        command_code
+    } else if mode == "enforce" && !check_ok {
+        1
+    } else {
+        0
+    }
 }
 
 pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
@@ -918,6 +939,32 @@ fn execute_job(
         ));
         prepared.keep_across_exec()?;
     }
+    if let Some(mode) = plan.fold_portable_paths.as_deref() {
+        // The standard `portable-paths` check runs INSIDE this job, after its own command (one checkout, one slot): the command is not exec'd but run to its end, then the check, in this binary.
+        // The job's result is the command's; in `enforce` mode a failing check fails a job that passed. Report mode never fails the job.
+        let status = command.status();
+        let command_code = match &status {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(error) => {
+                eprintln!("ccid job-run: cannot start the job command: {error}");
+                drop(runtime);
+                return Err(failure(format!("cannot start the job command: {error}")));
+            }
+        };
+        let check_ok = Command::new(exe)
+            .args(["portable-paths", "--mode", mode])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !check_ok && mode == "report" {
+            eprintln!("portable-paths: not run or failed (report mode never fails the job)");
+        }
+        drop(runtime);
+        let code = folded_exit_code(command_code, mode, check_ok);
+        return Ok(ExitCode::from(
+            u8::try_from(code.clamp(0, 255)).unwrap_or(1),
+        ));
+    }
     let error = command.exec();
     // Still here: the locks go with this process.
     drop(runtime);
@@ -1088,7 +1135,11 @@ mod tests {
         pace.git = bin.join("git").into();
         let error = fetch(&work, "abc", "token", &pace).unwrap_err();
         assert!(error.to_string().contains("cannot fetch abc"), "{error}");
-        assert_eq!(fetch_calls(&log).len(), 2 * FETCH_ROUNDS as usize, "every round asks the copy, then the forge");
+        assert_eq!(
+            fetch_calls(&log).len(),
+            2 * FETCH_ROUNDS as usize,
+            "every round asks the copy, then the forge"
+        );
     }
 
     /// The real race, with real git: the runner's system configuration rewrites the forge's URL to a local copy (`insteadOf`, which has no
@@ -1423,7 +1474,11 @@ mod tests {
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .output()
                 .unwrap();
-            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             String::from_utf8_lossy(&output.stdout).trim().to_owned()
         };
         let source = root.join("source");
@@ -1432,7 +1487,10 @@ mod tests {
             fs::create_dir_all(repo).unwrap();
             git(repo, &["init", "--quiet", "-b", "main"]);
         }
-        git(&source, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+        git(
+            &source,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
         fs::write(staging.join("f"), "late").unwrap();
         git(&staging, &["add", "f"]);
         git(&staging, &["commit", "--quiet", "-m", "late"]);
@@ -1440,8 +1498,17 @@ mod tests {
         let checkout = root.join("checkout");
         fs::create_dir_all(&checkout).unwrap();
         git(&checkout, &["init", "--quiet"]);
-        git(&checkout, &["remote", "add", "origin", &format!("file://{}", source.display())]);
-        let (source_for_push, staging_for_push, sha) = (source.clone(), staging.clone(), late.clone());
+        git(
+            &checkout,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", source.display()),
+            ],
+        );
+        let (source_for_push, staging_for_push, sha) =
+            (source.clone(), staging.clone(), late.clone());
         let pusher = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(2));
             let ok = Command::new("git")
@@ -1465,12 +1532,16 @@ mod tests {
         let pr = |branch: &str| serde_json::json!({"pull_request": {"head": {"ref": branch}}});
         assert!(is_renovate_pull_request(&pr("renovate/all")));
         assert!(!is_renovate_pull_request(&pr("feature/x")));
-        assert!(!is_renovate_pull_request(&serde_json::json!({"after": "a"})));
+        assert!(!is_renovate_pull_request(
+            &serde_json::json!({"after": "a"})
+        ));
         let failed = serde_json::json!([
             {"id": 3, "context": "ci / verify (pull_request)", "status": "pending"},
             {"id": 2, "context": "renovate/artifacts", "status": "failure"}
         ]);
-        assert!(artifacts_failure_reason(&failed).unwrap().contains("renovate/artifacts failed"));
+        assert!(artifacts_failure_reason(&failed)
+            .unwrap()
+            .contains("renovate/artifacts failed"));
         // a later success of the same status wins over the earlier failure
         let healed = serde_json::json!([
             {"id": 5, "context": "renovate/artifacts", "status": "success"},
@@ -1479,5 +1550,23 @@ mod tests {
         assert!(artifacts_failure_reason(&healed).is_none());
         assert!(artifacts_failure_reason(&serde_json::json!([])).is_none());
         assert!(artifacts_failure_reason(&serde_json::json!({"message": "not found"})).is_none());
+    }
+
+    #[test]
+    fn a_folded_portable_paths_check_never_hides_the_command_and_fails_only_in_enforce_mode() {
+        assert_eq!(folded_exit_code(0, "report", true), 0);
+        assert_eq!(
+            folded_exit_code(0, "report", false),
+            0,
+            "report mode never fails the job"
+        );
+        assert_eq!(folded_exit_code(0, "enforce", false), 1);
+        assert_eq!(folded_exit_code(0, "enforce", true), 0);
+        assert_eq!(
+            folded_exit_code(2, "report", true),
+            2,
+            "the job's own failure is the result"
+        );
+        assert_eq!(folded_exit_code(2, "enforce", false), 2);
     }
 }

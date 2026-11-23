@@ -452,6 +452,9 @@ fn add_standard_checks(manifest: &mut Manifest) -> Result<()> {
     // check is a small job of its own, with its own workflow, which never archives flake inputs.
     match manifest.jobs.get_mut("verify") {
         Some(job) if job.runs_declared_checks() => job.add_check(portable_paths::CHECK),
+        // A verify job with its own command (moon, a script): the standard check runs inside it, after the command (job-run), in one checkout and one slot. A second job doubled the
+        // checkouts and slots of every pull request (2026-11-23: 150 Renovate pull requests, srv load 162).
+        Some(job) if job.is_forgejo_command_job() => job.fold_portable_paths(mode),
         _ => {
             if manifest.jobs.contains_key(portable_paths::CHECK) {
                 return Ok(());

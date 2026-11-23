@@ -57,6 +57,10 @@ pub struct Job {
     /// overridden (validated).
     #[serde(default)]
     environment: BTreeMap<String, String>,
+    /// Set by the standard-check join, never by a manifest: this job runs its own command (not the declared checks), so the `portable-paths` standard check runs INSIDE it, after the command, in the
+    /// mode named here (`report` or `enforce`), instead of in a second job with its own checkout and slot.
+    #[serde(skip)]
+    fold_portable_paths: Option<String>,
     /// Secret environment variables this job may see: names declared in
     /// `[render].secret_environment`. Every declared variable a job does not
     /// list is withheld from it. Crow jobs only.
@@ -158,6 +162,9 @@ pub struct Plan {
     /// false, so inventories of manifests that do not use `"push"` render byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub history_push_only: bool,
+    /// The `portable-paths` standard check runs inside this job after its own command, in this mode; skipped when absent (the check is then a declared check of the job, or a job of its own).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fold_portable_paths: Option<String>,
     /// Forgejo: archive the locked flake inputs after the checks; skipped when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub archive_inputs: bool,
@@ -351,6 +358,18 @@ impl Job {
         self.checks.iter().any(|check| check == name)
     }
 
+    /// A Forgejo job that runs a command of its own (not the declared checks): the standard `portable-paths` check can run inside it.
+    pub(crate) fn is_forgejo_command_job(&self) -> bool {
+        matches!(self.scheduler, Scheduler::Forgejo)
+            && !self.command.is_empty()
+            && !is_self_checks_command(&self.command)
+    }
+
+    /// Run the `portable-paths` standard check inside this job after its own command (see the field).
+    pub(crate) fn fold_portable_paths(&mut self, mode: &str) {
+        self.fold_portable_paths = Some(mode.to_owned());
+    }
+
     pub(crate) fn add_check(&mut self, name: &str) {
         self.checks.push(name.to_owned());
     }
@@ -509,6 +528,7 @@ pub(crate) fn plan_parsed(
         scheduler: effective,
         history,
         history_push_only,
+        fold_portable_paths: job.fold_portable_paths.clone(),
         checks,
         workflow: job.workflow.clone(),
         command: job.command.clone(),

@@ -624,10 +624,22 @@ mod tests {
         );
         let m = crate::parse_manifest(own.as_bytes()).unwrap();
         assert!(!m.jobs["verify"].names_check(CHECK));
-        // a verify job with its own command: the check becomes a job of its own
+        // a verify job with its own command: the check runs INSIDE that job after its command (one checkout, one slot), in the manifest's mode, and there is no second job
         let own_command = base.replace("[\"ccid:run-declared-checks\"]", "[\"bash\", \"run.sh\"]");
         let m = crate::parse_manifest(own_command.as_bytes()).unwrap();
         assert!(!m.jobs["verify"].names_check(CHECK));
+        assert!(!m.jobs.contains_key(CHECK));
+        assert!(format!("{:?}", m.jobs["verify"]).contains("fold_portable_paths: Some(\"report\")"));
+        let m = crate::parse_manifest(
+            format!("{own_command}\n[portable_paths]\nmode = \"enforce\"\n").as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            format!("{:?}", m.jobs["verify"]).contains("fold_portable_paths: Some(\"enforce\")")
+        );
+        // no verify job at all: the check is a small job of its own
+        let no_verify = "schema = 1\nproject = \"demo\"\n\n[render]\nrender_schema = 3\n\n[checks.test]\nkind = \"commands\"\ncommands = [[\"true\"]]\n";
+        let m = crate::parse_manifest(no_verify.as_bytes()).unwrap();
         assert!(m.jobs[CHECK].names_check(CHECK));
         assert!(format!("{:?}", m.jobs[CHECK]).contains("runs_on: Some(\"linux\")"));
         // no render_schema (the repository pins its own ccid): left alone
