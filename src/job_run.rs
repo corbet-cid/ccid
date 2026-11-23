@@ -355,6 +355,12 @@ const FETCH_ROUNDS: u64 = 6;
 
 /// Check out the exact commit in `dir` (initialising it), with Git LFS content when the repository tracks files with LFS.
 pub fn checkout(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Result<()> {
+    checkout_tree(dir, options, token, pace)?;
+    checkout_submodules(dir, token, pace)
+}
+
+/// [`checkout`] without the submodules: the tree, LFS content and the clean. `run` reads the job's plan from it before any submodule is cloned.
+pub fn checkout_tree(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Result<()> {
     run_ok(git(pace, dir).args(["init", "--quiet", "."]), "git init")?;
     // A fresh directory has no origin yet: the removal is allowed to fail, and its "No such remote" message is noise.
     let _ = git(pace, dir)
@@ -430,8 +436,12 @@ pub fn checkout(dir: &Path, options: &Options, token: &str, pace: &Pace) -> Resu
         git(pace, dir).args(["clean", "--quiet", "-ffdx"]),
         "git clean",
     )?;
-    // Submodules are part of the commit's tree: check them out (after the clean, which would remove them), shallow, with the
-    // job token for the forge's own URLs.
+    Ok(())
+}
+
+/// The commit's submodules, shallow, with the job token for the forge's own URLs; after the tree's checkout and clean (which would remove them). A job declares `submodules = false` when its
+/// checks never read them (the plan is read from the checked-out tree first, so the declaration is known before any submodule is cloned).
+pub fn checkout_submodules(dir: &Path, token: &str, pace: &Pace) -> Result<()> {
     if dir.join(".gitmodules").is_file() {
         let header = format!("http.extraHeader=Authorization: token {token}");
         run_ok(
@@ -803,7 +813,7 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     };
     let token = token.ok_or_else(|| failure("CCID_FORGE_TOKEN (the job token) is required"))?;
     std::env::set_current_dir(&dir)?;
-    checkout(&dir, options, &token, pace)?;
+    checkout_tree(&dir, options, &token, pace)?;
     let manifest = Path::new(".ci/ccid.toml");
     let plan = match jobs::plan(Path::new("."), manifest, &options.job, None) {
         Ok(plan) => plan,
@@ -821,6 +831,9 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
             return Err(error);
         }
     };
+    if plan.submodules {
+        checkout_submodules(&dir, &token, pace)?;
+    }
     if plan.history {
         // A check that reads git history (push range, signatures) gets history, not the depth-1 checkout: only the commits
         // of the push when every such check says `"push"` and the event names the previous tip, else the whole history.
@@ -1583,5 +1596,23 @@ mod tests {
             "the job's own failure is the result"
         );
         assert_eq!(folded_exit_code(2, "enforce", false), 2);
+    }
+
+    #[test]
+    fn a_job_declares_whether_its_checkout_fetches_the_submodules() {
+        let base = "schema = 1\nproject = \"demo\"\n\n[checks.test]\nkind = \"commands\"\ncommands = [[\"true\"]]\n\n[jobs.verify]\nscheduler = \"forgejo\"\nchecks = [\"test\"]\nworkflow = \"ci\"\ncommand = [\"ccid:run-declared-checks\"]\n";
+        let default = crate::parse_manifest(base.as_bytes()).unwrap();
+        let plan = jobs::plan_parsed(&default, "verify", None).unwrap();
+        assert!(plan.submodules, "the default fetches them");
+        assert!(
+            !serde_json::to_string(&plan).unwrap().contains("submodules"),
+            "the default leaves the inventory byte-identical"
+        );
+        let off = crate::parse_manifest(format!("{base}submodules = false\n").as_bytes()).unwrap();
+        let plan = jobs::plan_parsed(&off, "verify", None).unwrap();
+        assert!(!plan.submodules);
+        assert!(serde_json::to_string(&plan)
+            .unwrap()
+            .contains("\"submodules\":false"));
     }
 }

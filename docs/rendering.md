@@ -157,6 +157,7 @@ workflow name share one file; each job becomes a job of that workflow.
 [jobs.verify]
 scheduler = "forgejo"
 runs_on = "linux"                       # runner label; default "light" (schema 3: linux, windows or macos; default linux)
+submodules = false                      # default true: the checkout fetches the repository's submodules. false when the checks never read them (a submodule the job token cannot read fails every run on the clone)
 checks = ["test"]
 workflow = "ci"
 command = ["ccid:run-declared-checks"]  # the only command a Forgejo job takes

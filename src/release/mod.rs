@@ -104,6 +104,7 @@ pub(crate) fn job_plan(
     };
     Ok(Some(crate::jobs::Plan {
         fold_portable_paths: None,
+        submodules: true,
         job: name.to_owned(),
         scheduler: crate::jobs::Scheduler::Forgejo,
         history: false,

@@ -31,6 +31,14 @@ pub enum Provider {
     Bitbucket,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Job {
@@ -61,6 +69,10 @@ pub struct Job {
     /// mode named here (`report` or `enforce`), instead of in a second job with its own checkout and slot.
     #[serde(skip)]
     fold_portable_paths: Option<String>,
+    /// `submodules = false`: the job's checkout does not fetch the repository's submodules (default true). A job whose checks never read a submodule (a private client repository the job token cannot
+    /// read, a large tenant tree) declares this once instead of failing every run on the clone ("403", 2026-11-23: rag-corbet-ch, tenants/cenvion).
+    #[serde(default = "default_true")]
+    submodules: bool,
     /// Secret environment variables this job may see: names declared in
     /// `[render].secret_environment`. Every declared variable a job does not
     /// list is withheld from it. Crow jobs only.
@@ -165,6 +177,9 @@ pub struct Plan {
     /// The `portable-paths` standard check runs inside this job after its own command, in this mode; skipped when absent (the check is then a declared check of the job, or a job of its own).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fold_portable_paths: Option<String>,
+    /// The checkout fetches the repository's submodules (the default); skipped when true so existing inventories render byte-identical.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub submodules: bool,
     /// Forgejo: archive the locked flake inputs after the checks; skipped when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub archive_inputs: bool,
@@ -529,6 +544,7 @@ pub(crate) fn plan_parsed(
         history,
         history_push_only,
         fold_portable_paths: job.fold_portable_paths.clone(),
+        submodules: job.submodules,
         checks,
         workflow: job.workflow.clone(),
         command: job.command.clone(),
