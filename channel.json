@@ -1,13 +1,13 @@
 {
   "_doc": "The central ccid release channel. Workflows rendered with render_schema = 2 read this file (the runner names its URL in CCID_CHANNEL_URL) and run the release it selects. `classes` overrides `default` per runs-on label (canary: change one class first). A bump is a commit to this file; a rollback is a revert. The release must be published in the corbet-cid generic package registry. `fleet` is fleet data (first-party owner prefixes and their legacy aliases) that checks with `fleet = true` read; an org move is an edit of this object.",
   "default": {
-    "revision": "53cfb8e0200bafda0f92985979724ef7b7c7701f",
-    "sha256": "51d2aafd21aad8ee53436557defa26c1a9dfca9c19fbc2284c01047edfdf3e58"
+    "revision": "b70863bd21eb8af7b9cfd3d7d9d74d6965b62814",
+    "sha256": "efb5f6730ecfd4fa2c40fd1402f7b328c7ed88b49d288526b42cef79cdf534a5"
   },
   "classes": {
     "linux": {
-      "revision": "53cfb8e0200bafda0f92985979724ef7b7c7701f",
-      "sha256": "51d2aafd21aad8ee53436557defa26c1a9dfca9c19fbc2284c01047edfdf3e58"
+      "revision": "b70863bd21eb8af7b9cfd3d7d9d74d6965b62814",
+      "sha256": "efb5f6730ecfd4fa2c40fd1402f7b328c7ed88b49d288526b42cef79cdf534a5"
     },
     "macos": {
       "revision": "bb8a27785d51f10dbe354256111044c094e19665",
@@ -15,6 +15,18 @@
     }
   },
   "previous": [
+    {
+      "default": {
+        "revision": "53cfb8e0200bafda0f92985979724ef7b7c7701f",
+        "sha256": "51d2aafd21aad8ee53436557defa26c1a9dfca9c19fbc2284c01047edfdf3e58"
+      },
+      "classes": {
+        "linux": {
+          "revision": "53cfb8e0200bafda0f92985979724ef7b7c7701f",
+          "sha256": "51d2aafd21aad8ee53436557defa26c1a9dfca9c19fbc2284c01047edfdf3e58"
+        }
+      }
+    },
     {
       "default": {
         "revision": "a2d4704ab29e60da625d0ba0b2e4640d28792b86",
@@ -36,18 +48,6 @@
         "linux": {
           "revision": "cb085a7286ec60cf78390267b15a7214d082c4d1",
           "sha256": "7ef9e7e22a680de975e1a88553cbdd166b4db19904372d834c0845f9533c65d6"
-        }
-      }
-    },
-    {
-      "default": {
-        "revision": "0a46dc33f98a6820b789586ed7b5f2eff8db9aa2",
-        "sha256": "f379a94ebd32f1b88f5dfc865a22c40fba8adf67f296677d86b0aa0492d3c74f"
-      },
-      "classes": {
-        "linux": {
-          "revision": "0a46dc33f98a6820b789586ed7b5f2eff8db9aa2",
-          "sha256": "f379a94ebd32f1b88f5dfc865a22c40fba8adf67f296677d86b0aa0492d3c74f"
         }
       }
     }
