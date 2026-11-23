@@ -805,7 +805,22 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     std::env::set_current_dir(&dir)?;
     checkout(&dir, options, &token, pace)?;
     let manifest = Path::new(".ci/ccid.toml");
-    let plan = jobs::plan(Path::new("."), manifest, &options.job, None)?;
+    let plan = match jobs::plan(Path::new("."), manifest, &options.job, None) {
+        Ok(plan) => plan,
+        Err(error) => {
+            // A workflow rendered before the fold still has the job `portable-paths`; the manifest no longer declares it (the check runs inside verify): that run succeeds at once instead of
+            // failing every pull request until the repository is re-rendered.
+            if options.job == crate::portable_paths::CHECK
+                && jobs::plan(Path::new("."), manifest, "verify", None)
+                    .map(|verify| verify.fold_portable_paths.is_some())
+                    .unwrap_or(false)
+            {
+                eprintln!("ccid job-run: portable-paths runs inside the verify job of this repository now; this workflow is stale (a re-render removes it): nothing to do");
+                return Ok(ExitCode::SUCCESS);
+            }
+            return Err(error);
+        }
+    };
     if plan.history {
         // A check that reads git history (push range, signatures) gets history, not the depth-1 checkout: only the commits
         // of the push when every such check says `"push"` and the event names the previous tip, else the whole history.
