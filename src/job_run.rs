@@ -648,6 +648,50 @@ fn local_read_token(server_url: &str, pace: &Pace) -> Result<String> {
 
 /// Run the whole job: claim, fetch, check the adapters, exec the declared command. Does not return on success of the exec.
 #[cfg(unix)]
+/// The reason a Renovate pull request run must stop before any work, from the pull request event and the commit's statuses; `None` for every other run (not a pull request, not a `renovate/` branch,
+/// no failing `renovate/artifacts` status, or the forge cannot be asked: a guard that cannot look lets the job run).
+fn renovate_artifacts_failure(options: &Options, token: &str) -> Option<String> {
+    let path = std::env::var_os("GITHUB_EVENT_PATH")?;
+    let event: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    if !is_renovate_pull_request(&event) {
+        return None;
+    }
+    let url = format!(
+        "{}/api/v1/repos/{}/commits/{}/statuses?limit=50",
+        options.server_url.trim_end_matches('/'),
+        options.repository,
+        options.sha
+    );
+    let output = Command::new("curl")
+        .args(["-fsS", "-m", "20", "-H", &format!("Authorization: token {token}"), &url])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let statuses: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    artifacts_failure_reason(&statuses)
+}
+
+fn is_renovate_pull_request(event: &serde_json::Value) -> bool {
+    event
+        .pointer("/pull_request/head/ref")
+        .and_then(|value| value.as_str())
+        .is_some_and(|branch| branch.starts_with("renovate/"))
+}
+
+/// The newest `renovate/artifacts` status (by id) of a statuses listing, as a reason when it is a failure.
+fn artifacts_failure_reason(statuses: &serde_json::Value) -> Option<String> {
+    let newest = statuses
+        .as_array()?
+        .iter()
+        .filter(|status| status.get("context").and_then(|c| c.as_str()) == Some("renovate/artifacts"))
+        .max_by_key(|status| status.get("id").and_then(|i| i.as_u64()).unwrap_or(0))?;
+    (newest.get("status").and_then(|s| s.as_str()) == Some("failure")).then(|| {
+        "renovate/artifacts failed on this commit: Renovate could not regenerate the lock file (its comment on the pull request names the error), so the manifest and the lock disagree and this run would fail after a full checkout and build; not running it".to_owned()
+    })
+}
+
 pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     // R10/R11: the CI of a contributed project never runs on our compute, from a forge event or from a source export.
     crate::contributed::refuse_repository("job-run", &options.server_url, &options.repository)?;
@@ -708,6 +752,13 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
                 .map(|(token, dir)| (token.as_str(), dir.as_path())),
             pace,
         );
+    }
+    // A Renovate pull request whose lock-file update failed carries a failing `renovate/artifacts` status on its head commit; its manifest and its lock disagree, so every check would fail
+    // after minutes of checkout and compile (2026-11-23: about 30 such pull requests in a wave of 150 runs that pushed srv into swap). The run fails at once, with that reason, before a slot is taken.
+    if let Some(token) = token.as_deref() {
+        if let Some(reason) = renovate_artifacts_failure(options, token) {
+            return Err(failure(reason));
+        }
     }
     let dir = match std::env::var_os("CCID_SOURCE_ROOT").filter(|value| !value.is_empty()) {
         Some(root) => {
@@ -1407,5 +1458,26 @@ mod tests {
         fetch_depth(&checkout, &late, "t", &pace, "1").unwrap();
         pusher.join().unwrap();
         git(&checkout, &["checkout", "--quiet", "--detach", &late]);
+    }
+
+    #[test]
+    fn a_renovate_pull_request_with_a_failed_lock_update_stops_before_any_work() {
+        let pr = |branch: &str| serde_json::json!({"pull_request": {"head": {"ref": branch}}});
+        assert!(is_renovate_pull_request(&pr("renovate/all")));
+        assert!(!is_renovate_pull_request(&pr("feature/x")));
+        assert!(!is_renovate_pull_request(&serde_json::json!({"after": "a"})));
+        let failed = serde_json::json!([
+            {"id": 3, "context": "ci / verify (pull_request)", "status": "pending"},
+            {"id": 2, "context": "renovate/artifacts", "status": "failure"}
+        ]);
+        assert!(artifacts_failure_reason(&failed).unwrap().contains("renovate/artifacts failed"));
+        // a later success of the same status wins over the earlier failure
+        let healed = serde_json::json!([
+            {"id": 5, "context": "renovate/artifacts", "status": "success"},
+            {"id": 2, "context": "renovate/artifacts", "status": "failure"}
+        ]);
+        assert!(artifacts_failure_reason(&healed).is_none());
+        assert!(artifacts_failure_reason(&serde_json::json!([])).is_none());
+        assert!(artifacts_failure_reason(&serde_json::json!({"message": "not found"})).is_none());
     }
 }
