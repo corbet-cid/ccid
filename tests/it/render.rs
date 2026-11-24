@@ -1557,3 +1557,59 @@ fn a_repository_two_releases_back_passes_and_three_back_is_refused() {
     );
     assert_eq!(run(3), Some(2), "the fourth entry is never asked");
 }
+
+const RUNNING: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+
+fn pinned(
+    root: &Path,
+    running: &str,
+    update: Option<&ccid::render::UpdatePin<'_>>,
+) -> ccid::Result<ccid::render::Report> {
+    ccid::render::render_pinned(root, Path::new(".ci/ccid.toml"), false, running, update)
+}
+
+#[test]
+fn a_different_release_refuses_to_write_and_names_the_fix() {
+    let root = repository();
+    let error = pinned(root.path(), RUNNING, None).unwrap_err().to_string();
+    assert!(error.contains("--update-pin") && error.contains(PIN) && error.contains(RUNNING));
+    assert!(!root.path().join(".ci/jobs.json").exists());
+    let text = fs::read_to_string(root.path().join(".ci/ccid.toml")).unwrap();
+    assert!(text.contains(PIN));
+}
+
+#[test]
+fn a_matching_pin_and_a_development_build_render_as_before() {
+    let root = repository();
+    pinned(root.path(), PIN, None).unwrap();
+    let dev = repository();
+    pinned(dev.path(), "unversioned", None).unwrap();
+}
+
+#[test]
+fn update_pin_moves_the_pin_then_renders() {
+    let root = repository();
+    let update = ccid::render::UpdatePin::default();
+    pinned(root.path(), RUNNING, Some(&update)).unwrap();
+    let text = fs::read_to_string(root.path().join(".ci/ccid.toml")).unwrap();
+    assert!(text.contains(&format!("tool_revision = '{RUNNING}'")) && !text.contains(PIN));
+    assert!(text.contains("allow_crow=true"));
+    // The render after the move is the render of the new pin: a second render writes nothing new.
+    render(root.path(), true).unwrap();
+}
+
+#[test]
+fn update_pin_refuses_an_unprovisioned_revision() {
+    let root = repository();
+    let list = root.path().join("tools.json");
+    fs::write(&list, format!("{{\"ccid\":[\"{PIN}\"]}}")).unwrap();
+    let update = ccid::render::UpdatePin {
+        binary_sha256: None,
+        provisioned: Some(&list),
+    };
+    assert!(pinned(root.path(), RUNNING, Some(&update)).is_err());
+    let text = fs::read_to_string(root.path().join(".ci/ccid.toml")).unwrap();
+    assert!(text.contains(PIN));
+    fs::write(&list, format!("{{\"ccid\":[\"{RUNNING}\"]}}")).unwrap();
+    pinned(root.path(), RUNNING, Some(&update)).unwrap();
+}

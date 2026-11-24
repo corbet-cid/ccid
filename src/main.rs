@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use clap::{Parser, Subcommand};
+use sha2::Digest;
 use std::{path::PathBuf, process::ExitCode, sync::atomic::Ordering};
 
 #[cfg(unix)]
@@ -70,6 +71,12 @@ enum Action {
         /// Detect missing or changed generated adapters without writing.
         #[arg(long)]
         check: bool,
+        /// Move a pinned repository's [render] pin to this ccid's revision (a plain render refuses when they differ).
+        #[arg(long, conflicts_with = "check")]
+        update_pin: bool,
+        /// With --update-pin: the runner's provisioned-release list (infra lib/ci-tools.json); the revision must be in it.
+        #[arg(long, requires = "update_pin")]
+        provisioned: Option<PathBuf>,
     },
     /// Report a job's commit status and the commit's aggregated verdict context.
     Verdict(ccid::verdict::Options),
@@ -398,8 +405,25 @@ fn main() -> ExitCode {
             repo,
             manifest,
             check,
+            update_pin,
+            provisioned,
         } => (if check {
             ccid::render_previous::check(&repo, &manifest, &std::env::vars_os().collect())
+        } else if update_pin {
+            let digest = std::env::current_exe()
+                .and_then(std::fs::read)
+                .map(|bytes| format!("{:x}", sha2::Sha256::digest(&bytes)))
+                .ok();
+            ccid::render::render_pinned(
+                &repo,
+                &manifest,
+                false,
+                ccid::SOURCE_REVISION,
+                Some(&ccid::render::UpdatePin {
+                    binary_sha256: digest.as_deref(),
+                    provisioned: provisioned.as_deref(),
+                }),
+            )
         } else {
             ccid::render::render(&repo, &manifest, check)
         })

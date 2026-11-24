@@ -1021,6 +1021,72 @@ fn write_text_file(repo: &Path, relative: &Path, text: &str) -> Result<()> {
 /// Manual Crow execution adapters come from job workflows; push execution
 /// adapters come from job push opt-ins and consumer fan-out declarations.
 pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
+    render_pinned(repo, manifest, check, crate::SOURCE_REVISION, None)
+}
+
+/// How `ccid render --update-pin` moves a pinned repository's `[render]` pin to the running release.
+#[derive(Debug, Default)]
+pub struct UpdatePin<'a> {
+    /// SHA-256 of the running binary, written as `tool_sha256` when the pin carries one.
+    pub binary_sha256: Option<&'a str>,
+    /// The runner's provisioned-release list (infra `lib/ci-tools.json`); when given, the running revision must appear in it.
+    pub provisioned: Option<&'a Path>,
+}
+
+fn is_full_revision(text: &str) -> bool {
+    text.len() == 40
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn json_mentions(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::String(text) => text == needle,
+        serde_json::Value::Array(items) => items.iter().any(|v| json_mentions(v, needle)),
+        serde_json::Value::Object(map) => {
+            map.contains_key(needle) || map.values().any(|v| json_mentions(v, needle))
+        }
+        _ => false,
+    }
+}
+
+/// Rewrites `tool_revision` (and `tool_sha256` when present) inside the `[render]` table, keeping every other byte.
+fn rewrite_pin(text: &str, revision: &str, sha256: Option<&str>) -> Result<String> {
+    let mut in_render = false;
+    let mut found = false;
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            in_render = trimmed.trim_end() == "[render]";
+        }
+        let key = trimmed.split('=').next().unwrap_or("").trim();
+        let ending = if line.ends_with('\n') { "\n" } else { "" };
+        if in_render && key == "tool_revision" {
+            found = true;
+            out.push_str(&format!("tool_revision = '{revision}'{ending}"));
+        } else if let (true, "tool_sha256", Some(digest)) = (in_render, key, sha256) {
+            out.push_str(&format!("tool_sha256 = '{digest}'{ending}"));
+        } else {
+            out.push_str(line);
+        }
+    }
+    if !found {
+        return Err(failure("Cannot find [render].tool_revision to update"));
+    }
+    Ok(out)
+}
+
+/// `running` is the release that renders. A pinned repository's adapters name the pinned release, and the runner
+/// executes THAT release's own `render --check` against them, so a different release must never write them.
+pub fn render_pinned(
+    repo: &Path,
+    manifest: &Path,
+    check: bool,
+    running: &str,
+    update_pin: Option<&UpdatePin<'_>>,
+) -> Result<Report> {
     // R11: nothing of ours enters a contributed project's repository, whatever its manifest says.
     crate::contributed::refuse_working_copy("render", repo)?;
     // execute-job reads this exact path from its verified source archive.
@@ -1034,6 +1100,50 @@ pub fn render(repo: &Path, manifest: &Path, check: bool) -> Result<Report> {
         .ok_or_else(|| failure("Manifest requires [render].tool_revision"))?;
     let schema = Schema::of(config)?;
     validate_config(config, schema)?;
+    let mut reloaded = None;
+    // A development build ("unversioned") has no release identity and keeps rendering as before.
+    if schema == Schema::Pinned
+        && !check
+        && is_full_revision(running)
+        && config.tool_revision != running
+    {
+        let Some(update) = update_pin else {
+            return Err(failure(format!(
+                "[render].tool_revision pins {pinned} but this ccid is {running}: the runner executes the pinned release and its own `render --check` would reject adapters rendered by another release. Run `ccid render --update-pin` to move the pin to {running} (the runner host must provision that revision), or render with the pinned release",
+                pinned = config.tool_revision
+            )));
+        };
+        if let Some(list) = update.provisioned {
+            let listed: serde_json::Value = serde_json::from_slice(&fs::read(list)?)
+                .map_err(|error| failure(format!("{}: {error}", list.display())))?;
+            if !json_mentions(&listed, running) {
+                return Err(failure(format!(
+                    "Revision {running} is not in the provisioned list {}: the runner host has no such release, so the pin stays",
+                    list.display()
+                )));
+            }
+        }
+        let sha = match (&config.tool_sha256, update.binary_sha256) {
+            (None, _) => None,
+            (Some(_), Some(digest)) => Some(digest),
+            (Some(_), None) => {
+                return Err(failure(
+                    "The pin carries tool_sha256 but the running binary's digest is unknown",
+                ))
+            }
+        };
+        let text = std::str::from_utf8(&bytes).map_err(|_| failure("Manifest is not UTF-8"))?;
+        fs::write(repo.join(manifest), rewrite_pin(text, running, sha)?)?;
+        reloaded = Some(load_manifest(repo, manifest)?);
+    }
+    let (parsed, bytes) = match reloaded {
+        Some(pair) => pair,
+        None => (parsed, bytes),
+    };
+    let config = parsed
+        .render
+        .as_ref()
+        .ok_or_else(|| failure("Manifest requires [render].tool_revision"))?;
     if parsed.jobs.is_empty() {
         return Err(failure("Rendering requires at least one declared job"));
     }
