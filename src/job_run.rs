@@ -255,6 +255,90 @@ pub fn claim_slot(base: &Path, slots: usize, pid: u32, pace: &Pace) -> Result<Pa
     }
 }
 
+/// A push run whose commit is no longer the tip of its branch is superseded: the newer push has its own run of this workflow, and that run checks everything the older one would
+/// (one checkout of the whole tree). On the default branch a new push does not cancel the runs before it (cancel-in-progress is off there on purpose), so with many pushes every
+/// one queued and waited its turn serially (careervector main, 2026-11-24: 31 waiting runs, the revert's checks 3 h behind them). Such a run now ends successfully at once, before the
+/// checkout, saying so. Only `push` events of a branch (`refs/heads/...`) are looked at; an unreadable answer never skips a run; `CCID_SUPERSEDE=0` turns it off.
+pub fn superseded_by(event: &str, git_ref: &str, sha: &str, tip: Option<&str>) -> Option<String> {
+    if event != "push" || !git_ref.starts_with("refs/heads/") {
+        return None;
+    }
+    let tip = tip
+        .map(str::trim)
+        .filter(|t| t.len() >= 40 && t.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    (tip != sha).then(|| tip.to_string())
+}
+
+/// The workflow file of this run (`GITHUB_WORKFLOW_REF` = `owner/repo/.forgejo/workflows/ci.yml@refs/heads/main`), the key a run list names a workflow by.
+fn workflow_file(workflow_ref: &str) -> Option<String> {
+    let path = workflow_ref.split('@').next()?;
+    let name = path.rsplit('/').next()?;
+    (name.ends_with(".yml") || name.ends_with(".yaml")).then(|| name.to_string())
+}
+
+/// Does the run list of the branch tip (`GET /repos/{r}/actions/runs?head_sha=<tip>`) hold a run of this workflow? A workflow with a `paths:` filter may have no run for the tip at
+/// all (a docs-only push does not trigger it): then the older run is the only one that checks its commit and must not be skipped. Anything unreadable answers false.
+fn runs_include_workflow(json: &str, file: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|doc| {
+            doc.get("workflow_runs")?.as_array().map(|runs| {
+                runs.iter().any(|run| {
+                    run.get("workflow_id").and_then(|v| v.as_str()) == Some(file)
+                        || run
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|p| p.split('@').next() == Some(file))
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn tip_has_workflow_run(options: &Options, tip: &str, file: &str, token: &str) -> bool {
+    let url = format!(
+        "{}/api/v1/repos/{}/actions/runs?head_sha={tip}&limit=50",
+        options.server_url.trim_end_matches('/'),
+        options.repository
+    );
+    Command::new("curl")
+        .args([
+            "-q",
+            "--silent",
+            "--fail",
+            "--max-time",
+            "30",
+            "-H",
+            &format!("Authorization: token {token}"),
+            &url,
+        ])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| runs_include_workflow(&String::from_utf8_lossy(&out.stdout), file))
+        .unwrap_or(false)
+}
+
+fn remote_tip(options: &Options, git_ref: &str, token: &str, pace: &Pace) -> Option<String> {
+    let url = format!(
+        "{}/{}.git",
+        options.server_url.trim_end_matches('/'),
+        options.repository
+    );
+    let header = format!("http.extraHeader=Authorization: token {token}");
+    let out = Command::new(&pace.git)
+        .args(["-c", &header, "ls-remote", &url, git_ref])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .map(str::to_string)
+    })?
+}
+
 fn git(pace: &Pace, dir: &Path) -> Command {
     let mut command = Command::new(&pace.git);
     command.current_dir(dir);
@@ -813,6 +897,28 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
     };
     let token = token.ok_or_else(|| failure("CCID_FORGE_TOKEN (the job token) is required"))?;
     std::env::set_current_dir(&dir)?;
+    if std::env::var("CCID_SUPERSEDE")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+    {
+        let event = std::env::var("GITHUB_EVENT_NAME").unwrap_or_default();
+        let git_ref = std::env::var("GITHUB_REF").unwrap_or_default();
+        if event == "push" && git_ref.starts_with("refs/heads/") {
+            let tip = remote_tip(options, &git_ref, &token, pace);
+            let file = std::env::var("GITHUB_WORKFLOW_REF")
+                .ok()
+                .and_then(|r| workflow_file(&r));
+            let newer =
+                superseded_by(&event, &git_ref, &options.sha, tip.as_deref()).filter(|newer| {
+                    file.as_deref()
+                        .is_some_and(|f| tip_has_workflow_run(options, newer, f, &token))
+                });
+            if let Some(newer) = newer {
+                eprintln!("ccid job-run: superseded: {git_ref} is at {newer} now, whose own run of this workflow checks everything this one would; nothing to do for {}", options.sha);
+                return Ok(ExitCode::SUCCESS);
+            }
+        }
+    }
     checkout_tree(&dir, options, &token, pace)?;
     let manifest = Path::new(".ci/ccid.toml");
     let plan = match jobs::plan(Path::new("."), manifest, &options.job, None) {
@@ -1001,6 +1107,72 @@ fn execute_job(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_run_is_only_superseded_when_the_tip_has_a_run_of_the_same_workflow() {
+        assert_eq!(
+            workflow_file("corbet/repo/.forgejo/workflows/ci.yml@refs/heads/main").as_deref(),
+            Some("ci.yml")
+        );
+        assert_eq!(workflow_file("nonsense"), None);
+        let runs = r#"{"workflow_runs":[{"id":1,"workflow_id":"unit-tests.yml","status":"waiting"},{"id":2,"workflow_id":"ci.yml","status":"success"}]}"#;
+        assert!(runs_include_workflow(runs, "ci.yml"));
+        assert!(
+            !runs_include_workflow(runs, "workers-bundle.yml"),
+            "a paths-filtered workflow the tip did not trigger: the older run must run"
+        );
+        assert!(runs_include_workflow(
+            r#"{"workflow_runs":[{"path":"ci.yml@refs/heads/main"}]}"#,
+            "ci.yml"
+        ));
+        assert!(!runs_include_workflow("not json", "ci.yml"));
+        assert!(!runs_include_workflow(r#"{"workflow_runs":[]}"#, "ci.yml"));
+    }
+
+    #[test]
+    fn a_push_whose_commit_is_not_the_branch_tip_is_superseded() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        assert_eq!(
+            superseded_by("push", "refs/heads/main", &a, Some(&b)),
+            Some(b.clone())
+        );
+        assert_eq!(
+            superseded_by("push", "refs/heads/main", &a, Some(&a)),
+            None,
+            "the tip itself runs"
+        );
+        assert_eq!(
+            superseded_by("push", "refs/heads/main", &a, Some(&format!("{b}\n"))),
+            Some(b.clone()),
+            "a trailing newline is no part of the id"
+        );
+        assert_eq!(
+            superseded_by("push", "refs/heads/main", &a, None),
+            None,
+            "an unreadable answer never skips a run"
+        );
+        assert_eq!(superseded_by("push", "refs/heads/main", &a, Some("")), None);
+        assert_eq!(
+            superseded_by("push", "refs/heads/main", &a, Some("not a sha")),
+            None
+        );
+        assert_eq!(
+            superseded_by("pull_request", "refs/pull/3/merge", &a, Some(&b)),
+            None,
+            "pull requests have their own cancellation"
+        );
+        assert_eq!(
+            superseded_by("workflow_dispatch", "refs/heads/main", &a, Some(&b)),
+            None,
+            "a dispatched run is asked for"
+        );
+        assert_eq!(
+            superseded_by("push", "refs/tags/v1", &a, Some(&b)),
+            None,
+            "a tag is not a branch"
+        );
+    }
+
     use super::*;
 
     /// Write an executable stub through a child process. A stub this process wrote itself would be
