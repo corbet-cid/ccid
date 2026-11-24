@@ -295,9 +295,10 @@ fn runs_include_workflow(json: &str, file: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn tip_has_workflow_run(options: &Options, tip: &str, file: &str, token: &str) -> bool {
+/// One authenticated GET against the forge API (the job token the runner already holds). `None` when the forge cannot be asked.
+fn forge_api_get(options: &Options, path: &str, token: &str) -> Option<String> {
     let url = format!(
-        "{}/api/v1/repos/{}/actions/runs?head_sha={tip}&limit=50",
+        "{}/api/v1/repos/{}/{path}",
         options.server_url.trim_end_matches('/'),
         options.repository
     );
@@ -315,28 +316,54 @@ fn tip_has_workflow_run(options: &Options, tip: &str, file: &str, token: &str) -
         .output()
         .ok()
         .filter(|out| out.status.success())
-        .map(|out| runs_include_workflow(&String::from_utf8_lossy(&out.stdout), file))
-        .unwrap_or(false)
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn remote_tip(options: &Options, git_ref: &str, token: &str, pace: &Pace) -> Option<String> {
-    let url = format!(
-        "{}/{}.git",
-        options.server_url.trim_end_matches('/'),
-        options.repository
-    );
-    let header = format!("http.extraHeader=Authorization: token {token}");
-    let out = Command::new(&pace.git)
-        .args(["-c", &header, "ls-remote", &url, git_ref])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .next()
-            .map(str::to_string)
-    })?
+fn tip_has_workflow_run(options: &Options, tip: &str, file: &str, token: &str) -> bool {
+    forge_api_get(
+        options,
+        &format!("actions/runs?head_sha={tip}&limit=50"),
+        token,
+    )
+    .map(|json| runs_include_workflow(&json, file))
+    .unwrap_or(false)
+}
+
+/// The commit id of a branch from the forge API's `GET branches/{name}` answer. Anything unreadable answers `None`.
+fn branch_tip_from_json(json: &str) -> Option<String> {
+    let doc = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let id = doc.get("commit")?.get("id")?.as_str()?;
+    (id.len() >= 40 && id.bytes().all(|b| b.is_ascii_hexdigit())).then(|| id.to_string())
+}
+
+/// Is `sha` an ancestor of the tip? The forge's compare `tip...sha` lists the commits of `sha` the tip lacks: none means `sha` is contained in the tip. Unreadable or absent: false.
+fn compare_says_contained(json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|doc| doc.get("total_commits")?.as_u64())
+        == Some(0)
+}
+
+/// The current tip of the branch, asked of the forge API itself. A git mirror or copy of the repository may lag the forge (nixnet runs 64 and 65, 2026-11-24: the copy
+/// showed the previous push as the tip, so the newest commit was skipped as "superseded" and never verified), so git is never consulted for this decision.
+fn remote_tip(options: &Options, git_ref: &str, token: &str) -> Option<String> {
+    let branch = git_ref.strip_prefix("refs/heads/")?;
+    let encoded: String = branch
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    forge_api_get(options, &format!("branches/{encoded}"), token)
+        .and_then(|json| branch_tip_from_json(&json))
+}
+
+fn tip_contains(options: &Options, tip: &str, sha: &str, token: &str) -> bool {
+    forge_api_get(options, &format!("compare/{tip}...{sha}"), token)
+        .is_some_and(|json| compare_says_contained(&json))
 }
 
 fn git(pace: &Pace, dir: &Path) -> Command {
@@ -904,14 +931,16 @@ pub fn run(options: &Options, pace: &Pace) -> Result<ExitCode> {
         let event = std::env::var("GITHUB_EVENT_NAME").unwrap_or_default();
         let git_ref = std::env::var("GITHUB_REF").unwrap_or_default();
         if event == "push" && git_ref.starts_with("refs/heads/") {
-            let tip = remote_tip(options, &git_ref, &token, pace);
+            let tip = remote_tip(options, &git_ref, &token);
             let file = std::env::var("GITHUB_WORKFLOW_REF")
                 .ok()
                 .and_then(|r| workflow_file(&r));
             let newer =
                 superseded_by(&event, &git_ref, &options.sha, tip.as_deref()).filter(|newer| {
-                    file.as_deref()
-                        .is_some_and(|f| tip_has_workflow_run(options, newer, f, &token))
+                    tip_contains(options, newer, &options.sha, &token)
+                        && file
+                            .as_deref()
+                            .is_some_and(|f| tip_has_workflow_run(options, newer, f, &token))
                 });
             if let Some(newer) = newer {
                 eprintln!("ccid job-run: superseded: {git_ref} is at {newer} now, whose own run of this workflow checks everything this one would; nothing to do for {}", options.sha);
@@ -1126,6 +1155,46 @@ mod tests {
         ));
         assert!(!runs_include_workflow("not json", "ci.yml"));
         assert!(!runs_include_workflow(r#"{"workflow_runs":[]}"#, "ci.yml"));
+    }
+
+    #[test]
+    fn the_branch_tip_is_read_from_the_forge_answer_only() {
+        let id = "c".repeat(40);
+        assert_eq!(
+            branch_tip_from_json(&format!(r#"{{"name":"main","commit":{{"id":"{id}"}}}}"#)),
+            Some(id)
+        );
+        assert_eq!(branch_tip_from_json("{}"), None);
+        assert_eq!(branch_tip_from_json(r#"{"commit":{"id":"short"}}"#), None);
+        assert_eq!(branch_tip_from_json("not json"), None);
+    }
+
+    #[test]
+    fn only_a_tip_that_contains_the_commit_may_supersede_it() {
+        assert!(compare_says_contained(
+            r#"{"total_commits":0,"commits":[]}"#
+        ));
+        assert!(
+            !compare_says_contained(r#"{"total_commits":2,"commits":[]}"#),
+            "the commit has work the tip lacks (an ancestor tip, or a forced branch)"
+        );
+        assert!(!compare_says_contained("{}"));
+        assert!(!compare_says_contained("garbage"));
+    }
+
+    /// The lag that skipped nixnet runs 64 and 65: the older commit shown as the tip while the forge is at the run's own commit.
+    #[test]
+    fn a_lagging_tip_cannot_supersede_the_newest_commit() {
+        let newest = "d".repeat(40);
+        // The forge's tip is the run's own commit: nothing supersedes it.
+        assert_eq!(
+            superseded_by("push", "refs/heads/main", &newest, Some(&newest)),
+            None
+        );
+        // A stale (ancestor) tip lacks the run's work: the compare says not contained, so the run is real.
+        assert!(!compare_says_contained(
+            r#"{"total_commits":1,"commits":[{"sha":"x"}]}"#
+        ));
     }
 
     #[test]
