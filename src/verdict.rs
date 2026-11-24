@@ -179,7 +179,7 @@ fn verified(binary: &Path, expected: &str) -> Result<()> {
         }
         hash.update(&buffer[..count]);
     }
-    if format!("{:x}", hash.finalize()) != expected {
+    if hex::encode(hash.finalize()) != expected {
         return Err(failure("Status reporter differs from its declared SHA-256"));
     }
     Ok(())

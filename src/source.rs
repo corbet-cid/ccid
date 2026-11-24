@@ -21,7 +21,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         }
         digest.update(&buffer[..n]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 fn hex_identity(value: &str, sizes: &[usize]) -> bool {
     sizes.contains(&value.len())
@@ -98,7 +98,7 @@ pub fn verify_source(archive: &Path, digest: &str, commit: &str, destination: &P
         snapshot.write_all(&buffer[..size])?;
         actual.update(&buffer[..size]);
     }
-    if format!("{:x}", actual.finalize()) != digest {
+    if hex::encode(actual.finalize()) != digest {
         return Err(failure("Source archive SHA-256 mismatch"));
     }
     snapshot.rewind()?;

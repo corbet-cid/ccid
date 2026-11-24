@@ -506,10 +506,9 @@ pub(crate) fn namespace_dir(root: &Path, url: &str, branch: &str, job: &str) -> 
         })
         .take(48)
         .collect();
-    let digest = format!(
-        "{:x}",
-        sha2::Sha256::digest(format!("{canonical}\n{branch}\n{job}").as_bytes())
-    );
+    let digest = hex::encode(sha2::Sha256::digest(
+        format!("{canonical}\n{branch}\n{job}").as_bytes(),
+    ));
     Ok(root
         .join("ccid-coalesce")
         .join(format!("{readable}-{digest}")))
@@ -1620,7 +1619,7 @@ fn build_inner(planned: &PlannedBuild, trigger: &Trigger) -> Result<BuildOutput>
     // durable evidence before any gate runs (namespace dir survives workdir
     // resets and later cleanups).
     let resolved_bytes = read_full_lock(&planned.workdir)?;
-    let resolved_hash = format!("{:x}", sha2::Sha256::digest(&resolved_bytes));
+    let resolved_hash = hex::encode(sha2::Sha256::digest(&resolved_bytes));
     retain_resolved_evidence(planned, &selected, &resolved_bytes, &resolved_hash)?;
     let pre = lock_graph(&planned.workdir)?;
     let gates = run_gates(planned, &resolved_bytes);
@@ -1853,7 +1852,7 @@ fn stage_consumer(dir: &Path, spec: &PushSpec, deadline: Instant) -> Result<Plan
     // Manifest: pin match, job opt-in, refresh scope, checks. Jobs::plan
     // validates selection and command shape.
     let manifest_bytes = std::fs::read(work.join(".ci/ccid.toml"))?;
-    let manifest_sha = format!("{:x}", sha2::Sha256::digest(&manifest_bytes));
+    let manifest_sha = hex::encode(sha2::Sha256::digest(&manifest_bytes));
     let manifest: toml::Value = toml::from_str(std::str::from_utf8(&manifest_bytes)?)?;
     let tool_revision = manifest
         .get("render")

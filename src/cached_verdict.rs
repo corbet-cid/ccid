@@ -155,7 +155,7 @@ impl KeyComponents {
     }
 
     pub fn key_hex(&self) -> Result<String> {
-        Ok(format!("{:x}", Sha256::digest(self.canonical_bytes()?)))
+        Ok(hex::encode(Sha256::digest(self.canonical_bytes()?)))
     }
 }
 
@@ -798,7 +798,7 @@ fn digest_of<'a>(root: &Path, entries: impl IntoIterator<Item = &'a TreeEntry>) 
         hash.update(payload.as_bytes());
         hash.update(b"\n");
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex::encode(hash.finalize()))
 }
 
 #[cfg(test)]
@@ -1173,7 +1173,7 @@ fn add_tool(
             "Verdict key cannot identify tool {role:?}: {error}"
         ))
     })?;
-    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let digest = hex::encode(Sha256::digest(identity.as_bytes()));
     bind_tool(tools, role, digest);
     Ok(identity)
 }
@@ -1764,13 +1764,13 @@ pub(crate) fn prepare_resolved(
     // store keeps measured read-sets for, so a changed toolchain, lock, declared environment or
     // command starts over from the manifest's measurement (see `read_sets`).
     let identity = check_identity_payload(check, environment, root)?;
-    let check_identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&identity)?));
+    let check_identity = hex::encode(Sha256::digest(serde_json::to_vec(&identity)?));
     let checkout_dependencies = git_dependencies(root, commit_id)?;
     let git_dependencies = resolved
         .cloned()
         .unwrap_or_else(|| checkout_dependencies.clone());
     let toolchain = toolchain(check, environment)?;
-    let profile = format!("{:x}", Sha256::digest(DEV_PROFILE.as_bytes()));
+    let profile = hex::encode(Sha256::digest(DEV_PROFILE.as_bytes()));
     let definition = definition_digest(
         check_name,
         &check_identity,
@@ -1900,10 +1900,7 @@ fn definition_digest(
         "profile": profile,
         "epoch": crate::cached::VERDICT_EPOCH,
     });
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&payload)?)
-    ))
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&payload)?)))
 }
 
 /// The output-store subject of one prepared check.

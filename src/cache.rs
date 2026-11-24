@@ -112,7 +112,7 @@ pub(crate) fn target_directory(root: &Path, identity: &str, env: &Environment) -
             })
             .take(48)
             .collect();
-        let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+        let digest = hex::encode(Sha256::digest(identity.as_bytes()));
         base.join("targets").join(format!("{readable}-{digest}"))
     };
     Ok(if path.is_absolute() {
@@ -663,7 +663,7 @@ impl StableSource {
             ffi::OsStrExt,
             fs::{DirBuilderExt, MetadataExt},
         };
-        let digest = format!("{:x}", Sha256::digest(target.as_os_str().as_bytes()));
+        let digest = hex::encode(Sha256::digest(target.as_os_str().as_bytes()));
         let root = Path::new("/tmp").join(format!("ccid-{}", &digest[..16]));
         match fs::symlink_metadata(&root) {
             Ok(meta) if meta.is_dir() && meta.uid() == rustix::process::geteuid().as_raw() => {
@@ -814,7 +814,7 @@ fn scan(root: &Path, relative: &Path, entries: &mut BTreeMap<PathBuf, Entry>) ->
             "Source freshness only supports regular files, directories and verified symlinks",
         ));
     };
-    let digest = format!("{:x}", hash.finalize());
+    let digest = hex::encode(hash.finalize());
     entries.insert(
         relative.into(),
         Entry {

@@ -1116,7 +1116,7 @@ mod shim_runs {
     }
 
     fn digest(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
+        hex::encode(Sha256::digest(bytes))
     }
 
     fn write_tool(path: &Path, bytes: &[u8]) {

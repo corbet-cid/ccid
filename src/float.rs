@@ -94,13 +94,10 @@ fn digest_of(
         commits,
         locks: locks
             .iter()
-            .map(|(path, bytes)| (path.as_str(), format!("{:x}", Sha256::digest(bytes))))
+            .map(|(path, bytes)| (path.as_str(), hex::encode(Sha256::digest(bytes))))
             .collect(),
     };
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&canonical)?)
-    ))
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&canonical)?)))
 }
 
 /// A repository-relative lock path as a plain relative path (no `..`, no root).

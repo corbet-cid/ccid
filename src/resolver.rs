@@ -1214,7 +1214,7 @@ fn verify_tool_pin(
     if bytes.len() > 64 * 1024 * 1024 {
         return Err(failure("cfrg binary too large"));
     }
-    let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let digest = hex::encode(sha2::Sha256::digest(&bytes));
     if digest != pin.binary_sha256 {
         return Err(failure("cfrg binary digest mismatch"));
     }

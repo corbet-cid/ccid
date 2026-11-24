@@ -230,7 +230,7 @@ fn prepare_state(
             hash.update(fs::read(file)?);
         }
     }
-    let key = format!("{:x}", hash.finalize());
+    let key = hex::encode(hash.finalize());
     let lock = OpenOptions::new()
         .read(true)
         .write(true)

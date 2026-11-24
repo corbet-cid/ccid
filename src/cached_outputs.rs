@@ -235,7 +235,7 @@ fn index_path(index_dir: &Path, key: &str) -> PathBuf {
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Write one immutable blob. The name is its digest; a damaged existing blob is

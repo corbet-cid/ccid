@@ -755,7 +755,7 @@ fn run_checks_inner(
         || value(&environment, "CARGO_BUILD_TARGET_DIR").is_some();
     let target = cache::target_directory(&root, &identity, &environment)?;
     event(
-        json!({"event":"plan", "project":slug,"checks":selected,"budget":resources,"linker_request":linker,"repository":identity,"target_directory":target,"source_commit":value(&environment,"CI_COMMIT_SHA"),"manifest_sha256":format!("{:x}",Sha256::digest(&bytes)),"tool_revision":SOURCE_REVISION}),
+        json!({"event":"plan", "project":slug,"checks":selected,"budget":resources,"linker_request":linker,"repository":identity,"target_directory":target,"source_commit":value(&environment,"CI_COMMIT_SHA"),"manifest_sha256":hex::encode(Sha256::digest(&bytes)),"tool_revision":SOURCE_REVISION}),
     );
     if plan {
         return Ok(());

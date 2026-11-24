@@ -81,7 +81,7 @@ fn channel_json_entries_are_published_with_the_named_digest() {
             "release {revision} ({file}, class {class}) cannot be fetched from the package registry: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let actual = format!("{:x}", Sha256::digest(&output.stdout));
+        let actual = hex::encode(Sha256::digest(&output.stdout));
         assert_eq!(
             actual, digest,
             "release {revision} ({file}, class {class}): the registry's digest differs from the channel's"

@@ -102,7 +102,7 @@ pub(super) fn receive(target: &Path, expected: &str, mut input: impl Read) -> Re
         temporary.write_all(&buffer[..n])?;
     }
     temporary.as_file().sync_all()?;
-    if format!("{:x}", hash.finalize()) != expected {
+    if hex::encode(hash.finalize()) != expected {
         return Err("Source upload checksum mismatch".into());
     }
     #[cfg(unix)]

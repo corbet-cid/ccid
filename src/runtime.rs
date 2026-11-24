@@ -207,7 +207,7 @@ pub(crate) fn validate(config: Option<&Config>, toolchain: Option<&ToolchainConf
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn namespace(repository_url: &str) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(repository_url.as_bytes()))[..24].to_owned()
+    hex::encode(Sha256::digest(repository_url.as_bytes()))[..24].to_owned()
 }
 
 #[cfg(unix)]
@@ -437,7 +437,7 @@ mod setup {
         if !status.success() {
             return Err(failure(format!("git archive HEAD failed ({status})")));
         }
-        Ok(Some(format!("{:x}", hasher.finalize())))
+        Ok(Some(hex::encode(hasher.finalize())))
     }
 
     fn prepend(path: &Path, rest: &OsStr) -> Result<String> {

@@ -751,7 +751,7 @@ fn render_outputs(
         schema: 1,
         generator: GENERATOR,
         tool_revision: &config.tool_revision,
-        manifest_sha256: format!("{:x}", Sha256::digest(bytes)),
+        manifest_sha256: hex::encode(Sha256::digest(bytes)),
         jobs: BTreeMap::new(),
         push_consumers: BTreeMap::new(),
     };

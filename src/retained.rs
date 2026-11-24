@@ -99,7 +99,7 @@ fn file_digest(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// The regular files below `root` (relative path to digest); anything else is refused.
@@ -152,7 +152,7 @@ pub fn digest_of(path: &Path) -> Result<String> {
         hasher.update(digest.as_bytes());
         hasher.update(b"\n");
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn root_of(options: &Options) -> Result<PathBuf> {

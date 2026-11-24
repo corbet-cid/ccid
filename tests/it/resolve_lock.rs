@@ -163,7 +163,7 @@ fn source_digest(repo: &Path) -> String {
         hasher.update(name);
         hasher.update(fs::read(repo.join(String::from_utf8_lossy(name).as_ref())).unwrap());
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn setup(manifest: &str, npm_status: &str) -> (Fixture, Vec<(&'static str, Option<String>)>) {
@@ -189,7 +189,7 @@ fn success_retains_lock_layout_digest_and_block() {
         fs::metadata(&retained).unwrap().permissions().mode() & 0o777,
         0o644
     );
-    let digest = format!("{:x}", Sha256::digest(LOCK_FIXTURE.as_bytes()));
+    let digest = hex::encode(Sha256::digest(LOCK_FIXTURE.as_bytes()));
     assert!(run.stdout.contains(&format!("{digest}  package-lock.json")));
     assert!(run.stdout.contains("---LOCK-BEGIN---"));
     assert!(run.stdout.contains(LOCK_FIXTURE));

@@ -247,7 +247,7 @@ fn digests(files: &[(&str, String)]) -> BTreeMap<String, String> {
         let bytes = fs::read(root.path().join(relative)).unwrap();
         out.insert(
             relative.display().to_string(),
-            format!("{:x}", Sha256::digest(&bytes)),
+            hex::encode(Sha256::digest(&bytes)),
         );
     }
     // A second render changes nothing and the check is clean.

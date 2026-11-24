@@ -187,16 +187,13 @@ pub(crate) fn commands_digest(check: &Check) -> Result<String> {
     {
         environment.retain(|name| name.as_str() != Some(crate::float::RESOLUTION_ENV));
     }
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&value)?)))
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&value)?)))
 }
 
 /// The digest of a `cache_inputs` list: its sorted, de-duplicated globs.
 pub(crate) fn inputs_digest(globs: &[String]) -> Result<String> {
     let sorted: BTreeSet<&String> = globs.iter().collect();
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(&sorted)?)
-    ))
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&sorted)?)))
 }
 
 /// The first path component of every tree entry, minus tool state: the top-level names the
@@ -218,7 +215,7 @@ pub(crate) fn layout_digest<'a>(paths: impl IntoIterator<Item = &'a str>) -> Str
         hash.update(name.as_bytes());
         hash.update([0]);
     }
-    format!("{:x}", hash.finalize())
+    hex::encode(hash.finalize())
 }
 
 /// The revision a measurement made by this build names in its provenance.

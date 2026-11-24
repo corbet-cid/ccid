@@ -367,7 +367,7 @@ fn source_map(entries: &[(&str, &str)]) -> toml::Value {
 
 fn branch_exclusion(fixture: &ExceptionFixture) -> Exclusion {
     let bytes = fs::read(fixture.root.join("src/lib.rs")).expect("fixture source");
-    let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let digest = hex::encode(sha2::Sha256::digest(&bytes));
     Exclusion {
         file: "src/lib.rs".to_owned(),
         line: 1,
@@ -1641,7 +1641,7 @@ fn convert_committed_fixtures_round_trip() {
             };
             if stub.branch.is_some() {
                 let bytes = fs::read(root.join(&entry.file)).expect("stub bytes");
-                let digest = format!("{:x}", sha2::Sha256::digest(&bytes));
+                let digest = hex::encode(sha2::Sha256::digest(&bytes));
                 let mut table = toml::map::Map::new();
                 table.insert(entry.file.clone(), toml::Value::String(digest));
                 stub.evidence_sources = Some(toml::Value::Table(table));

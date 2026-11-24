@@ -227,7 +227,7 @@ fn fleet_show_and_validate_report_the_digest() {
         .map(|(fleet, _)| fleet)
         .unwrap_or_else(|| panic!("{line}"));
     use sha2::Digest;
-    assert_eq!(format!("{:x}", sha2::Sha256::digest(canonical)), digest);
+    assert_eq!(hex::encode(sha2::Sha256::digest(canonical)), digest);
     assert_eq!(shown["runtime_forge_hosts"], serde_json::json!([]));
 
     // This machine's forge host spellings are reported, and never change the data or its digest.

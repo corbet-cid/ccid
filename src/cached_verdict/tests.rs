@@ -1287,8 +1287,8 @@ fn the_declared_cache_tools_argv_is_the_version_query_with_a_dash_v_fallback() {
     // `--version` still wins when the tool answers it: the fallback never shadows the
     // primary query.
     both_tool(tools.path());
-    let long = format!("{:x}", Sha256::digest("both-tool version 1.0 (long)"));
-    let short = format!("{:x}", Sha256::digest("both-tool v1.0 (short)"));
+    let long = hex::encode(Sha256::digest("both-tool version 1.0 (long)"));
+    let short = hex::encode(Sha256::digest("both-tool v1.0 (short)"));
     assert_ne!(long, short);
     let mut bare_both = check();
     bare_both.commands = vec![vec!["sh".into(), "-c".into(), "true".into()]];
@@ -3218,7 +3218,7 @@ fn two_cargos_in_one_check_are_keyed_apart_and_a_single_cargo_keeps_its_key() {
 fn bind_tool_is_order_independent_for_three_tools() {
     let digests: Vec<String> = ["a", "b", "c"]
         .iter()
-        .map(|seed| format!("{:x}", Sha256::digest(seed.as_bytes())))
+        .map(|seed| hex::encode(Sha256::digest(seed.as_bytes())))
         .collect();
     let mut first = BTreeMap::new();
     let mut second = BTreeMap::new();

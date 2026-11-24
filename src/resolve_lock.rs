@@ -242,7 +242,12 @@ fn layout_dir(root: &Path, revision: &str) -> PathBuf {
 
 fn report(resolved: &[u8], print_lock: bool) -> Result<()> {
     let mut out = std::io::stdout().lock();
-    writeln!(out, "{:x}  {}", Sha256::digest(resolved), LOCK_NAME)?;
+    writeln!(
+        out,
+        "{}  {}",
+        hex::encode(Sha256::digest(resolved)),
+        LOCK_NAME
+    )?;
     if print_lock {
         writeln!(out, "---LOCK-BEGIN---")?;
         out.write_all(resolved)?;

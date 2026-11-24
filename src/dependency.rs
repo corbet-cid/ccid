@@ -531,7 +531,7 @@ fn direct_breaking_changes(
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn source_tree_digest(root: &Path) -> Result<String> {

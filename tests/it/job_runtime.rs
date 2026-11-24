@@ -142,7 +142,7 @@ esac"#,
     }
 
     fn state(&self) -> PathBuf {
-        let namespace = format!("{:x}", Sha256::digest(REPOSITORY_URL.as_bytes()));
+        let namespace = hex::encode(Sha256::digest(REPOSITORY_URL.as_bytes()));
         self.root.join("cache/ccid-cached").join(&namespace[..24])
     }
 
@@ -380,7 +380,7 @@ fn the_runtime_sets_up_the_scripts_environment_and_holds_its_locks_across_exec()
         .unwrap();
     assert_eq!(
         seen.get("SOURCE_SHA256"),
-        Some(&format!("{:x}", Sha256::digest(&archive.stdout)))
+        Some(&hex::encode(Sha256::digest(&archive.stdout)))
     );
     // PATH: stable cargo, the install root, this ccid, proto, then the tools (the last built
     // first) in front of the job's own PATH.

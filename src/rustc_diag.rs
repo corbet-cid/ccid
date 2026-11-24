@@ -234,7 +234,7 @@ fn transform_with(sites: Vec<Site>, original: &str) -> Result<String> {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 fn is_self(path: &Path) -> bool {

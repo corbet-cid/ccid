@@ -279,7 +279,7 @@ pub(crate) fn run_cached_with_environment(
         json!({"event":"cached-plan","project":project,"checks":selected,
         "remote_cache":remote.is_some(),"force":force,
         "source_commit":value(&environment,"CI_COMMIT_SHA"),
-        "manifest_sha256":format!("{:x}",Sha256::digest(&bytes)),"tool_revision":SOURCE_REVISION}),
+        "manifest_sha256":hex::encode(Sha256::digest(&bytes)),"tool_revision":SOURCE_REVISION}),
     );
     if plan_only {
         let all_hit = plan(

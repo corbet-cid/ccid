@@ -40,7 +40,7 @@ fn reporter(exit: i32) -> Reporter {
     let dir = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(shared_script(), dir.path().join("status")).unwrap();
     fs::write(dir.path().join("exit"), exit.to_string()).unwrap();
-    let sha = format!("{:x}", Sha256::digest(fs::read(shared_script()).unwrap()));
+    let sha = hex::encode(Sha256::digest(fs::read(shared_script()).unwrap()));
     Reporter { dir, sha }
 }
 impl Reporter {

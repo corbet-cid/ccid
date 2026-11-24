@@ -519,7 +519,7 @@ fn source_digest(repo: &Path, outputs: &[&str]) -> String {
         digest.update(fs::read(repo.join(&path)).unwrap());
         digest.update([0]);
     }
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 #[test]

@@ -158,13 +158,10 @@ impl Slot {
         commands: &str,
         definition: &str,
     ) -> Slot {
-        let id = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&json!([repository, check, commands, definition]))
-                    .unwrap_or_default()
-            )
-        );
+        let id = hex::encode(Sha256::digest(
+            serde_json::to_vec(&json!([repository, check, commands, definition]))
+                .unwrap_or_default(),
+        ));
         Slot {
             directory: store.join(DIR),
             id,

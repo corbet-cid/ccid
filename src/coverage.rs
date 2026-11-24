@@ -428,7 +428,7 @@ fn validate_exclusion(entry: &Exclusion, root: &Path) -> std::result::Result<(),
                 return Err("Exclusion evidence changed; review it".to_owned());
             }
             let bytes = fs::read(&dependency).map_err(|error| error.to_string())?;
-            if format!("{:x}", sha2::Sha256::digest(&bytes)) != digest {
+            if hex::encode(sha2::Sha256::digest(&bytes)) != digest {
                 return Err("Exclusion evidence changed; review it".to_owned());
             }
         }

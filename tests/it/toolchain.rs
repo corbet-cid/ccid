@@ -548,7 +548,7 @@ mod wasm {
             .unwrap();
         assert!(status.success());
         let digest = if good_digest {
-            format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()))
+            hex::encode(Sha256::digest(fs::read(&archive).unwrap()))
         } else {
             "0".repeat(64)
         };

@@ -316,7 +316,7 @@ impl Closure<'_> {
                         }
                         hasher.update(&buffer[..n]);
                     }
-                    if format!("{:x}", hasher.finalize()) != oid {
+                    if hex::encode(hasher.finalize()) != oid {
                         return Err("Git LFS content mismatch".into());
                     }
                     snapshot.rewind()?;

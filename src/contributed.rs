@@ -177,7 +177,7 @@ impl Catalog {
             }
             canonical.push('\n');
         }
-        let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+        let digest = hex::encode(Sha256::digest(canonical.as_bytes()));
         Ok(Self {
             projects,
             keys,

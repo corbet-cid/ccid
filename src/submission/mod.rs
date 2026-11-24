@@ -157,7 +157,7 @@ fn rows(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 fn sha(data: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(data.as_ref()))
+    hex::encode(Sha256::digest(data.as_ref()))
 }
 fn digest(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
@@ -170,7 +170,7 @@ fn digest(path: &Path) -> Result<String> {
         }
         hash.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex::encode(hash.finalize()))
 }
 fn matches(pattern: &str, value: &str) -> bool {
     regex::Regex::new(pattern)

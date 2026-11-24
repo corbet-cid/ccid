@@ -226,7 +226,7 @@ impl Fleet {
     }
 
     pub fn digest(&self) -> Result<String> {
-        Ok(format!("{:x}", Sha256::digest(self.canonical_bytes()?)))
+        Ok(hex::encode(Sha256::digest(self.canonical_bytes()?)))
     }
 
     /// The forge's host names: the channel's `forge_hosts`, then this machine's
