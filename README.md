@@ -201,6 +201,16 @@ kind = "commands"
 commands = [["bash", "scripts/check-documents.sh"]]
 ```
 
+`kind = "declarative"` turns a repository RED when it tracks code (shell, Python, Rust, Go,
+JavaScript/TypeScript and other source extensions, or any file with a `#!` first line); it is meant for
+`nix*` repositories that hold declarative configuration only. `allow = ["scripts/", "*.py", "exact/path"]`
+exempts paths. Code embedded in `.nix` strings is not inspected. Never cached.
+
+```toml
+[checks.no-code]
+kind = "declarative"
+```
+
 Cargo actions are `fmt`, `test`, `clippy`, `check`, `build`. Other options are
 `workspace`, `all_features`, `all_targets`, `features`, `packages`, `exclude`, and `release`.
 All builds/tests use `--locked`. An explicit toolchain uses `rustup run`, which
