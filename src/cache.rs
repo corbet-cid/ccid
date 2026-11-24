@@ -1085,17 +1085,17 @@ mod tests {
         let mut env = Environment::from([
             ("CARGO_HOME".into(), "/repo/cache/cargo".into()),
             ("RUSTUP_HOME".into(), "/repo/cache/rustup".into()),
-            ("CCID_CARGO_HOME".into(), "/home/richc/.cargo".into()),
-            ("CCID_RUSTUP_HOME".into(), "/home/richc/.rustup".into()),
+            ("CCID_CARGO_HOME".into(), "/opt/runner/.cargo".into()),
+            ("CCID_RUSTUP_HOME".into(), "/opt/runner/.rustup".into()),
         ]);
         apply_canonical_rust_homes(&mut env);
         assert_eq!(
             value(&env, "CARGO_HOME").as_deref(),
-            Some("/home/richc/.cargo")
+            Some("/opt/runner/.cargo")
         );
         assert_eq!(
             value(&env, "RUSTUP_HOME").as_deref(),
-            Some("/home/richc/.rustup")
+            Some("/opt/runner/.rustup")
         );
         // Without the runner's names (a workstation, a plain run) the script's values stand.
         let mut plain = Environment::from([("CARGO_HOME".into(), "/mine".into())]);
