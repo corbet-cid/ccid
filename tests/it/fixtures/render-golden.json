@@ -12,9 +12,8 @@
     ".forgejo/workflows/upstream-sync.yml": "4778e7a0aa5247feb27aea9d36eb3c311f28f6b481e8d75b66aa4063614c4b26"
   },
   "manual-remote": {
-    ".ci/jobs.json": "e2832d911c7c2bc3f8b2e84da8f8fb9bc65bd13d3a72e81c68da2e40507ed2ba",
-    ".forgejo/workflows/ci.yml": "85682ae4a40061ac75fcfd871a63d202a8bf96c6a415e2e25bb3338509157119",
-    ".forgejo/workflows/portable-paths.yml": "c93a68fe06d970c8959a2ed7a9badcb311450f3e461077a7ce434d4ad08665ca"
+    ".ci/jobs.json": "3b448ae03ef8bb7f5a2c431ae2731baa190efca2ff0fe92f8dca50767af7d231",
+    ".forgejo/workflows/ci.yml": "85682ae4a40061ac75fcfd871a63d202a8bf96c6a415e2e25bb3338509157119"
   },
   "pinned-crow": {
     ".ci/jobs.json": "950ebca3baa7605b36f483eeb55fe03925280dc14f123d6b97e0384cbb37dcf3",
@@ -22,9 +21,8 @@
     ".forgejo/workflows/ci.yml": "e1b3b67d9b78887e7f21e45187e5672801e95b8b75b8bca5864dc9c2b294ed1c"
   },
   "push-pr": {
-    ".ci/jobs.json": "13df3bd13a9bda15f452ff3ced9ce28ba1490998953f626b53c0d783b60a1d13",
+    ".ci/jobs.json": "2c2d53462a3f31f9c6e7607e11c5336e6139d0724f1a06af660026d91bb7a474",
     ".forgejo/workflows/ci.yml": "fdcc246fb49aa8e8ba54dfd0d27e53871da06773e680108d7041304b96360874",
-    ".forgejo/workflows/portable-paths.yml": "c93a68fe06d970c8959a2ed7a9badcb311450f3e461077a7ce434d4ad08665ca",
     ".forgejo/workflows/pr.yml": "7f364870e2bfc457e702cce398b4862e7625d5f1fae533be7d276213f9b35928"
   }
 }
