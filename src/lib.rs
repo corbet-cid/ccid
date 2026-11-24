@@ -92,6 +92,7 @@ pub mod compile_cache;
 pub mod content_pins;
 pub mod contributed;
 pub mod coverage;
+mod declarative;
 mod dependency;
 pub mod first_party;
 mod fixtures;
@@ -361,6 +362,9 @@ pub struct Check {
     npm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pypi: Option<String>,
+    /// `kind = "declarative"` only: tracked paths that may hold code anyway (see `declarative`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    allow: Vec<String>,
 }
 /// Read and validate the manifest header; returns the parsed manifest and its exact bytes.
 /// Read a file, naming it in the error: a bare "No such file or directory" says nothing about a manifest that is missing.
@@ -966,6 +970,10 @@ fn run_checks_inner(
                     for command in &check.commands {
                         runner.run(command, false)?;
                     }
+                }
+                "declarative" => {
+                    runner.nix_inventory = None;
+                    declarative::run(check, &runner.root)?;
                 }
                 "pack" => {
                     runner.nix_inventory = None;
